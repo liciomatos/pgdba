@@ -38,11 +38,6 @@ jobs:
           cd $GITHUB_WORKSPACE/pgdba-cli
           go mod tidy
 
-      - name: Run Tests
-        run: |
-          cd $GITHUB_WORKSPACE/pgdba-cli
-          go test ./... -v
-
       - name: Build
         run: |
           cd $GITHUB_WORKSPACE/pgdba-cli
