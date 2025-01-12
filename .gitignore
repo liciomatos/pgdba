@@ -1,0 +1,45 @@
+# Ignore the docker-compose file
+docker-compose.yaml
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build output
+*.test
+*.out
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.coverprofile
+
+# Output of the go coverage tool
+*.cov
+
+# Output of the go build tool
+*.a
+*.o
+*.e
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Go modules
+vendor/
+go.sum
+
+# IDE and editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# Logs
+*.log
+
+# Dependency directories
+node_modules/
