@@ -36,7 +36,10 @@ jobs:
 
       - name: Chekc path
         run: echo $GITHUB_WORKSPACE
-        
+
+      - name: list path
+        run: ls -la
+
       - name: Install dependencies
         run: go mod download
 
