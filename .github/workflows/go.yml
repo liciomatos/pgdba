@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+          
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
@@ -35,7 +35,7 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Install dependencies
-        run: cd pgdba-cli/
+        run: cd pgdba-cli/ &&
              go mod download
 
       - name: Build
