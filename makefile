@@ -5,7 +5,7 @@ DOCKER_COMPOSE_FILE=docker-compose.yaml
 # Build the Go project
 build:
     @echo "Building the project..."
-    GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
+    GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) ./$(BINARY_NAME)
 
 # Run the Go project
 run: build
