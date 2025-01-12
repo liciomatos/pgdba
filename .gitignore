@@ -29,7 +29,7 @@ go.work.sum
 
 # Go modules
 vendor/
-go.sum
+
 
 # IDE and editor specific files
 .vscode/
