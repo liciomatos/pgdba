@@ -41,7 +41,7 @@ jobs:
         run: cd $GITHUB_WORKSPACE/pgdba-cli && go mod download
 
       - name: Build
-        run:  go build -o pgdba-cli pgdba-cli/main.go
+        run:  go build -o pgdba-cli pgdba-cli/*.go
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
