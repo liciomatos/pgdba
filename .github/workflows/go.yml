@@ -38,10 +38,7 @@ jobs:
         run: echo $GITHUB_WORKSPACE
 
       - name: list path
-        run: cd $GITHUB_WORKSPACE/pgdba-cli && ls -la
-
-      - name: Install dependencies
-        run: go mod download
+        run: cd $GITHUB_WORKSPACE/pgdba-cli && go mod download
 
       - name: Build
         run: make build
