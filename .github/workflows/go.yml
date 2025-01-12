@@ -44,7 +44,7 @@ jobs:
         run: go test ./...
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: pgdba-cli
           path: pgdba-cli
