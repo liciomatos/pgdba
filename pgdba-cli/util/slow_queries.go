@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type SlowQueriesModel struct {
@@ -15,7 +16,7 @@ type SlowQueriesModel struct {
 	initialModel func() tea.Model
 }
 
-func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
+func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 	query := `
         SELECT
             queryid,
@@ -34,8 +35,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
-		fmt.Printf("Error executing query: %v\n", err)
-		return SlowQueriesModel{}
+		return NewErrorModel(err, "Loading slow queries", initialModel)
 	}
 	defer rows.Close()
 
@@ -59,8 +59,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
 
 		err := rows.Scan(&queryID, &query, &calls, &totalExecTime, &meanExecTime, &stddevExecTime, &rowsReturned)
 		if err != nil {
-			fmt.Printf("Error scanning row: %v\n", err)
-			return SlowQueriesModel{}
+			return NewErrorModel(err, "Scanning slow queries row", initialModel)
 		}
 
 		// Replace newline characters with spaces to prevent wrapping
@@ -102,6 +101,8 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "esc":
 			return m.initialModel(), nil
+		case "r":
+			return IdentifySlowQueries(m.initialModel), nil
 		}
 	}
 
@@ -114,5 +115,6 @@ func (m SlowQueriesModel) View() string {
 	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
 	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
 	s += m.table.View()
+	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • r refresh • q back")
 	return s
 }

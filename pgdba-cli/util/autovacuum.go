@@ -1,0 +1,166 @@
+package util
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/liciomatos/pgdba-cli/config"
+	"github.com/lib/pq"
+
+	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+type AutovacuumModel struct {
+	table         table.Model
+	initialModel  func() tea.Model
+	confirmVacuum bool
+	schemaName    string
+	tableName     string
+}
+
+func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
+	query := `
+        SELECT
+            schemaname,
+            relname,
+            n_dead_tup,
+            n_live_tup,
+            CASE WHEN n_live_tup + n_dead_tup = 0 THEN NULL
+                 ELSE ROUND(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
+            END AS dead_pct,
+            last_autovacuum,
+            last_autoanalyze,
+            autovacuum_count
+        FROM pg_stat_user_tables
+        ORDER BY n_dead_tup DESC
+        LIMIT 20;
+    `
+
+	rows, err := config.Config.DB.Query(query)
+	if err != nil {
+		return NewErrorModel(err, "Loading autovacuum monitor", initialModel)
+	}
+	defer rows.Close()
+
+	columns := []table.Column{
+		{Title: "Schema", Width: 12},
+		{Title: "Table", Width: 25},
+		{Title: "Dead Tuples", Width: 12},
+		{Title: "Live Tuples", Width: 12},
+		{Title: "Dead %", Width: 8},
+		{Title: "Last Autovacuum", Width: 20},
+		{Title: "Last Autoanalyze", Width: 20},
+		{Title: "Vacuum Count", Width: 13},
+	}
+
+	var rowsData []table.Row
+	for rows.Next() {
+		var schemaname, relname string
+		var nDeadTup, nLiveTup, autovacuumCount int64
+		var deadPct sql.NullFloat64
+		var lastAutovacuum, lastAutoanalyze *time.Time
+
+		if err := rows.Scan(&schemaname, &relname, &nDeadTup, &nLiveTup, &deadPct,
+			&lastAutovacuum, &lastAutoanalyze, &autovacuumCount); err != nil {
+			return NewErrorModel(err, "Scanning autovacuum row", initialModel)
+		}
+
+		formatTime := func(t *time.Time) string {
+			if t == nil {
+				return "never"
+			}
+			return t.Format("2006-01-02 15:04")
+		}
+
+		deadPctStr := "N/A"
+		if deadPct.Valid {
+			deadPctStr = fmt.Sprintf("%.1f", deadPct.Float64)
+		}
+
+		rowsData = append(rowsData, table.Row{
+			schemaname,
+			relname,
+			fmt.Sprintf("%d", nDeadTup),
+			fmt.Sprintf("%d", nLiveTup),
+			deadPctStr,
+			formatTime(lastAutovacuum),
+			formatTime(lastAutoanalyze),
+			fmt.Sprintf("%d", autovacuumCount),
+		})
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithRows(rowsData),
+		table.WithFocused(true),
+	)
+
+	return AutovacuumModel{table: t, initialModel: initialModel}
+}
+
+func (m AutovacuumModel) Init() tea.Cmd { return nil }
+
+func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "esc":
+			if m.confirmVacuum {
+				m.confirmVacuum = false
+				return m, nil
+			}
+			return m.initialModel(), nil
+		case "r":
+			return CheckAutovacuum(m.initialModel), nil
+		case "v":
+			if m.confirmVacuum {
+				m.confirmVacuum = false
+				return m, nil
+			}
+			selectedRow := m.table.SelectedRow()
+			if len(selectedRow) == 0 {
+				return m, nil
+			}
+			m.schemaName = selectedRow[0]
+			m.tableName = selectedRow[1]
+			m.confirmVacuum = true
+			return m, nil
+		case "y":
+			if m.confirmVacuum {
+				query := fmt.Sprintf("VACUUM ANALYZE %s.%s",
+					pq.QuoteIdentifier(m.schemaName),
+					pq.QuoteIdentifier(m.tableName))
+				if _, err := config.Config.DB.Exec(query); err != nil {
+					return NewErrorModel(err,
+						fmt.Sprintf("VACUUM ANALYZE %s.%s", m.schemaName, m.tableName),
+						m.initialModel), nil
+				}
+				return CheckAutovacuum(m.initialModel), nil
+			}
+		case "n":
+			if m.confirmVacuum {
+				m.confirmVacuum = false
+				return m, nil
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	return m, cmd
+}
+
+func (m AutovacuumModel) View() string {
+	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
+	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s += m.table.View()
+	if m.confirmVacuum {
+		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
+	} else {
+		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • v vacuum analyze • r refresh • q back")
+	}
+	return s
+}

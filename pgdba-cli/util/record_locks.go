@@ -8,8 +8,8 @@ import (
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
-
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type RecordLocksModel struct {
@@ -19,7 +19,7 @@ type RecordLocksModel struct {
 	pidToTerminate   int
 }
 
-func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
+func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	query := `
         SELECT
             blocked_locks.pid AS blocked_pid,
@@ -55,8 +55,7 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
-		fmt.Printf("Error executing query: %v\n", err)
-		return RecordLocksModel{}
+		return NewErrorModel(err, "Loading record locks", initialModel)
 	}
 	defer rows.Close()
 
@@ -78,8 +77,7 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
 
 		err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication)
 		if err != nil {
-			fmt.Printf("Error scanning row: %v\n", err)
-			return RecordLocksModel{}
+			return NewErrorModel(err, "Scanning record locks row", initialModel)
 		}
 
 		// Replace newline characters with spaces to prevent wrapping
@@ -132,56 +130,35 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.initialModel(), nil
 		case "t":
 			if m.confirmTerminate {
-				if msg.String() == "y" {
-					err := terminateSession(m.pidToTerminate)
-					if err != nil {
-						fmt.Printf("Error terminating session: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
-					}
-				}
 				m.confirmTerminate = false
 				return m, nil
 			}
 			selectedRow := m.table.SelectedRow()
-			m.pidToTerminate, _ = strconv.Atoi(selectedRow[2]) // Assuming Blocking PID is at index 2
+			m.pidToTerminate, _ = strconv.Atoi(selectedRow[2])
 			m.confirmTerminate = true
 			return m, nil
 		case "a":
 			if m.confirmTerminate {
-				if msg.String() == "y" {
-					err := terminateAllSessions(m.table.Rows())
-					if err != nil {
-						fmt.Printf("Error terminating all sessions: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
-					}
-				}
 				m.confirmTerminate = false
 				return m, nil
 			}
 			m.confirmTerminate = true
-			m.pidToTerminate = 0 // Indicate that we are terminating all sessions
+			m.pidToTerminate = 0
 			return m, nil
+		case "r":
+			return CheckRecordLocks(m.initialModel), nil
 		case "y":
 			if m.confirmTerminate {
 				if m.pidToTerminate != 0 {
-					err := terminateSession(m.pidToTerminate)
-					if err != nil {
-						fmt.Printf("Error terminating session: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
+					if err := terminateSession(m.pidToTerminate); err != nil {
+						return NewErrorModel(err, fmt.Sprintf("Terminating session PID %d", m.pidToTerminate), m.initialModel), nil
 					}
 				} else {
-					err := terminateAllSessions(m.table.Rows())
-					if err != nil {
-						fmt.Printf("Error terminating all sessions: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
+					if err := terminateAllSessions(m.table.Rows()); err != nil {
+						return NewErrorModel(err, "Terminating all sessions", m.initialModel), nil
 					}
 				}
-				m.confirmTerminate = false
-				return m, nil
+				return CheckRecordLocks(m.initialModel), nil
 			}
 		case "n":
 			if m.confirmTerminate {
@@ -202,18 +179,18 @@ func (m RecordLocksModel) View() string {
 	s += m.table.View()
 	if m.confirmTerminate {
 		if m.pidToTerminate != 0 {
-			s += fmt.Sprintf("\nAre you sure you want to terminate the session with PID '%d'? (y/n)\n", m.pidToTerminate)
+			s += fmt.Sprintf("\nTerminate session with PID %d? (y/n)\n", m.pidToTerminate)
 		} else {
-			s += "\nAre you sure you want to terminate all sessions? (y/n)\n"
+			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\nPress 't' to terminate the selected session. Press 'a' to terminate all sessions. Press 'q' to quit.\n"
+		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • t terminate • a terminate all • r refresh • q back")
 	}
 	return s
 }
 
 func terminateSession(pid int) error {
-	_, err := config.Config.DB.Exec(fmt.Sprintf("SELECT pg_terminate_backend(%d);", pid))
+	_, err := config.Config.DB.Exec("SELECT pg_terminate_backend($1)", pid)
 	return err
 }
 

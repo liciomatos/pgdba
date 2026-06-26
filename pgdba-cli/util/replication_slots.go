@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type ReplicationSlotsModel struct {
@@ -16,7 +17,7 @@ type ReplicationSlotsModel struct {
 	slotToDelete  string
 }
 
-func CheckReplicationSlotsStatus(initialModel func() tea.Model) ReplicationSlotsModel {
+func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 	query := `
         SELECT
             slot_name,
@@ -28,8 +29,7 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) ReplicationSlots
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
-		fmt.Printf("Error executing query: %v\n", err)
-		return ReplicationSlotsModel{}
+		return NewErrorModel(err, "Loading replication slots", initialModel)
 	}
 	defer rows.Close()
 
@@ -46,8 +46,7 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) ReplicationSlots
 
 		err := rows.Scan(&slotName, &size, &active)
 		if err != nil {
-			fmt.Printf("Error scanning row: %v\n", err)
-			return ReplicationSlotsModel{}
+			return NewErrorModel(err, "Scanning replication slots row", initialModel)
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -82,14 +81,6 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.initialModel(), nil
 		case "d":
 			if m.confirmDelete {
-				if msg.String() == "y" {
-					err := dropReplicationSlot(m.slotToDelete)
-					if err != nil {
-						fmt.Printf("Error dropping replication slot: %v\n", err)
-					} else {
-						return CheckReplicationSlotsStatus(m.initialModel), nil
-					}
-				}
 				m.confirmDelete = false
 				return m, nil
 			}
@@ -97,16 +88,14 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.slotToDelete = selectedRow[0]
 			m.confirmDelete = true
 			return m, nil
+		case "r":
+			return CheckReplicationSlotsStatus(m.initialModel), nil
 		case "y":
 			if m.confirmDelete {
-				err := dropReplicationSlot(m.slotToDelete)
-				if err != nil {
-					fmt.Printf("Error dropping replication slot: %v\n", err)
-				} else {
-					return CheckReplicationSlotsStatus(m.initialModel), nil
+				if err := dropReplicationSlot(m.slotToDelete); err != nil {
+					return NewErrorModel(err, "Dropping replication slot "+m.slotToDelete, m.initialModel), nil
 				}
-				m.confirmDelete = false
-				return m, nil
+				return CheckReplicationSlotsStatus(m.initialModel), nil
 			}
 		case "n":
 			if m.confirmDelete {
@@ -126,14 +115,14 @@ func (m ReplicationSlotsModel) View() string {
 	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
 	s += m.table.View()
 	if m.confirmDelete {
-		s += fmt.Sprintf("\nAre you sure you want to delete the replication slot '%s'? (y/n)\n", m.slotToDelete)
+		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {
-		s += "\nPress 'd' to drop the selected replication slot. Press 'q' to quit.\n"
+		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • d drop • r refresh • q back")
 	}
 	return s
 }
 
 func dropReplicationSlot(slotName string) error {
-	_, err := config.Config.DB.Exec(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", slotName))
+	_, err := config.Config.DB.Exec("SELECT pg_drop_replication_slot($1)", slotName)
 	return err
 }
