@@ -59,11 +59,18 @@ func CheckDashboard() tea.Model {
 	}
 	metrics = append(metrics, dashboardMetric{"Blocked queries", fmt.Sprintf("%d", blockedQueries), blockedLevel})
 
-	// Slow queries (pg_stat_statements — may not be installed)
+	// Slow queries using the configured threshold
+	threshold := config.Config.SlowThresholdMS
+	if threshold <= 0 {
+		threshold = 1000
+	}
 	var slowCount int
-	err := config.Config.DB.QueryRow(`SELECT count(*) FROM pg_stat_statements WHERE mean_exec_time > 100`).Scan(&slowCount)
+	err := config.Config.DB.QueryRow(
+		fmt.Sprintf(`SELECT count(*) FROM pg_stat_statements WHERE mean_exec_time > %d`, threshold),
+	).Scan(&slowCount)
+	slowLabel := fmt.Sprintf("Slow queries (>%dms)", threshold)
 	if err != nil {
-		metrics = append(metrics, dashboardMetric{"Slow queries (>100ms)", "N/A (pg_stat_statements not enabled)", 1})
+		metrics = append(metrics, dashboardMetric{slowLabel, "N/A (pg_stat_statements not enabled)", 1})
 	} else {
 		slowLevel := 0
 		if slowCount > 20 {
@@ -71,7 +78,7 @@ func CheckDashboard() tea.Model {
 		} else if slowCount > 5 {
 			slowLevel = 1
 		}
-		metrics = append(metrics, dashboardMetric{"Slow queries (>100ms)", fmt.Sprintf("%d", slowCount), slowLevel})
+		metrics = append(metrics, dashboardMetric{slowLabel, fmt.Sprintf("%d", slowCount), slowLevel})
 	}
 
 	// Cache hit ratio
@@ -149,18 +156,39 @@ func (m DashboardModel) View() string {
 	)
 	s := fmt.Sprintf("%s%s%s\n%s\n\n", logo, sep, name, conn)
 
-	labelW := 25
+	labelW := 28
 	labelStyle := lipgloss.NewStyle().Width(labelW).Foreground(ColorGray)
 	colors := []lipgloss.Color{ColorGreen, ColorYellow, ColorRed}
 
-	for _, m2 := range m.metrics {
-		label := labelStyle.Render(m2.label)
-		value := lipgloss.NewStyle().Foreground(colors[m2.level]).Bold(m2.level > 0).Render(m2.value)
+	for _, metric := range m.metrics {
+		label := labelStyle.Render(metric.label)
+		value := lipgloss.NewStyle().Foreground(colors[metric.level]).Bold(metric.level > 0).Render(metric.value)
 		s += fmt.Sprintf("  %s  %s\n", label, value)
 	}
 
-	s += "\n" + lipgloss.NewStyle().Foreground(ColorGray).Render("─────────────────────────────────────────────────────────────────") + "\n"
-	s += FooterStyle.Render("1 slow  2 longrun  3 slots  4 locks  5 conn  6 autovac  7 index  8 cache") + "\n"
-	s += FooterStyle.Render("9 users  0 roles  p config  s schema  e ext  D switch-db  v version  r refresh  q quit")
+	// Footer with colored shortcut keys vs labels
+	k := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
+	l := lipgloss.NewStyle().Foreground(ColorGray).Render
+
+	sep2 := lipgloss.NewStyle().Foreground(ColorGray).Render("─────────────────────────────────────────────────────────────────")
+	line1 := k("1") + " " + l("slow") + "  " +
+		k("2") + " " + l("longrun") + "  " +
+		k("3") + " " + l("slots") + "  " +
+		k("4") + " " + l("locks") + "  " +
+		k("5") + " " + l("conn") + "  " +
+		k("6") + " " + l("autovac") + "  " +
+		k("7") + " " + l("index") + "  " +
+		k("8") + " " + l("cache")
+	line2 := k("9") + " " + l("users") + "  " +
+		k("0") + " " + l("roles") + "  " +
+		k("p") + " " + l("config") + "  " +
+		k("s") + " " + l("schema") + "  " +
+		k("e") + " " + l("ext") + "  " +
+		k("D") + " " + l("switch-db") + "  " +
+		k("v") + " " + l("version") + "  " +
+		k("r") + " " + l("refresh") + "  " +
+		k("q") + " " + l("quit")
+
+	s += "\n" + sep2 + "\n" + line1 + "\n" + line2
 	return s
 }

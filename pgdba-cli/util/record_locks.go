@@ -16,6 +16,8 @@ type RecordLocksModel struct {
 	allRows          []table.Row
 	filterText       string
 	filterMode       bool
+	detailMode       bool
+	detailText       string
 	initialModel     func() tea.Model
 	confirmTerminate bool
 	pidToTerminate   int
@@ -85,6 +87,9 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning record locks row", initialModel)
 		}
 
+		fullBlocked := blockedStatement
+		fullBlocking := blockingStatement
+
 		blockedStatement = strings.ReplaceAll(blockedStatement, "\n", " ")
 		blockingStatement = strings.ReplaceAll(blockingStatement, "\n", " ")
 		if len(blockedStatement) > 50 {
@@ -103,6 +108,8 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			blockingStatement,
 			blockedApplication,
 			blockingApplication,
+			fullBlocked,  // row[8] — hidden
+			fullBlocking, // row[9] — hidden
 		})
 	}
 
@@ -140,6 +147,13 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
 		if m.filterMode {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -160,6 +174,16 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
+		case "enter":
+			if !m.confirmTerminate {
+				row := m.table.SelectedRow()
+				if len(row) > 9 {
+					m.detailText = "── Blocked Statement ──\n" + row[8] +
+						"\n\n── Blocking Statement ──\n" + row[9]
+					m.detailMode = true
+				}
+			}
+			return m, nil
 		case "/":
 			if !m.confirmTerminate {
 				m.filterMode = true
@@ -220,6 +244,9 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RecordLocksModel) View() string {
+	if m.detailMode {
+		return RenderQueryDetail("Blocked Queries", m.detailText, m.width)
+	}
 	s := RenderHeader("Blocked Queries") + "\n"
 	s += m.table.View()
 	if m.confirmTerminate {
@@ -229,7 +256,7 @@ func (m RecordLocksModel) View() string {
 			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • t terminate • a terminate all • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a terminate all • / filter • r refresh • q back")
 	}
 	return s
 }

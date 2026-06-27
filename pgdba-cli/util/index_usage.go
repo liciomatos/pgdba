@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/liciomatos/pgdba-cli/config"
 
@@ -14,7 +15,10 @@ type IndexUsageModel struct {
 	allRows      []table.Row
 	filterText   string
 	filterMode   bool
+	detailMode   bool
+	detailText   string
 	initialModel func() tea.Model
+	width        int
 	height       int
 }
 
@@ -55,7 +59,7 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		{Title: "Table", Width: 20},
 		{Title: "Index", Width: 28},
 		{Title: "Columns", Width: 20},
-		{Title: "Valid", Width: 7},
+		{Title: "Valid", Width: 9},
 		{Title: "Scans", Width: 8},
 		{Title: "Tup Read", Width: 10},
 		{Title: "Tup Fetch", Width: 10},
@@ -77,10 +81,23 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			scanStr = SeverityColor(scanStr, 2)
 		}
 
+		validWord := "yes"
 		validStr := SeverityColor("yes", 0)
 		if !isValid {
+			validWord = "INVALID"
 			validStr = SeverityColor("INVALID", 2)
 		}
+
+		// Build pre-formatted detail text stored as hidden cell row[9]
+		colLines := strings.ReplaceAll(indexColumns, ", ", "\n  ")
+		detail := fmt.Sprintf(
+			"Schema:  %s\nTable:   %s\nIndex:   %s\n\nColumns:\n  %s\n\nValid:   %s\n\nScans: %d  |  Tup Read: %d  |  Tup Fetch: %d\nSize: %s",
+			schemaname, tablename, indexname,
+			colLines,
+			validWord,
+			idxScan, idxTupRead, idxTupFetch,
+			indexSize,
+		)
 
 		rowsData = append(rowsData, table.Row{
 			schemaname,
@@ -92,6 +109,7 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%d", idxTupRead),
 			fmt.Sprintf("%d", idxTupFetch),
 			indexSize,
+			detail, // row[9] — hidden, used for detail view
 		})
 	}
 
@@ -103,7 +121,7 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return IndexUsageModel{table: t, allRows: rowsData, initialModel: initialModel, height: 30}
+	return IndexUsageModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
 }
 
 func (m IndexUsageModel) Init() tea.Cmd { return nil }
@@ -111,10 +129,18 @@ func (m IndexUsageModel) Init() tea.Cmd { return nil }
 func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
 		if m.filterMode {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -135,6 +161,13 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
+		case "enter":
+			row := m.table.SelectedRow()
+			if len(row) > 9 && row[9] != "" {
+				m.detailText = row[9]
+				m.detailMode = true
+			}
+			return m, nil
 		case "/":
 			m.filterMode = true
 			return m, nil
@@ -151,8 +184,11 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m IndexUsageModel) View() string {
+	if m.detailMode {
+		return RenderQueryDetail("Index Usage", m.detailText, m.width)
+	}
 	s := RenderHeader("Index Usage") + "\n"
 	s += m.table.View()
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }

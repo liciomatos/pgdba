@@ -32,6 +32,39 @@ func FilterRows(rows []table.Row, filter string) []table.Row {
 	return out
 }
 
+// wrapText breaks s into lines of at most width visible characters at word boundaries.
+func wrapText(s string, width int) string {
+	var b strings.Builder
+	col := 0
+	for _, word := range strings.Fields(s) {
+		if col > 0 {
+			if col+1+len(word) > width {
+				b.WriteByte('\n')
+				col = 0
+			} else {
+				b.WriteByte(' ')
+				col++
+			}
+		}
+		b.WriteString(word)
+		col += len(word)
+	}
+	return b.String()
+}
+
+// RenderQueryDetail renders a full-screen detail view for query text.
+// text may contain manual newlines for multi-block content (e.g., blocked + blocking).
+func RenderQueryDetail(screenName, text string, width int) string {
+	w := width - 4
+	if w < 40 {
+		w = 40
+	}
+	wrapped := lipgloss.NewStyle().Foreground(ColorWhite).Width(w).Render(wrapText(text, w))
+	return RenderHeader(screenName+" — Query Detail") + "\n" +
+		wrapped + "\n\n" +
+		FooterStyle.Render("esc / enter / q  close")
+}
+
 // FilterFooter returns the footer string based on current filter state.
 func FilterFooter(filterMode bool, filterText, hints string) string {
 	switch {

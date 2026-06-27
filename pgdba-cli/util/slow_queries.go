@@ -15,6 +15,8 @@ type SlowQueriesModel struct {
 	allRows      []table.Row
 	filterText   string
 	filterMode   bool
+	detailMode   bool
+	detailText   string
 	initialModel func() tea.Model
 	width        int
 	height       int
@@ -23,7 +25,12 @@ type SlowQueriesModel struct {
 func (m SlowQueriesModel) IsInputMode() bool { return m.filterMode }
 
 func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
-	query := `
+	threshold := config.Config.SlowThresholdMS
+	if threshold <= 0 {
+		threshold = 1000
+	}
+
+	query := fmt.Sprintf(`
         SELECT
             queryid,
             query,
@@ -34,10 +41,11 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
             rows
         FROM
             pg_stat_statements
+        WHERE mean_exec_time > %d
         ORDER BY
             mean_exec_time DESC
-        LIMIT 10;
-    `
+        LIMIT 20;
+    `, threshold)
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
@@ -46,13 +54,13 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 	defer rows.Close()
 
 	columns := []table.Column{
-		{Title: "Query ID", Width: 10},
+		{Title: "Query ID", Width: 12},
 		{Title: "Query", Width: 50},
-		{Title: "Calls", Width: 10},
-		{Title: "Total Exec Time (ms)", Width: 20},
-		{Title: "Mean Exec Time (ms)", Width: 20},
-		{Title: "Stddev Exec Time (ms)", Width: 20},
-		{Title: "Rows", Width: 10},
+		{Title: "Calls", Width: 8},
+		{Title: "Total (ms)", Width: 14},
+		{Title: "Mean (ms)", Width: 14},
+		{Title: "Stddev (ms)", Width: 14},
+		{Title: "Rows", Width: 8},
 	}
 
 	var rowsData []table.Row
@@ -67,6 +75,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning slow queries row", initialModel)
 		}
 
+		fullQuery := q
 		q = strings.ReplaceAll(q, "\n", " ")
 		if len(q) > 50 {
 			q = q[:50] + "..."
@@ -74,9 +83,9 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 
 		totalStr := fmt.Sprintf("%.2f", totalExecTime)
 		switch {
-		case totalExecTime > 1000:
+		case totalExecTime > float64(threshold*2):
 			totalStr = SeverityColor(totalStr, 2)
-		case totalExecTime > 100:
+		case totalExecTime > float64(threshold):
 			totalStr = SeverityColor(totalStr, 1)
 		}
 
@@ -88,6 +97,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%.2f", meanExecTime),
 			fmt.Sprintf("%.2f", stddevExecTime),
 			fmt.Sprintf("%d", rowsReturned),
+			fullQuery, // row[7] — hidden, used for detail view
 		})
 	}
 
@@ -114,6 +124,13 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
 		if m.filterMode {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -134,6 +151,13 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
+		case "enter":
+			row := m.table.SelectedRow()
+			if len(row) > 7 && row[7] != "" {
+				m.detailText = row[7]
+				m.detailMode = true
+			}
+			return m, nil
 		case "/":
 			m.filterMode = true
 			return m, nil
@@ -150,8 +174,11 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m SlowQueriesModel) View() string {
+	if m.detailMode {
+		return RenderQueryDetail("Slow Queries", m.detailText, m.width)
+	}
 	s := RenderHeader("Slow Queries") + "\n"
 	s += m.table.View()
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }

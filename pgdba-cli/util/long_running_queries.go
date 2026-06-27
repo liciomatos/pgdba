@@ -16,6 +16,8 @@ type LongRunningQueriesModel struct {
 	allRows      []table.Row
 	filterText   string
 	filterMode   bool
+	detailMode   bool
+	detailText   string
 	initialModel func() tea.Model
 	confirmKill  bool
 	pidToKill    int
@@ -33,7 +35,7 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
             application_name,
             state,
             ROUND(EXTRACT(EPOCH FROM (now() - query_start))::numeric, 1) AS duration_seconds,
-            left(query, 80) AS query
+            COALESCE(query, '') AS query
         FROM pg_stat_activity
         WHERE state != 'idle'
           AND query_start IS NOT NULL
@@ -67,7 +69,11 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning long running queries row", initialModel)
 		}
 
+		fullQuery := q
 		q = strings.ReplaceAll(q, "\n", " ")
+		if len(q) > 80 {
+			q = q[:80] + "..."
+		}
 
 		durStr := fmt.Sprintf("%.1fs", durationSeconds)
 		switch {
@@ -86,6 +92,7 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 			state,
 			durStr,
 			q,
+			fullQuery, // row[6] — hidden, used for detail view
 		})
 	}
 
@@ -112,6 +119,13 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
 		if m.filterMode {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -132,6 +146,15 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
+		case "enter":
+			if !m.confirmKill {
+				row := m.table.SelectedRow()
+				if len(row) > 6 && row[6] != "" {
+					m.detailText = row[6]
+					m.detailMode = true
+				}
+			}
+			return m, nil
 		case "/":
 			if !m.confirmKill {
 				m.filterMode = true
@@ -178,12 +201,15 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m LongRunningQueriesModel) View() string {
+	if m.detailMode {
+		return RenderQueryDetail("Long Running Queries", m.detailText, m.width)
+	}
 	s := RenderHeader("Long Running Queries") + "\n"
 	s += m.table.View()
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • k kill • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • k kill • / filter • r refresh • q back")
 	}
 	return s
 }

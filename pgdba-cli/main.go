@@ -72,6 +72,7 @@ func main() {
 	flag.StringVar(&config.Config.Password, "password", getEnv("PGPASSWORD", ""), "database password")
 	flag.StringVar(&config.Config.DBName, "dbname", getEnv("PGDATABASE", "mydb"), "database name")
 	flag.StringVar(&config.Config.SSLMode, "sslmode", getEnv("PGSSLMODE", "disable"), "ssl mode (disable, require, verify-ca, verify-full)")
+	flag.IntVar(&config.Config.SlowThresholdMS, "slow-ms", getEnvInt("PG_SLOW_MS", 1000), "slow query threshold in ms (default 1000)")
 	flag.Parse()
 
 	if config.Config.Password == "" {
@@ -109,7 +110,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	config.Config.AppInstance = tea.NewProgram(wrap(util.CheckDashboard()), tea.WithAltScreen())
+	config.Config.AppInstance = tea.NewProgram(navigator{child: util.CheckDashboard()}, tea.WithAltScreen())
 	if _, err := config.Config.AppInstance.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting program: %v\n", err)
 	}
@@ -122,16 +123,29 @@ type inputModer interface {
 }
 
 type navigator struct {
-	child tea.Model
+	child  tea.Model
+	width  int
+	height int
 }
 
-func wrap(m tea.Model) navigator { return navigator{child: m} }
-func dashboard() tea.Model       { return util.CheckDashboard() }
+func dashboard() tea.Model { return util.CheckDashboard() }
+
+// wrapChild wraps m in a navigator and immediately delivers the current terminal
+// size so the new screen renders at the correct height from the first frame.
+func (n navigator) wrapChild(m tea.Model) navigator {
+	m, _ = m.Update(tea.WindowSizeMsg{Width: n.width, Height: n.height})
+	return navigator{child: m, width: n.width, height: n.height}
+}
 
 func (n navigator) Init() tea.Cmd { return n.child.Init() }
 func (n navigator) View() string  { return n.child.View() }
 
 func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if wsm, ok := msg.(tea.WindowSizeMsg); ok {
+		n.width = wsm.Width
+		n.height = wsm.Height
+	}
+
 	if key, ok := msg.(tea.KeyMsg); ok {
 		inInputMode := false
 		if im, ok := n.child.(inputModer); ok {
@@ -140,35 +154,35 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !inInputMode {
 			switch key.String() {
 			case "1":
-				return wrap(util.IdentifySlowQueries(dashboard)), nil
+				return n.wrapChild(util.IdentifySlowQueries(dashboard)), nil
 			case "2":
-				return wrap(util.CheckLongRunningQueries(dashboard)), nil
+				return n.wrapChild(util.CheckLongRunningQueries(dashboard)), nil
 			case "3":
-				return wrap(util.CheckReplicationSlotsStatus(dashboard)), nil
+				return n.wrapChild(util.CheckReplicationSlotsStatus(dashboard)), nil
 			case "4":
-				return wrap(util.CheckRecordLocks(dashboard)), nil
+				return n.wrapChild(util.CheckRecordLocks(dashboard)), nil
 			case "5":
-				return wrap(util.CheckConnections(dashboard)), nil
+				return n.wrapChild(util.CheckConnections(dashboard)), nil
 			case "6":
-				return wrap(util.CheckAutovacuum(dashboard)), nil
+				return n.wrapChild(util.CheckAutovacuum(dashboard)), nil
 			case "7":
-				return wrap(util.CheckIndexUsage(dashboard)), nil
+				return n.wrapChild(util.CheckIndexUsage(dashboard)), nil
 			case "8":
-				return wrap(util.CheckCacheHit(dashboard)), nil
+				return n.wrapChild(util.CheckCacheHit(dashboard)), nil
 			case "9":
-				return wrap(util.CheckUsers(dashboard)), nil
+				return n.wrapChild(util.CheckUsers(dashboard)), nil
 			case "0":
-				return wrap(util.CheckRoles(dashboard)), nil
+				return n.wrapChild(util.CheckRoles(dashboard)), nil
 			case "p":
-				return wrap(util.CheckPgConfig(dashboard)), nil
+				return n.wrapChild(util.CheckPgConfig(dashboard)), nil
 			case "s":
-				return wrap(util.CheckSchemaBrowser(dashboard)), nil
+				return n.wrapChild(util.CheckSchemaBrowser(dashboard)), nil
 			case "e":
-				return wrap(util.CheckExtensions(dashboard)), nil
+				return n.wrapChild(util.CheckExtensions(dashboard)), nil
 			case "D":
-				return wrap(util.CheckDatabases(dashboard)), nil
+				return n.wrapChild(util.CheckDatabases(dashboard)), nil
 			case "v":
-				return wrap(util.CheckVersion(dashboard)), nil
+				return n.wrapChild(util.CheckVersion(dashboard)), nil
 			}
 		}
 	}
