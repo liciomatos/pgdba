@@ -2,11 +2,47 @@ package util
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/liciomatos/pgdba-cli/config"
 )
+
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+func stripAnsi(s string) string { return ansiEscape.ReplaceAllString(s, "") }
+
+// FilterRows returns rows where any cell contains filter (case-insensitive, ANSI-stripped).
+func FilterRows(rows []table.Row, filter string) []table.Row {
+	if filter == "" {
+		return rows
+	}
+	f := strings.ToLower(filter)
+	var out []table.Row
+	for _, row := range rows {
+		for _, cell := range row {
+			if strings.Contains(strings.ToLower(stripAnsi(cell)), f) {
+				out = append(out, row)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// FilterFooter returns the footer string based on current filter state.
+func FilterFooter(filterMode bool, filterText, hints string) string {
+	switch {
+	case filterMode:
+		return FooterStyle.Render(fmt.Sprintf("Filter: %s_  (enter confirm • esc clear)", filterText))
+	case filterText != "":
+		return FooterStyle.Render(fmt.Sprintf("filter:%q • / edit • esc clear • %s", filterText, hints))
+	default:
+		return FooterStyle.Render("/ filter • " + hints)
+	}
+}
 
 var (
 	ColorRed    = lipgloss.Color("9")

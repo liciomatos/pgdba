@@ -12,11 +12,16 @@ import (
 
 type ConnectionsModel struct {
 	table        table.Model
+	allRows      []table.Row
+	filterText   string
+	filterMode   bool
 	usedConns    int
 	maxConns     int
 	initialModel func() tea.Model
 	height       int
 }
+
+func (m ConnectionsModel) IsInputMode() bool { return m.filterMode }
 
 func CheckConnections(initialModel func() tea.Model) tea.Model {
 	query := `
@@ -63,7 +68,14 @@ func CheckConnections(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return ConnectionsModel{table: t, usedConns: usedConns, maxConns: maxConns, initialModel: initialModel, height: 30}
+	return ConnectionsModel{
+		table:        t,
+		allRows:      rowsData,
+		usedConns:    usedConns,
+		maxConns:     maxConns,
+		initialModel: initialModel,
+		height:       30,
+	}
 }
 
 func (m ConnectionsModel) Init() tea.Cmd { return nil }
@@ -75,7 +87,29 @@ func (m ConnectionsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "/":
+			m.filterMode = true
+			return m, nil
 		case "q", "esc":
 			return m.initialModel(), nil
 		case "r":
@@ -109,6 +143,6 @@ func (m ConnectionsModel) View() string {
 
 	summary := SeverityColor(fmt.Sprintf("%d / %d connections used (%.1f%%)", m.usedConns, m.maxConns, pct), level)
 	s += "\n" + summary
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
 	return s
 }

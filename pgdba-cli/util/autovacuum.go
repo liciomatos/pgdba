@@ -14,12 +14,17 @@ import (
 
 type AutovacuumModel struct {
 	table         table.Model
+	allRows       []table.Row
+	filterText    string
+	filterMode    bool
 	initialModel  func() tea.Model
 	confirmVacuum bool
 	schemaName    string
 	tableName     string
 	height        int
 }
+
+func (m AutovacuumModel) IsInputMode() bool { return m.filterMode }
 
 func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 	query := `
@@ -114,7 +119,7 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return AutovacuumModel{table: t, initialModel: initialModel, height: 30}
+	return AutovacuumModel{table: t, allRows: rowsData, initialModel: initialModel, height: 30}
 }
 
 func (m AutovacuumModel) Init() tea.Cmd { return nil }
@@ -126,7 +131,31 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "/":
+			if !m.confirmVacuum {
+				m.filterMode = true
+			}
+			return m, nil
 		case "q", "esc":
 			if m.confirmVacuum {
 				m.confirmVacuum = false
@@ -179,7 +208,7 @@ func (m AutovacuumModel) View() string {
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • v vacuum analyze • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • v vacuum analyze • r refresh • q back")
 	}
 	return s
 }

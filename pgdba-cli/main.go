@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	_ "github.com/lib/pq"
 	"github.com/liciomatos/pgdba-cli/config"
 	"github.com/liciomatos/pgdba-cli/util"
@@ -110,107 +109,70 @@ func main() {
 		os.Exit(1)
 	}
 
-	config.Config.AppInstance = tea.NewProgram(initialModel(), tea.WithAltScreen())
+	config.Config.AppInstance = tea.NewProgram(wrap(util.CheckDashboard()), tea.WithAltScreen())
 	if _, err := config.Config.AppInstance.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting program: %v\n", err)
 	}
 }
 
-type model struct {
-	choices  []string
-	cursor   int
-	selected map[int]struct{}
-	width    int
-	height   int
+// inputModer is implemented by screens that have an active text input (filter mode).
+// When IsInputMode returns true, the navigator skips global key interception.
+type inputModer interface {
+	IsInputMode() bool
 }
 
-func initialModel() tea.Model {
-	return model{
-		choices: []string{
-			"Check Version",
-			"Slow Queries",
-			"Long Running Queries",
-			"Replication Slots",
-			"Blocked Queries",
-			"Connections Overview",
-			"Autovacuum Monitor",
-			"Index Usage",
-			"Cache Hit Ratio",
-			"Quit",
-		},
-		selected: make(map[int]struct{}),
-	}
+type navigator struct {
+	child tea.Model
 }
 
-func (m model) Init() tea.Cmd {
-	return nil
-}
+func wrap(m tea.Model) navigator { return navigator{child: m} }
+func dashboard() tea.Model       { return util.CheckDashboard() }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.choices)-1 {
-				m.cursor++
-			}
-		case "enter":
-			switch m.cursor {
-			case 0:
-				return util.CheckVersion(initialModel), nil
-			case 1:
-				return util.IdentifySlowQueries(initialModel), nil
-			case 2:
-				return util.CheckLongRunningQueries(initialModel), nil
-			case 3:
-				return util.CheckReplicationSlotsStatus(initialModel), nil
-			case 4:
-				return util.CheckRecordLocks(initialModel), nil
-			case 5:
-				return util.CheckConnections(initialModel), nil
-			case 6:
-				return util.CheckAutovacuum(initialModel), nil
-			case 7:
-				return util.CheckIndexUsage(initialModel), nil
-			case 8:
-				return util.CheckCacheHit(initialModel), nil
-			case 9:
-				return m, tea.Quit
+func (n navigator) Init() tea.Cmd { return n.child.Init() }
+func (n navigator) View() string  { return n.child.View() }
+
+func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		inInputMode := false
+		if im, ok := n.child.(inputModer); ok {
+			inInputMode = im.IsInputMode()
+		}
+		if !inInputMode {
+			switch key.String() {
+			case "1":
+				return wrap(util.IdentifySlowQueries(dashboard)), nil
+			case "2":
+				return wrap(util.CheckLongRunningQueries(dashboard)), nil
+			case "3":
+				return wrap(util.CheckReplicationSlotsStatus(dashboard)), nil
+			case "4":
+				return wrap(util.CheckRecordLocks(dashboard)), nil
+			case "5":
+				return wrap(util.CheckConnections(dashboard)), nil
+			case "6":
+				return wrap(util.CheckAutovacuum(dashboard)), nil
+			case "7":
+				return wrap(util.CheckIndexUsage(dashboard)), nil
+			case "8":
+				return wrap(util.CheckCacheHit(dashboard)), nil
+			case "9":
+				return wrap(util.CheckUsers(dashboard)), nil
+			case "0":
+				return wrap(util.CheckRoles(dashboard)), nil
+			case "p":
+				return wrap(util.CheckPgConfig(dashboard)), nil
+			case "s":
+				return wrap(util.CheckSchemaBrowser(dashboard)), nil
+			case "e":
+				return wrap(util.CheckExtensions(dashboard)), nil
+			case "D":
+				return wrap(util.CheckDatabases(dashboard)), nil
+			case "v":
+				return wrap(util.CheckVersion(dashboard)), nil
 			}
 		}
 	}
-
-	return m, nil
-}
-
-func (m model) View() string {
-	logo := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("pgdba-cli")
-	subtitle := lipgloss.NewStyle().Faint(true).Render("PostgreSQL DBA Tools")
-	conn := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf(
-		"Connected: %s@%s:%d/%s  (v%s)",
-		config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName, config.Config.Version,
-	))
-	s := fmt.Sprintf("%s  %s\n%s\n\n", logo, subtitle, conn)
-
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	for i, choice := range m.choices {
-		if m.cursor == i {
-			s += cursorStyle.Render("▶ " + choice) + "\n"
-		} else {
-			s += "  " + choice + "\n"
-		}
-	}
-
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓/jk navigate • enter select • q quit")
-	return s
+	newChild, cmd := n.child.Update(msg)
+	n.child = newChild
+	return n, cmd
 }

@@ -13,12 +13,17 @@ import (
 
 type RecordLocksModel struct {
 	table            table.Model
+	allRows          []table.Row
+	filterText       string
+	filterMode       bool
 	initialModel     func() tea.Model
 	confirmTerminate bool
 	pidToTerminate   int
 	width            int
 	height           int
 }
+
+func (m RecordLocksModel) IsInputMode() bool { return m.filterMode }
 
 func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	query := `
@@ -36,7 +41,7 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
         JOIN
             pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
         JOIN
-            pg_catalog.pg_locks blocking_locks 
+            pg_catalog.pg_locks blocking_locks
             ON blocking_locks.locktype = blocked_locks.locktype
             AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
             AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
@@ -67,8 +72,8 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		{Title: "Blocking User", Width: 15},
 		{Title: "Blocked Statement", Width: 50},
 		{Title: "Blocking Statement", Width: 50},
-		{Title: "Blocked Application", Width: 20},
-		{Title: "Blocking Application", Width: 20},
+		{Title: "Blocked App", Width: 20},
+		{Title: "Blocking App", Width: 20},
 	}
 
 	var rowsData []table.Row
@@ -76,22 +81,17 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		var blockedPID, blockingPID int
 		var blockedUser, blockingUser, blockedStatement, blockingStatement, blockedApplication, blockingApplication string
 
-		err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication)
-		if err != nil {
+		if err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication); err != nil {
 			return NewErrorModel(err, "Scanning record locks row", initialModel)
 		}
 
-		// Replace newline characters with spaces to prevent wrapping
 		blockedStatement = strings.ReplaceAll(blockedStatement, "\n", " ")
 		blockingStatement = strings.ReplaceAll(blockingStatement, "\n", " ")
-
-		// Truncate the queries to a fixed length to prevent wrapping
-		maxQueryLength := 50
-		if len(blockedStatement) > maxQueryLength {
-			blockedStatement = blockedStatement[:maxQueryLength] + "..."
+		if len(blockedStatement) > 50 {
+			blockedStatement = blockedStatement[:50] + "..."
 		}
-		if len(blockingStatement) > maxQueryLength {
-			blockingStatement = blockingStatement[:maxQueryLength] + "..."
+		if len(blockingStatement) > 50 {
+			blockingStatement = blockingStatement[:50] + "..."
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -114,19 +114,16 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return RecordLocksModel{table: t, initialModel: initialModel, width: 120, height: 30}
+	return RecordLocksModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
 }
 
-func (m RecordLocksModel) Init() tea.Cmd {
-	return nil
-}
+func (m RecordLocksModel) Init() tea.Cmd { return nil }
 
 func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Distribute remaining width equally between the two statement columns (4 and 5)
 		fixedCols := []int{0, 1, 2, 3, 6, 7}
 		fixed := 0
 		cols := m.table.Columns()
@@ -143,7 +140,31 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "/":
+			if !m.confirmTerminate {
+				m.filterMode = true
+			}
+			return m, nil
 		case "q", "esc":
 			if m.confirmTerminate {
 				m.confirmTerminate = false
@@ -156,6 +177,9 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			selectedRow := m.table.SelectedRow()
+			if len(selectedRow) == 0 {
+				return m, nil
+			}
 			m.pidToTerminate, _ = strconv.Atoi(selectedRow[2])
 			m.confirmTerminate = true
 			return m, nil
@@ -205,7 +229,7 @@ func (m RecordLocksModel) View() string {
 			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • t terminate • a terminate all • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • t terminate • a terminate all • r refresh • q back")
 	}
 	return s
 }
@@ -217,7 +241,7 @@ func terminateSession(pid int) error {
 
 func terminateAllSessions(rows []table.Row) error {
 	for _, row := range rows {
-		pid, err := strconv.Atoi(row[2]) // Assuming Blocking PID is at index 2
+		pid, err := strconv.Atoi(row[2])
 		if err != nil {
 			return fmt.Errorf("error converting PID: %v", err)
 		}

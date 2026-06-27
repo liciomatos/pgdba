@@ -11,9 +11,14 @@ import (
 
 type IndexUsageModel struct {
 	table        table.Model
+	allRows      []table.Row
+	filterText   string
+	filterMode   bool
 	initialModel func() tea.Model
 	height       int
 }
+
+func (m IndexUsageModel) IsInputMode() bool { return m.filterMode }
 
 func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 	query := `
@@ -98,7 +103,7 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return IndexUsageModel{table: t, initialModel: initialModel, height: 30}
+	return IndexUsageModel{table: t, allRows: rowsData, initialModel: initialModel, height: 30}
 }
 
 func (m IndexUsageModel) Init() tea.Cmd { return nil }
@@ -110,7 +115,29 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "/":
+			m.filterMode = true
+			return m, nil
 		case "q", "esc":
 			return m.initialModel(), nil
 		case "r":
@@ -126,6 +153,6 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m IndexUsageModel) View() string {
 	s := RenderHeader("Index Usage") + "\n"
 	s += m.table.View()
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
 	return s
 }

@@ -13,12 +13,17 @@ import (
 
 type LongRunningQueriesModel struct {
 	table        table.Model
+	allRows      []table.Row
+	filterText   string
+	filterMode   bool
 	initialModel func() tea.Model
 	confirmKill  bool
 	pidToKill    int
 	width        int
 	height       int
 }
+
+func (m LongRunningQueriesModel) IsInputMode() bool { return m.filterMode }
 
 func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 	query := `
@@ -56,13 +61,13 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		var pid int
 		var usename, applicationName, state string
 		var durationSeconds float64
-		var query string
+		var q string
 
-		if err := rows.Scan(&pid, &usename, &applicationName, &state, &durationSeconds, &query); err != nil {
+		if err := rows.Scan(&pid, &usename, &applicationName, &state, &durationSeconds, &q); err != nil {
 			return NewErrorModel(err, "Scanning long running queries row", initialModel)
 		}
 
-		query = strings.ReplaceAll(query, "\n", " ")
+		q = strings.ReplaceAll(q, "\n", " ")
 
 		durStr := fmt.Sprintf("%.1fs", durationSeconds)
 		switch {
@@ -80,7 +85,7 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 			applicationName,
 			state,
 			durStr,
-			query,
+			q,
 		})
 	}
 
@@ -92,7 +97,7 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return LongRunningQueriesModel{table: t, initialModel: initialModel, width: 120, height: 30}
+	return LongRunningQueriesModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
 }
 
 func (m LongRunningQueriesModel) Init() tea.Cmd { return nil }
@@ -107,7 +112,31 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil
 	case tea.KeyMsg:
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "/":
+			if !m.confirmKill {
+				m.filterMode = true
+			}
+			return m, nil
 		case "q", "esc":
 			if m.confirmKill {
 				m.confirmKill = false
@@ -154,7 +183,7 @@ func (m LongRunningQueriesModel) View() string {
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • k kill selected • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • k kill • r refresh • q back")
 	}
 	return s
 }
