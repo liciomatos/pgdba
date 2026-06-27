@@ -1,6 +1,7 @@
 # Variables
 BINARY_NAME=pgdba-cli
 DOCKER_COMPOSE_FILE=docker-compose.yaml
+COMPOSE := $(shell which podman-compose 2>/dev/null || which docker-compose 2>/dev/null)
 
 # Build the Go project
 build:
@@ -14,13 +15,13 @@ run: build
 
 # Run Docker Compose
 docker-up:
-	@echo "Starting Docker Compose..."
-	docker-compose -f $(DOCKER_COMPOSE_FILE) up -d
+	@echo "Starting containers with $(COMPOSE)..."
+	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d
 
 # Stop Docker Compose
 docker-down:
-	@echo "Stopping Docker Compose..."
-	docker-compose -f $(DOCKER_COMPOSE_FILE) down
+	@echo "Stopping containers..."
+	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) down
 
 # Clean the build
 clean:
