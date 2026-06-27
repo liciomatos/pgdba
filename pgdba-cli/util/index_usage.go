@@ -74,13 +74,10 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		}
 
 		scanStr := fmt.Sprintf("%d", idxScan)
-		if idxScan == 0 {
-			scanStr = SeverityColor(scanStr, 2)
-		}
 
-		validStr := SeverityColor("yes", 0)
+		validStr := "yes"
 		if !isValid {
-			validStr = SeverityColor("INVALID", 2)
+			validStr = "INVALID"
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -158,8 +155,25 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m IndexUsageModel) View() string {
+	rules := []ColorRule{
+		{Column: 4, Colorize: func(v string) int {
+			switch v {
+			case "yes":
+				return 0
+			case "INVALID":
+				return 2
+			}
+			return -1
+		}},
+		{Column: 5, Colorize: func(v string) int {
+			if v == "0" {
+				return 2
+			}
+			return -1
+		}},
+	}
 	s := RenderHeader("Index Usage") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }

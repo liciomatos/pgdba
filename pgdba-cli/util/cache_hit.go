@@ -2,6 +2,8 @@ package util
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/liciomatos/pgdba-cli/config"
 
@@ -66,24 +68,7 @@ func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 		}
 
 		hitPctStr := fmt.Sprintf("%.2f%%", cacheHitRatio)
-		switch {
-		case cacheHitRatio < 70:
-			hitPctStr = SeverityColor(hitPctStr, 2)
-		case cacheHitRatio < 90:
-			hitPctStr = SeverityColor(hitPctStr, 1)
-		default:
-			hitPctStr = SeverityColor(hitPctStr, 0)
-		}
-
 		idxHitPctStr := fmt.Sprintf("%.2f%%", idxCacheHitRatio)
-		switch {
-		case idxCacheHitRatio < 70:
-			idxHitPctStr = SeverityColor(idxHitPctStr, 2)
-		case idxCacheHitRatio < 90:
-			idxHitPctStr = SeverityColor(idxHitPctStr, 1)
-		default:
-			idxHitPctStr = SeverityColor(idxHitPctStr, 0)
-		}
 
 		rowsData = append(rowsData, table.Row{
 			relname,
@@ -152,8 +137,27 @@ func (m CacheHitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m CacheHitModel) View() string {
+	// Values are formatted as "%.2f%"; strip % and parse to determine severity.
+	hitColorizer := func(v string) int {
+		f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+		if err != nil {
+			return -1
+		}
+		switch {
+		case f < 70:
+			return 2
+		case f < 90:
+			return 1
+		default:
+			return 0
+		}
+	}
+	rules := []ColorRule{
+		{Column: 3, Colorize: hitColorizer},
+		{Column: 6, Colorize: hitColorizer},
+	}
 	s := RenderHeader("Cache Hit Ratio") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
 	return s
 }

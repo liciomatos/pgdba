@@ -15,14 +15,12 @@ type VersionModel struct {
 }
 
 func CheckVersion(initialModel func() tea.Model) tea.Model {
-	return &VersionModel{version: config.Config.Version, initialModel: initialModel}
+	return VersionModel{version: config.Config.Version, initialModel: initialModel}
 }
 
-func (m *VersionModel) Init() tea.Cmd {
-	return nil
-}
+func (m VersionModel) Init() tea.Cmd { return nil }
 
-func (m *VersionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m VersionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -39,7 +37,7 @@ func (m *VersionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *VersionModel) View() string {
+func (m VersionModel) View() string {
 	s := RenderHeader("Check Version") + "\n"
 	s += fmt.Sprintf("Server version: %s\n", m.version)
 	s += "\n" + FooterStyle.Render("r refresh • q back")

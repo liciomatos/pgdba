@@ -81,14 +81,6 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		}
 
 		durStr := fmt.Sprintf("%.1fs", durationSeconds)
-		switch {
-		case durationSeconds > 60:
-			durStr = SeverityColor(durStr, 2)
-		case durationSeconds > 10:
-			durStr = SeverityColor(durStr, 1)
-		default:
-			durStr = SeverityColor(durStr, 0)
-		}
 
 		rowsData = append(rowsData, table.Row{
 			pidStr,
@@ -217,8 +209,25 @@ func (m LongRunningQueriesModel) View() string {
 	if m.detailMode {
 		return RenderQueryDetail("Long Running Queries", m.detailText, m.width)
 	}
+	rules := []ColorRule{
+		{Column: 4, Colorize: func(v string) int {
+			// Values are formatted as "%.1fs"; strip the trailing 's'.
+			f, err := strconv.ParseFloat(strings.TrimSuffix(v, "s"), 64)
+			if err != nil {
+				return -1
+			}
+			switch {
+			case f > 60:
+				return 2
+			case f > 10:
+				return 1
+			default:
+				return 0
+			}
+		}},
+	}
 	s := RenderHeader("Long Running Queries") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {

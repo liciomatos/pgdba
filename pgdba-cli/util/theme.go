@@ -100,11 +100,13 @@ func RenderHeader(screenName string) string {
 	return fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
 }
 
-// SeverityColor colors text by severity level: 0=green, 1=yellow, 2=red.
+// SeverityColor colors text by severity level:
+// 0=green (ok), 1=yellow (warn), 2=red (critical), 3=gray (muted).
+// Level -1 or out of range returns plain text.
 func SeverityColor(text string, level int) string {
-	colors := []lipgloss.Color{ColorGreen, ColorYellow, ColorRed}
-	if level < 0 || level > 2 {
-		level = 0
+	colors := []lipgloss.Color{ColorGreen, ColorYellow, ColorRed, ColorGray}
+	if level < 0 || level >= len(colors) {
+		return text
 	}
 	return lipgloss.NewStyle().Foreground(colors[level]).Render(text)
 }
@@ -148,9 +150,95 @@ func DefaultTableStyles() table.Styles {
 		BorderBottom(true).
 		Bold(true).
 		Foreground(ColorBlue)
+	// Foreground intentionally omitted so per-cell colors injected by ColorizeTable
+	// remain visible on non-selected rows without fighting a global white override.
 	s.Selected = s.Selected.
-		Foreground(ColorWhite).
 		Background(lipgloss.Color("57")).
 		Bold(false)
 	return s
+}
+
+// ColorRule specifies which column to colorize and how to derive the severity level.
+type ColorRule struct {
+	Column   int           // zero-based column index
+	Colorize func(string) int // returns 0=green/1=yellow/2=red/3=gray, or -1 for no color
+}
+
+// ColorizeTable injects ANSI severity colors into a rendered Bubbles table view.
+//
+// Bubbles v0.20.0 uses runewidth.Truncate internally. runewidth miscounts ANSI
+// escape sequences as visible characters, corrupting them in narrow columns. This
+// function keeps plain text in cells and injects colors after the table renders, so
+// runewidth never sees the sequences.
+//
+// Selected rows (starting with ESC from styles.Selected.Render) are skipped; the
+// purple background already distinguishes them without cell colors.
+//
+// Assumes DefaultTableStyles: 2 header lines (title + border separator).
+func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) string {
+	if len(rules) == 0 {
+		return tableView
+	}
+
+	colorizers := make(map[int]func(string) int, len(rules))
+	for _, rule := range rules {
+		colorizers[rule.Column] = rule.Colorize
+	}
+
+	// Compute the byte offset of the value-start for each column.
+	// Bubbles Cell style is Padding(0,1): 1 space left, Width chars, 1 space right.
+	colValueStart := make([]int, len(cols))
+	pos := 0
+	for i, col := range cols {
+		colValueStart[i] = pos + 1 // skip left-padding space
+		pos += col.Width + 2
+	}
+
+	lines := strings.Split(tableView, "\n")
+	const headerLines = 2 // title row + border row (BorderBottom in DefaultTableStyles)
+
+	for lineIdx := headerLines; lineIdx < len(lines); lineIdx++ {
+		line := lines[lineIdx]
+		if len(line) == 0 {
+			continue
+		}
+		// Selected rows start with an ANSI escape byte; skip them.
+		if line[0] == '\x1b' {
+			continue
+		}
+
+		// Process columns right-to-left: injecting at a higher byte offset does not
+		// shift the byte positions of columns to the left.
+		for colIdx := len(cols) - 1; colIdx >= 0; colIdx-- {
+			colorizer, ok := colorizers[colIdx]
+			if !ok {
+				continue
+			}
+
+			start := colValueStart[colIdx]
+			if start >= len(line) {
+				continue
+			}
+			end := start + cols[colIdx].Width
+			if end > len(line) {
+				end = len(line)
+			}
+
+			cellText := strings.TrimRight(line[start:end], " ")
+			if cellText == "" {
+				continue
+			}
+
+			level := colorizer(cellText)
+			if level < 0 {
+				continue
+			}
+
+			colored := SeverityColor(cellText, level)
+			lines[lineIdx] = line[:start] + colored + line[start+len(cellText):]
+			line = lines[lineIdx]
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }

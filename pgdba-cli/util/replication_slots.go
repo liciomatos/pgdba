@@ -50,11 +50,6 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 		}
 
 		activeStr := fmt.Sprintf("%t", active)
-		if active {
-			activeStr = SeverityColor(activeStr, 0)
-		} else {
-			activeStr = SeverityColor(activeStr, 2)
-		}
 
 		rowsData = append(rowsData, table.Row{
 			slotName,
@@ -124,8 +119,19 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ReplicationSlotsModel) View() string {
+	rules := []ColorRule{
+		{Column: 2, Colorize: func(v string) int {
+			switch v {
+			case "true":
+				return 0
+			case "false":
+				return 2
+			}
+			return -1
+		}},
+	}
 	s := RenderHeader("Replication Slots") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmDelete {
 		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {

@@ -55,7 +55,7 @@ func CheckDatabases(initialModel func() tea.Model) tea.Model {
 		}
 		nameStr := datname
 		if datname == config.Config.DBName {
-			nameStr = SeverityColor(datname+" ◀", 0)
+			nameStr = datname + " ◀"
 		}
 		rowsData = append(rowsData, table.Row{nameStr, encoding, collation, size})
 	}
@@ -112,8 +112,7 @@ func (m DatabaseSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(selectedRow) == 0 {
 				return m, nil
 			}
-			// Strip ANSI from name (current db has a marker appended)
-			selectedDB := strings.TrimSuffix(stripAnsi(selectedRow[0]), " ◀")
+			selectedDB := strings.TrimSuffix(selectedRow[0], " ◀")
 			if selectedDB == config.Config.DBName {
 				return m.initialModel(), nil
 			}
@@ -130,8 +129,16 @@ func (m DatabaseSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m DatabaseSelectorModel) View() string {
+	rules := []ColorRule{
+		{Column: 0, Colorize: func(v string) int {
+			if strings.HasSuffix(v, " ◀") {
+				return 0
+			}
+			return -1
+		}},
+	}
 	s := RenderHeader("Switch Database") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter connect • r refresh • q back")
 	return s
 }

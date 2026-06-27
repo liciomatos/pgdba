@@ -57,12 +57,7 @@ func CheckRoles(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning roles row", initialModel)
 		}
 
-		superStr := superuser
-		if superuser == "yes" {
-			superStr = SeverityColor("yes", 2)
-		}
-
-		rowsData = append(rowsData, table.Row{rolname, superStr, inherit, createrole, createdb, members})
+		rowsData = append(rowsData, table.Row{rolname, superuser, inherit, createrole, createdb, members})
 	}
 
 	t := table.New(
@@ -124,8 +119,16 @@ func (m RolesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RolesModel) View() string {
+	rules := []ColorRule{
+		{Column: 1, Colorize: func(v string) int {
+			if v == "yes" {
+				return 2
+			}
+			return -1
+		}},
+	}
 	s := RenderHeader("Roles & Permissions") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
 	return s
 }

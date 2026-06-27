@@ -87,15 +87,11 @@ func CheckIndexDetail(schema, indexName string, initialModel func() tea.Model) t
 		if err := rows.Scan(&pos, &colName, &dataType, &nullable); err != nil {
 			return NewErrorModel(err, "Scanning index columns", initialModel)
 		}
-		nullStr := SeverityColor("nullable", 0)
-		if nullable == "NOT NULL" {
-			nullStr = lipgloss.NewStyle().Foreground(ColorGray).Render("NOT NULL")
-		}
 		rowsData = append(rowsData, table.Row{
 			fmt.Sprintf("%d", pos),
 			colName,
 			dataType,
-			nullStr,
+			nullable,
 		})
 	}
 
@@ -157,33 +153,45 @@ func (m IndexDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m IndexDetailModel) View() string {
 	s := RenderHeader("Index Detail") + "\n"
 
-	// Metadata block
-	lbl := lipgloss.NewStyle().Width(12).Foreground(ColorGray).Render
-	val := lipgloss.NewStyle().Foreground(ColorWhite).Render
-	blu := lipgloss.NewStyle().Foreground(ColorBlue).Render
+	// Metadata block: fixed-width labels in gray, values in white or blue for type.
+	renderLabel := lipgloss.NewStyle().Width(12).Foreground(ColorGray).Render
+	renderValue := lipgloss.NewStyle().Foreground(ColorWhite).Render
+	renderType  := lipgloss.NewStyle().Foreground(ColorBlue).Render
 
 	validStr := SeverityColor("yes", 0)
 	if !m.isValid {
 		validStr = SeverityColor("INVALID", 2)
 	}
-	boolVal := func(b bool) string {
+	// renderBoolFlag shows green "yes" for true, gray "no" for false.
+	renderBoolFlag := func(b bool) string {
 		if b {
 			return SeverityColor("yes", 0)
 		}
 		return lipgloss.NewStyle().Foreground(ColorGray).Render("no")
 	}
 
-	s += fmt.Sprintf("  %s %s\n", lbl("Schema:"), val(m.schema))
-	s += fmt.Sprintf("  %s %s\n", lbl("Table:"), val(m.tableName))
-	s += fmt.Sprintf("  %s %s\n", lbl("Index:"), val(m.indexName))
+	s += fmt.Sprintf("  %s %s\n", renderLabel("Schema:"), renderValue(m.schema))
+	s += fmt.Sprintf("  %s %s\n", renderLabel("Table:"), renderValue(m.tableName))
+	s += fmt.Sprintf("  %s %s\n", renderLabel("Index:"), renderValue(m.indexName))
 	s += fmt.Sprintf("  %s %s   Unique: %s   Primary: %s   Valid: %s\n",
-		lbl("Type:"), blu(m.indexType),
-		boolVal(m.isUnique), boolVal(m.isPrimary), validStr)
+		renderLabel("Type:"), renderType(m.indexType),
+		renderBoolFlag(m.isUnique), renderBoolFlag(m.isPrimary), validStr)
 	s += fmt.Sprintf("  %s %s   Scans: %s\n\n",
-		lbl("Size:"), val(m.indexSize),
+		renderLabel("Size:"), renderValue(m.indexSize),
 		lipgloss.NewStyle().Foreground(ColorWhite).Render(fmt.Sprintf("%d", m.idxScan)))
 
-	s += m.table.View()
+	rules := []ColorRule{
+		{Column: 3, Colorize: func(v string) int {
+			switch v {
+			case "nullable":
+				return 0
+			case "NOT NULL":
+				return 3
+			}
+			return -1
+		}},
+	}
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q/esc back to index list")
 	return s
 }

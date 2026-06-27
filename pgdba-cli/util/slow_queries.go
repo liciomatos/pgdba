@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -87,12 +88,6 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		}
 
 		totalStr := fmt.Sprintf("%.2f", totalExecTime)
-		switch {
-		case totalExecTime > float64(threshold*2):
-			totalStr = SeverityColor(totalStr, 2)
-		case totalExecTime > float64(threshold):
-			totalStr = SeverityColor(totalStr, 1)
-		}
 
 		rowsData = append(rowsData, table.Row{
 			qid,
@@ -190,8 +185,27 @@ func (m SlowQueriesModel) View() string {
 	if m.detailMode {
 		return RenderQueryDetail("Slow Queries", m.detailText, m.width)
 	}
+	threshold := config.Config.SlowThresholdMS
+	if threshold <= 0 {
+		threshold = 1000
+	}
+	rules := []ColorRule{
+		{Column: 3, Colorize: func(v string) int {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return -1
+			}
+			switch {
+			case f > float64(threshold*2):
+				return 2
+			case f > float64(threshold):
+				return 1
+			}
+			return -1
+		}},
+	}
 	s := RenderHeader("Slow Queries") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }

@@ -166,29 +166,30 @@ func (m DashboardModel) View() string {
 		s += fmt.Sprintf("  %s  %s\n", label, value)
 	}
 
-	// Footer with colored shortcut keys vs labels
-	k := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
-	l := lipgloss.NewStyle().Foreground(ColorGray).Render
+	// Footer: each shortcut is rendered as a bold blue key + a gray label so the
+	// navigation hints are easy to scan without blending into surrounding text.
+	renderKey   := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
+	renderLabel := lipgloss.NewStyle().Foreground(ColorGray).Render
 
-	sep2 := lipgloss.NewStyle().Foreground(ColorGray).Render("─────────────────────────────────────────────────────────────────")
-	line1 := k("1") + " " + l("slow") + "  " +
-		k("2") + " " + l("longrun") + "  " +
-		k("3") + " " + l("slots") + "  " +
-		k("4") + " " + l("locks") + "  " +
-		k("5") + " " + l("conn") + "  " +
-		k("6") + " " + l("autovac") + "  " +
-		k("7") + " " + l("index") + "  " +
-		k("8") + " " + l("cache")
-	line2 := k("9") + " " + l("users") + "  " +
-		k("0") + " " + l("roles") + "  " +
-		k("p") + " " + l("config") + "  " +
-		k("s") + " " + l("schema") + "  " +
-		k("e") + " " + l("ext") + "  " +
-		k("D") + " " + l("switch-db") + "  " +
-		k("v") + " " + l("version") + "  " +
-		k("r") + " " + l("refresh") + "  " +
-		k("q") + " " + l("quit")
+	divider := lipgloss.NewStyle().Foreground(ColorGray).Render("─────────────────────────────────────────────────────────────────")
+	shortcutRow1 := renderKey("1") + " " + renderLabel("slow") + "  " +
+		renderKey("2") + " " + renderLabel("longrun") + "  " +
+		renderKey("3") + " " + renderLabel("slots") + "  " +
+		renderKey("4") + " " + renderLabel("locks") + "  " +
+		renderKey("5") + " " + renderLabel("conn") + "  " +
+		renderKey("6") + " " + renderLabel("autovac") + "  " +
+		renderKey("7") + " " + renderLabel("index") + "  " +
+		renderKey("8") + " " + renderLabel("cache")
+	shortcutRow2 := renderKey("9") + " " + renderLabel("users") + "  " +
+		renderKey("0") + " " + renderLabel("roles") + "  " +
+		renderKey("p") + " " + renderLabel("config") + "  " +
+		renderKey("s") + " " + renderLabel("schema") + "  " +
+		renderKey("e") + " " + renderLabel("ext") + "  " +
+		renderKey("D") + " " + renderLabel("switch-db") + "  " +
+		renderKey("v") + " " + renderLabel("version") + "  " +
+		renderKey("r") + " " + renderLabel("refresh") + "  " +
+		renderKey("q") + " " + renderLabel("quit")
 
-	s += "\n" + sep2 + "\n" + line1 + "\n" + line2
+	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2
 	return s
 }

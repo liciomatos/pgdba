@@ -104,3 +104,30 @@ Flags take priority; env vars are used as defaults:
 | `--sslmode` | `PGSSLMODE` | `disable` |
 
 If password is still empty after flag parsing, `~/.pgpass` is consulted (`hostname:port:database:username:password`, wildcards `*` supported).
+
+## Coding Standards
+
+### Language
+All code, comments, variable names, constants, and identifiers must be in **English**. No Portuguese or other languages anywhere in the codebase.
+
+### Naming
+Use descriptive names — single-letter or abbreviated identifiers are not acceptable. Prefer clarity over brevity:
+- Style renderer functions: `renderKey`, `renderLabel`, `renderValue` (not `k`, `l`, `v`)
+- Boolean helpers: `renderBoolFlag` (not `boolVal`)
+- Visual dividers: `divider` (not `sep2`)
+- Multi-line footer rows: `shortcutRow1`, `shortcutRow2` (not `line1`, `line2`)
+
+### Comments
+Add a comment when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug, or behavior that would surprise a reader. Avoid comments that just restate what the code does — well-named identifiers already do that.
+
+### Receivers
+All model types use **value receivers** (`func (m MyModel) Method()`). Never use pointer receivers (`func (m *MyModel)`) on Bubbletea models — value semantics are required so that state updates return a new model value rather than mutating in place.
+
+### Clean architecture
+- Data fetching lives in `Check*` / `Identify*` builder functions — they query the DB, build `[]table.Row`, and return the model.
+- Model state lives in the struct fields; Update returns a new value.
+- Rendering lives in `View()` — no DB calls or side effects.
+- Detail maps (`queryDetails map[string]string`) are keyed by a unique row identifier (never by row index, which breaks under filter).
+
+### Bubbles table cell count constraint
+`renderRow` in Bubbles iterates over row cells and accesses `m.cols[i]` for each cell. The row cell count **must exactly equal** the column count. Extra cells cause a panic. Store out-of-band data (e.g., full query text) in a `map[string]string` keyed by a unique identifier from the row, never as extra hidden cells.

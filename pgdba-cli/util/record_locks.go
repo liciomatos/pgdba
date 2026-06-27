@@ -109,9 +109,9 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 
 		rowsData = append(rowsData, table.Row{
 			fmt.Sprintf("%d", blockedPID),
-			SeverityColor(blockedUser, 2),
+			blockedUser,
 			fmt.Sprintf("%d", blockingPID),
-			SeverityColor(blockingUser, 1),
+			blockingUser,
 			blockedStatement,
 			blockingStatement,
 			blockedApplication,
@@ -263,8 +263,12 @@ func (m RecordLocksModel) View() string {
 	if m.detailMode {
 		return RenderQueryDetail("Blocked Queries", m.detailText, m.width)
 	}
+	rules := []ColorRule{
+		{Column: 1, Colorize: func(string) int { return 2 }}, // Blocked User → red
+		{Column: 3, Colorize: func(string) int { return 1 }}, // Blocking User → yellow
+	}
 	s := RenderHeader("Blocked Queries") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmTerminate {
 		if m.pidToTerminate != 0 {
 			s += fmt.Sprintf("\nTerminate session with PID %d? (y/n)\n", m.pidToTerminate)

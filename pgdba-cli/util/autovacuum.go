@@ -3,6 +3,8 @@ package util
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -86,15 +88,7 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 
 		deadPctStr := "N/A"
 		if deadPct.Valid {
-			raw := fmt.Sprintf("%.1f%%", deadPct.Float64)
-			switch {
-			case deadPct.Float64 > 30:
-				deadPctStr = SeverityColor(raw, 2)
-			case deadPct.Float64 > 10:
-				deadPctStr = SeverityColor(raw, 1)
-			default:
-				deadPctStr = SeverityColor(raw, 0)
-			}
+			deadPctStr = fmt.Sprintf("%.1f%%", deadPct.Float64)
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -203,8 +197,25 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m AutovacuumModel) View() string {
+	rules := []ColorRule{
+		{Column: 4, Colorize: func(v string) int {
+			// Values are "N/A" or "30.1%"; strip % and parse.
+			f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+			if err != nil {
+				return -1
+			}
+			switch {
+			case f > 30:
+				return 2
+			case f > 10:
+				return 1
+			default:
+				return 0
+			}
+		}},
+	}
 	s := RenderHeader("Autovacuum Monitor") + "\n"
-	s += m.table.View()
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
 	} else {
