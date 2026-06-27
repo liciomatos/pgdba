@@ -11,9 +11,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+type lockDetail struct {
+	blocked  string
+	blocking string
+}
+
 type RecordLocksModel struct {
 	table            table.Model
 	allRows          []table.Row
+	lockDetails      map[string]lockDetail // blockedPID:blockingPID → statements
 	filterText       string
 	filterMode       bool
 	detailMode       bool
@@ -79,6 +85,8 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]lockDetail)
+
 	for rows.Next() {
 		var blockedPID, blockingPID int
 		var blockedUser, blockingUser, blockedStatement, blockingStatement, blockedApplication, blockingApplication string
@@ -87,8 +95,8 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning record locks row", initialModel)
 		}
 
-		fullBlocked := blockedStatement
-		fullBlocking := blockingStatement
+		key := fmt.Sprintf("%d:%d", blockedPID, blockingPID)
+		details[key] = lockDetail{blocked: blockedStatement, blocking: blockingStatement}
 
 		blockedStatement = strings.ReplaceAll(blockedStatement, "\n", " ")
 		blockingStatement = strings.ReplaceAll(blockingStatement, "\n", " ")
@@ -108,8 +116,6 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			blockingStatement,
 			blockedApplication,
 			blockingApplication,
-			fullBlocked,  // row[8] — hidden
-			fullBlocking, // row[9] — hidden
 		})
 	}
 
@@ -121,7 +127,14 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return RecordLocksModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
+	return RecordLocksModel{
+		table:        t,
+		allRows:      rowsData,
+		lockDetails:  details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
 func (m RecordLocksModel) Init() tea.Cmd { return nil }
@@ -177,10 +190,13 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if !m.confirmTerminate {
 				row := m.table.SelectedRow()
-				if len(row) > 9 {
-					m.detailText = "── Blocked Statement ──\n" + row[8] +
-						"\n\n── Blocking Statement ──\n" + row[9]
-					m.detailMode = true
+				if len(row) >= 3 {
+					key := row[0] + ":" + row[2] // blockedPID:blockingPID (plain, no ANSI)
+					if d, ok := m.lockDetails[key]; ok {
+						m.detailText = "── Blocked Statement ──\n" + d.blocked +
+							"\n\n── Blocking Statement ──\n" + d.blocking
+						m.detailMode = true
+					}
 				}
 			}
 			return m, nil
@@ -256,7 +272,7 @@ func (m RecordLocksModel) View() string {
 			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a terminate all • / filter • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a all • / filter • r refresh • q back")
 	}
 	return s
 }

@@ -13,6 +13,7 @@ import (
 type SlowQueriesModel struct {
 	table        table.Model
 	allRows      []table.Row
+	queryDetails map[string]string // queryID → full query text
 	filterText   string
 	filterMode   bool
 	detailMode   bool
@@ -64,6 +65,8 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]string)
+
 	for rows.Next() {
 		var queryID int64
 		var q string
@@ -75,7 +78,9 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning slow queries row", initialModel)
 		}
 
-		fullQuery := q
+		qid := fmt.Sprintf("%d", queryID)
+		details[qid] = q
+
 		q = strings.ReplaceAll(q, "\n", " ")
 		if len(q) > 50 {
 			q = q[:50] + "..."
@@ -90,14 +95,13 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		}
 
 		rowsData = append(rowsData, table.Row{
-			fmt.Sprintf("%d", queryID),
+			qid,
 			q,
 			fmt.Sprintf("%d", calls),
 			totalStr,
 			fmt.Sprintf("%.2f", meanExecTime),
 			fmt.Sprintf("%.2f", stddevExecTime),
 			fmt.Sprintf("%d", rowsReturned),
-			fullQuery, // row[7] — hidden, used for detail view
 		})
 	}
 
@@ -109,7 +113,14 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return SlowQueriesModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
+	return SlowQueriesModel{
+		table:        t,
+		allRows:      rowsData,
+		queryDetails: details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
 func (m SlowQueriesModel) Init() tea.Cmd { return nil }
@@ -153,9 +164,11 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			row := m.table.SelectedRow()
-			if len(row) > 7 && row[7] != "" {
-				m.detailText = row[7]
-				m.detailMode = true
+			if len(row) > 0 {
+				if detail, ok := m.queryDetails[row[0]]; ok {
+					m.detailText = detail
+					m.detailMode = true
+				}
 			}
 			return m, nil
 		case "/":

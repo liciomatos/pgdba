@@ -14,6 +14,7 @@ import (
 type LongRunningQueriesModel struct {
 	table        table.Model
 	allRows      []table.Row
+	queryDetails map[string]string // PID string → full query text
 	filterText   string
 	filterMode   bool
 	detailMode   bool
@@ -59,6 +60,8 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]string)
+
 	for rows.Next() {
 		var pid int
 		var usename, applicationName, state string
@@ -69,7 +72,9 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning long running queries row", initialModel)
 		}
 
-		fullQuery := q
+		pidStr := fmt.Sprintf("%d", pid)
+		details[pidStr] = q
+
 		q = strings.ReplaceAll(q, "\n", " ")
 		if len(q) > 80 {
 			q = q[:80] + "..."
@@ -86,13 +91,12 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		}
 
 		rowsData = append(rowsData, table.Row{
-			fmt.Sprintf("%d", pid),
+			pidStr,
 			usename,
 			applicationName,
 			state,
 			durStr,
 			q,
-			fullQuery, // row[6] — hidden, used for detail view
 		})
 	}
 
@@ -104,7 +108,14 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return LongRunningQueriesModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
+	return LongRunningQueriesModel{
+		table:        t,
+		allRows:      rowsData,
+		queryDetails: details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
 func (m LongRunningQueriesModel) Init() tea.Cmd { return nil }
@@ -149,9 +160,11 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if !m.confirmKill {
 				row := m.table.SelectedRow()
-				if len(row) > 6 && row[6] != "" {
-					m.detailText = row[6]
-					m.detailMode = true
+				if len(row) > 0 {
+					if detail, ok := m.queryDetails[row[0]]; ok {
+						m.detailText = detail
+						m.detailMode = true
+					}
 				}
 			}
 			return m, nil

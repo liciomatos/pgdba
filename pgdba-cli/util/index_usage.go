@@ -13,6 +13,7 @@ import (
 type IndexUsageModel struct {
 	table        table.Model
 	allRows      []table.Row
+	indexDetails map[string]string // "schema.index" → detail text
 	filterText   string
 	filterMode   bool
 	detailMode   bool
@@ -67,6 +68,8 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]string)
+
 	for rows.Next() {
 		var schemaname, tablename, indexname, indexSize, indexColumns string
 		var idxScan, idxTupRead, idxTupFetch int64
@@ -88,9 +91,9 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			validStr = SeverityColor("INVALID", 2)
 		}
 
-		// Build pre-formatted detail text stored as hidden cell row[9]
+		key := schemaname + "." + indexname
 		colLines := strings.ReplaceAll(indexColumns, ", ", "\n  ")
-		detail := fmt.Sprintf(
+		details[key] = fmt.Sprintf(
 			"Schema:  %s\nTable:   %s\nIndex:   %s\n\nColumns:\n  %s\n\nValid:   %s\n\nScans: %d  |  Tup Read: %d  |  Tup Fetch: %d\nSize: %s",
 			schemaname, tablename, indexname,
 			colLines,
@@ -109,7 +112,6 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%d", idxTupRead),
 			fmt.Sprintf("%d", idxTupFetch),
 			indexSize,
-			detail, // row[9] — hidden, used for detail view
 		})
 	}
 
@@ -121,7 +123,14 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return IndexUsageModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
+	return IndexUsageModel{
+		table:        t,
+		allRows:      rowsData,
+		indexDetails: details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
 func (m IndexUsageModel) Init() tea.Cmd { return nil }
@@ -163,9 +172,12 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			row := m.table.SelectedRow()
-			if len(row) > 9 && row[9] != "" {
-				m.detailText = row[9]
-				m.detailMode = true
+			if len(row) >= 3 {
+				key := row[0] + "." + row[2] // schema.indexname (both plain)
+				if detail, ok := m.indexDetails[key]; ok {
+					m.detailText = detail
+					m.detailMode = true
+				}
 			}
 			return m, nil
 		case "/":
