@@ -40,6 +40,36 @@ func SeverityColor(text string, level int) string {
 	return lipgloss.NewStyle().Foreground(colors[level]).Render(text)
 }
 
+// TableHeight returns the number of rows the table viewport should show
+// given the terminal height. 5 = 2 header lines + 1 blank + 1 blank + 1 footer.
+func TableHeight(termHeight int) int {
+	h := termHeight - 5
+	if h < 5 {
+		h = 5
+	}
+	return h
+}
+
+// StretchColumn returns a new column slice where the column at colIdx has its
+// width expanded so that the total table fills termWidth.
+func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
+	fixed := 0
+	for i, c := range cols {
+		if i != colIdx {
+			fixed += c.Width
+		}
+	}
+	// ~1 char padding per column separator, small extra buffer
+	w := termWidth - fixed - len(cols) - 2
+	if w < 20 {
+		w = 20
+	}
+	out := make([]table.Column, len(cols))
+	copy(out, cols)
+	out[colIdx].Width = w
+	return out
+}
+
 // DefaultTableStyles returns styled table headers and selected-row highlight.
 func DefaultTableStyles() table.Styles {
 	s := table.DefaultStyles()

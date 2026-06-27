@@ -16,6 +16,8 @@ type LongRunningQueriesModel struct {
 	initialModel func() tea.Model
 	confirmKill  bool
 	pidToKill    int
+	width        int
+	height       int
 }
 
 func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
@@ -86,16 +88,24 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return LongRunningQueriesModel{table: t, initialModel: initialModel}
+	return LongRunningQueriesModel{table: t, initialModel: initialModel, width: 120, height: 30}
 }
 
 func (m LongRunningQueriesModel) Init() tea.Cmd { return nil }
 
 func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		cols := StretchColumn(m.table.Columns(), 5, msg.Width)
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":

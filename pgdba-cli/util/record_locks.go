@@ -16,6 +16,8 @@ type RecordLocksModel struct {
 	initialModel     func() tea.Model
 	confirmTerminate bool
 	pidToTerminate   int
+	width            int
+	height           int
 }
 
 func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
@@ -108,10 +110,11 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return RecordLocksModel{table: t, initialModel: initialModel}
+	return RecordLocksModel{table: t, initialModel: initialModel, width: 120, height: 30}
 }
 
 func (m RecordLocksModel) Init() tea.Cmd {
@@ -120,6 +123,25 @@ func (m RecordLocksModel) Init() tea.Cmd {
 
 func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		// Distribute remaining width equally between the two statement columns (4 and 5)
+		fixedCols := []int{0, 1, 2, 3, 6, 7}
+		fixed := 0
+		cols := m.table.Columns()
+		for _, i := range fixedCols {
+			fixed += cols[i].Width
+		}
+		stmtWidth := (msg.Width - fixed - len(cols) - 2) / 2
+		if stmtWidth < 20 {
+			stmtWidth = 20
+		}
+		cols[4].Width = stmtWidth
+		cols[5].Width = stmtWidth
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":

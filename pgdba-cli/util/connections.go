@@ -15,6 +15,7 @@ type ConnectionsModel struct {
 	usedConns    int
 	maxConns     int
 	initialModel func() tea.Model
+	height       int
 }
 
 func CheckConnections(initialModel func() tea.Model) tea.Model {
@@ -58,16 +59,21 @@ func CheckConnections(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return ConnectionsModel{table: t, usedConns: usedConns, maxConns: maxConns, initialModel: initialModel}
+	return ConnectionsModel{table: t, usedConns: usedConns, maxConns: maxConns, initialModel: initialModel, height: 30}
 }
 
 func (m ConnectionsModel) Init() tea.Cmd { return nil }
 
 func (m ConnectionsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":

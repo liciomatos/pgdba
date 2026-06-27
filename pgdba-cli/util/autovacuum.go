@@ -18,6 +18,7 @@ type AutovacuumModel struct {
 	confirmVacuum bool
 	schemaName    string
 	tableName     string
+	height        int
 }
 
 func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
@@ -103,16 +104,21 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return AutovacuumModel{table: t, initialModel: initialModel}
+	return AutovacuumModel{table: t, initialModel: initialModel, height: 30}
 }
 
 func (m AutovacuumModel) Init() tea.Cmd { return nil }
 
 func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":

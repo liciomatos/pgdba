@@ -13,6 +13,8 @@ import (
 type SlowQueriesModel struct {
 	table        table.Model
 	initialModel func() tea.Model
+	width        int
+	height       int
 }
 
 func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
@@ -93,10 +95,11 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return SlowQueriesModel{table: t, initialModel: initialModel}
+	return SlowQueriesModel{table: t, initialModel: initialModel, width: 120, height: 30}
 }
 
 func (m SlowQueriesModel) Init() tea.Cmd {
@@ -105,6 +108,13 @@ func (m SlowQueriesModel) Init() tea.Cmd {
 
 func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		cols := StretchColumn(m.table.Columns(), 1, msg.Width)
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":
