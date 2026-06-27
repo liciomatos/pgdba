@@ -31,6 +31,8 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
             CASE WHEN n_live_tup + n_dead_tup = 0 THEN NULL
                  ELSE ROUND(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
             END AS dead_pct,
+            last_vacuum,
+            last_analyze,
             last_autovacuum,
             last_autoanalyze,
             autovacuum_count
@@ -51,9 +53,11 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		{Title: "Dead Tuples", Width: 12},
 		{Title: "Live Tuples", Width: 12},
 		{Title: "Dead %", Width: 8},
-		{Title: "Last Autovacuum", Width: 20},
-		{Title: "Last Autoanalyze", Width: 20},
-		{Title: "Vacuum Count", Width: 13},
+		{Title: "Last Vacuum", Width: 18},
+		{Title: "Last Analyze", Width: 18},
+		{Title: "Last Autovacuum", Width: 18},
+		{Title: "Last Autoanalyze", Width: 18},
+		{Title: "Vac Count", Width: 10},
 	}
 
 	var rowsData []table.Row
@@ -61,10 +65,10 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		var schemaname, relname string
 		var nDeadTup, nLiveTup, autovacuumCount int64
 		var deadPct sql.NullFloat64
-		var lastAutovacuum, lastAutoanalyze *time.Time
+		var lastVacuum, lastAnalyze, lastAutovacuum, lastAutoanalyze *time.Time
 
 		if err := rows.Scan(&schemaname, &relname, &nDeadTup, &nLiveTup, &deadPct,
-			&lastAutovacuum, &lastAutoanalyze, &autovacuumCount); err != nil {
+			&lastVacuum, &lastAnalyze, &lastAutovacuum, &lastAutoanalyze, &autovacuumCount); err != nil {
 			return NewErrorModel(err, "Scanning autovacuum row", initialModel)
 		}
 
@@ -94,6 +98,8 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%d", nDeadTup),
 			fmt.Sprintf("%d", nLiveTup),
 			deadPctStr,
+			formatTime(lastVacuum),
+			formatTime(lastAnalyze),
 			formatTime(lastAutovacuum),
 			formatTime(lastAutoanalyze),
 			fmt.Sprintf("%d", autovacuumCount),
