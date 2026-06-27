@@ -18,15 +18,24 @@ type IndexUsageModel struct {
 func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 	query := `
         SELECT
-            schemaname,
-            relname AS tablename,
-            indexrelname AS indexname,
-            idx_scan,
-            idx_tup_read,
-            idx_tup_fetch,
-            pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
-        FROM pg_stat_user_indexes
-        ORDER BY idx_scan ASC
+            s.schemaname,
+            s.relname AS tablename,
+            s.indexrelname AS indexname,
+            s.idx_scan,
+            s.idx_tup_read,
+            s.idx_tup_fetch,
+            pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size,
+            i.indisvalid AS is_valid,
+            COALESCE((
+                SELECT string_agg(a.attname, ', ' ORDER BY x.ord)
+                FROM pg_index ix
+                JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ord) ON true
+                JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = x.attnum
+                WHERE ix.indexrelid = s.indexrelid AND x.attnum > 0
+            ), '(expression)') AS index_columns
+        FROM pg_stat_user_indexes s
+        JOIN pg_index i ON i.indexrelid = s.indexrelid
+        ORDER BY s.idx_scan ASC
         LIMIT 20;
     `
 
@@ -37,21 +46,24 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 	defer rows.Close()
 
 	columns := []table.Column{
-		{Title: "Schema", Width: 12},
-		{Title: "Table", Width: 25},
-		{Title: "Index", Width: 35},
-		{Title: "Scans", Width: 10},
-		{Title: "Tup Read", Width: 12},
-		{Title: "Tup Fetch", Width: 12},
-		{Title: "Size", Width: 10},
+		{Title: "Schema", Width: 10},
+		{Title: "Table", Width: 20},
+		{Title: "Index", Width: 28},
+		{Title: "Columns", Width: 20},
+		{Title: "Valid", Width: 7},
+		{Title: "Scans", Width: 8},
+		{Title: "Tup Read", Width: 10},
+		{Title: "Tup Fetch", Width: 10},
+		{Title: "Size", Width: 8},
 	}
 
 	var rowsData []table.Row
 	for rows.Next() {
-		var schemaname, tablename, indexname, indexSize string
+		var schemaname, tablename, indexname, indexSize, indexColumns string
 		var idxScan, idxTupRead, idxTupFetch int64
+		var isValid bool
 
-		if err := rows.Scan(&schemaname, &tablename, &indexname, &idxScan, &idxTupRead, &idxTupFetch, &indexSize); err != nil {
+		if err := rows.Scan(&schemaname, &tablename, &indexname, &idxScan, &idxTupRead, &idxTupFetch, &indexSize, &isValid, &indexColumns); err != nil {
 			return NewErrorModel(err, "Scanning index usage row", initialModel)
 		}
 
@@ -60,10 +72,17 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			scanStr = SeverityColor(scanStr, 2)
 		}
 
+		validStr := SeverityColor("yes", 0)
+		if !isValid {
+			validStr = SeverityColor("INVALID", 2)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			schemaname,
 			tablename,
 			indexname,
+			indexColumns,
+			validStr,
 			scanStr,
 			fmt.Sprintf("%d", idxTupRead),
 			fmt.Sprintf("%d", idxTupFetch),
