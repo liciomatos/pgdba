@@ -95,10 +95,10 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		}
 
 		rowsData = append(rowsData, table.Row{
-			SeverityColor(fmt.Sprintf("%d", blockedPID), 2),
-			blockedUser,
-			SeverityColor(fmt.Sprintf("%d", blockingPID), 1),
-			blockingUser,
+			fmt.Sprintf("%d", blockedPID),
+			SeverityColor(blockedUser, 2),
+			fmt.Sprintf("%d", blockingPID),
+			SeverityColor(blockingUser, 1),
 			blockedStatement,
 			blockingStatement,
 			blockedApplication,
