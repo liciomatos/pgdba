@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	_ "github.com/lib/pq"
 	"github.com/liciomatos/pgdba-cli/config"
 	"github.com/liciomatos/pgdba-cli/util"
@@ -187,20 +188,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
-	s += "What do you want to do?\n\n"
+	logo := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("pgdba-cli")
+	subtitle := lipgloss.NewStyle().Faint(true).Render("PostgreSQL DBA Tools")
+	conn := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf(
+		"Connected: %s@%s:%d/%s  (v%s)",
+		config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName, config.Config.Version,
+	))
+	s := fmt.Sprintf("%s  %s\n%s\n\n", logo, subtitle, conn)
 
+	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	for i, choice := range m.choices {
-		cursor := " "
 		if m.cursor == i {
-			cursor = ">"
+			s += cursorStyle.Render("▶ " + choice) + "\n"
+		} else {
+			s += "  " + choice + "\n"
 		}
-
-		s += fmt.Sprintf("%s %s\n", cursor, choice)
 	}
 
-	s += "\nPress q to quit.\n"
-
+	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓/jk navigate • enter select • q quit")
 	return s
 }

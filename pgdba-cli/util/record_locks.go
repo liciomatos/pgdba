@@ -9,7 +9,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type RecordLocksModel struct {
@@ -94,9 +93,9 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		}
 
 		rowsData = append(rowsData, table.Row{
-			fmt.Sprintf("%d", blockedPID),
+			SeverityColor(fmt.Sprintf("%d", blockedPID), 2),
 			blockedUser,
-			fmt.Sprintf("%d", blockingPID),
+			SeverityColor(fmt.Sprintf("%d", blockingPID), 1),
 			blockingUser,
 			blockedStatement,
 			blockingStatement,
@@ -109,6 +108,7 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return RecordLocksModel{table: t, initialModel: initialModel}
@@ -174,8 +174,7 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RecordLocksModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Blocked Queries") + "\n"
 	s += m.table.View()
 	if m.confirmTerminate {
 		if m.pidToTerminate != 0 {
@@ -184,7 +183,7 @@ func (m RecordLocksModel) View() string {
 			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • t terminate • a terminate all • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • t terminate • a terminate all • r refresh • q back")
 	}
 	return s
 }

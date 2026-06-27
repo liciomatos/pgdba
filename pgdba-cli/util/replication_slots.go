@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type ReplicationSlotsModel struct {
@@ -49,10 +48,17 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning replication slots row", initialModel)
 		}
 
+		activeStr := fmt.Sprintf("%t", active)
+		if active {
+			activeStr = SeverityColor(activeStr, 0)
+		} else {
+			activeStr = SeverityColor(activeStr, 2)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			slotName,
 			size,
-			fmt.Sprintf("%t", active),
+			activeStr,
 		})
 	}
 
@@ -60,6 +66,7 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return ReplicationSlotsModel{table: t, initialModel: initialModel}
@@ -111,13 +118,12 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ReplicationSlotsModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Replication Slots") + "\n"
 	s += m.table.View()
 	if m.confirmDelete {
 		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {
-		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • d drop • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • r refresh • q back")
 	}
 	return s
 }

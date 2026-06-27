@@ -9,7 +9,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type LongRunningQueriesModel struct {
@@ -63,12 +62,22 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 
 		query = strings.ReplaceAll(query, "\n", " ")
 
+		durStr := fmt.Sprintf("%.1fs", durationSeconds)
+		switch {
+		case durationSeconds > 60:
+			durStr = SeverityColor(durStr, 2)
+		case durationSeconds > 10:
+			durStr = SeverityColor(durStr, 1)
+		default:
+			durStr = SeverityColor(durStr, 0)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			fmt.Sprintf("%d", pid),
 			usename,
 			applicationName,
 			state,
-			fmt.Sprintf("%.1f", durationSeconds),
+			durStr,
 			query,
 		})
 	}
@@ -77,6 +86,7 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return LongRunningQueriesModel{table: t, initialModel: initialModel}
@@ -129,13 +139,12 @@ func (m LongRunningQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m LongRunningQueriesModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Long Running Queries") + "\n"
 	s += m.table.View()
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {
-		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • k kill selected • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • k kill selected • r refresh • q back")
 	}
 	return s
 }

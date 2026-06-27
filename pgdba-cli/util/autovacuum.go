@@ -10,7 +10,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type AutovacuumModel struct {
@@ -77,7 +76,15 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 
 		deadPctStr := "N/A"
 		if deadPct.Valid {
-			deadPctStr = fmt.Sprintf("%.1f", deadPct.Float64)
+			raw := fmt.Sprintf("%.1f%%", deadPct.Float64)
+			switch {
+			case deadPct.Float64 > 30:
+				deadPctStr = SeverityColor(raw, 2)
+			case deadPct.Float64 > 10:
+				deadPctStr = SeverityColor(raw, 1)
+			default:
+				deadPctStr = SeverityColor(raw, 0)
+			}
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -96,6 +103,7 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return AutovacuumModel{table: t, initialModel: initialModel}
@@ -154,13 +162,12 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m AutovacuumModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Autovacuum Monitor") + "\n"
 	s += m.table.View()
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
 	} else {
-		s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • v vacuum analyze • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • v vacuum analyze • r refresh • q back")
 	}
 	return s
 }

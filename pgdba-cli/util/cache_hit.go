@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type CacheHitModel struct {
@@ -60,14 +59,34 @@ func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning cache hit row", initialModel)
 		}
 
+		hitPctStr := fmt.Sprintf("%.2f%%", cacheHitRatio)
+		switch {
+		case cacheHitRatio < 70:
+			hitPctStr = SeverityColor(hitPctStr, 2)
+		case cacheHitRatio < 90:
+			hitPctStr = SeverityColor(hitPctStr, 1)
+		default:
+			hitPctStr = SeverityColor(hitPctStr, 0)
+		}
+
+		idxHitPctStr := fmt.Sprintf("%.2f%%", idxCacheHitRatio)
+		switch {
+		case idxCacheHitRatio < 70:
+			idxHitPctStr = SeverityColor(idxHitPctStr, 2)
+		case idxCacheHitRatio < 90:
+			idxHitPctStr = SeverityColor(idxHitPctStr, 1)
+		default:
+			idxHitPctStr = SeverityColor(idxHitPctStr, 0)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			relname,
 			fmt.Sprintf("%d", heapRead),
 			fmt.Sprintf("%d", heapHit),
-			fmt.Sprintf("%.2f%%", cacheHitRatio),
+			hitPctStr,
 			fmt.Sprintf("%d", idxRead),
 			fmt.Sprintf("%d", idxHit),
-			fmt.Sprintf("%.2f%%", idxCacheHitRatio),
+			idxHitPctStr,
 		})
 	}
 
@@ -75,6 +94,7 @@ func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return CacheHitModel{table: t, initialModel: initialModel}
@@ -99,9 +119,8 @@ func (m CacheHitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m CacheHitModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Cache Hit Ratio") + "\n"
 	s += m.table.View()
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
 	return s
 }

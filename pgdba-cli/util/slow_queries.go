@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type SlowQueriesModel struct {
@@ -71,11 +70,19 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 			query = query[:maxQueryLength] + "..."
 		}
 
+		totalStr := fmt.Sprintf("%.2f", totalExecTime)
+		switch {
+		case totalExecTime > 1000:
+			totalStr = SeverityColor(totalStr, 2)
+		case totalExecTime > 100:
+			totalStr = SeverityColor(totalStr, 1)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			fmt.Sprintf("%d", queryID),
 			query,
 			fmt.Sprintf("%d", calls),
-			fmt.Sprintf("%.2f", totalExecTime),
+			totalStr,
 			fmt.Sprintf("%.2f", meanExecTime),
 			fmt.Sprintf("%.2f", stddevExecTime),
 			fmt.Sprintf("%d", rowsReturned),
@@ -86,6 +93,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return SlowQueriesModel{table: t, initialModel: initialModel}
@@ -112,9 +120,8 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m SlowQueriesModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Slow Queries") + "\n"
 	s += m.table.View()
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
 	return s
 }

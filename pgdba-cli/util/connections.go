@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type ConnectionsModel struct {
@@ -59,6 +58,7 @@ func CheckConnections(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return ConnectionsModel{table: t, usedConns: usedConns, maxConns: maxConns, initialModel: initialModel}
@@ -83,8 +83,7 @@ func (m ConnectionsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ConnectionsModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Connections Overview") + "\n"
 	s += m.table.View()
 
 	pct := 0.0
@@ -92,19 +91,18 @@ func (m ConnectionsModel) View() string {
 		pct = float64(m.usedConns) / float64(m.maxConns) * 100
 	}
 
-	var color lipgloss.Color
+	var level int
 	switch {
 	case pct >= 90:
-		color = "9"
+		level = 2
 	case pct >= 70:
-		color = "11"
+		level = 1
 	default:
-		color = "10"
+		level = 0
 	}
 
-	summary := lipgloss.NewStyle().Foreground(color).Render(
-		fmt.Sprintf("%d / %d connections used (%.1f%%)", m.usedConns, m.maxConns, pct))
+	summary := SeverityColor(fmt.Sprintf("%d / %d connections used (%.1f%%)", m.usedConns, m.maxConns, pct), level)
 	s += "\n" + summary
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
 	return s
 }

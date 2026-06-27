@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type IndexUsageModel struct {
@@ -55,11 +54,16 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 			return NewErrorModel(err, "Scanning index usage row", initialModel)
 		}
 
+		scanStr := fmt.Sprintf("%d", idxScan)
+		if idxScan == 0 {
+			scanStr = SeverityColor(scanStr, 2)
+		}
+
 		rowsData = append(rowsData, table.Row{
 			schemaname,
 			tablename,
 			indexname,
-			fmt.Sprintf("%d", idxScan),
+			scanStr,
 			fmt.Sprintf("%d", idxTupRead),
 			fmt.Sprintf("%d", idxTupFetch),
 			indexSize,
@@ -70,6 +74,7 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return IndexUsageModel{table: t, initialModel: initialModel}
@@ -94,9 +99,8 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m IndexUsageModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
+	s := RenderHeader("Index Usage") + "\n"
 	s += m.table.View()
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
 	return s
 }

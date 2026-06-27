@@ -2,6 +2,7 @@
 BINARY_NAME=pgdba-cli
 DOCKER_COMPOSE_FILE=docker-compose.yaml
 COMPOSE := $(shell which podman-compose 2>/dev/null || which docker-compose 2>/dev/null)
+CONTAINER_NAME=postgres_pgdba
 
 # Build the Go project
 build:
@@ -28,14 +29,43 @@ clean:
 	@echo "Cleaning the build..."
 	rm -f pgdba-cli/$(BINARY_NAME)
 
+# Seed the local database with test data (requires docker-up first)
+seed:
+	@echo "Applying test schema..."
+	podman exec -i $(CONTAINER_NAME) psql -U postgres -d mydb < init-db/01_schema.sql
+	@echo "Seeding test data..."
+	podman exec -i $(CONTAINER_NAME) psql -U postgres -d mydb < init-db/02_data.sql
+	@echo "Seed complete. Use 'make scenario-*' for dynamic scenarios."
+
+# Simulate a blocked query scenario (shows in Blocked Queries screen)
+scenario-locks:
+	@chmod +x scenarios/scenario-locks.sh && ./scenarios/scenario-locks.sh
+
+# Simulate a long-running query (shows in Long Running Queries screen)
+scenario-longrunning:
+	@chmod +x scenarios/scenario-longrunning.sh && ./scenarios/scenario-longrunning.sh
+
+# Create a test replication slot (shows in Replication Slots screen)
+scenario-slots:
+	@chmod +x scenarios/scenario-slots.sh && ./scenarios/scenario-slots.sh
+
+# Remove all dynamic scenarios (keeps seed data)
+scenarios-clean:
+	@chmod +x scenarios/cleanup.sh && ./scenarios/cleanup.sh
+
 # Help
 help:
 	@echo "Makefile commands:"
-	@echo "  build        Build the Go project"
-	@echo "  run          Run the Go project"
-	@echo "  docker-up    Start Docker Compose"
-	@echo "  docker-down  Stop Docker Compose"
-	@echo "  clean        Clean the build"
-	@echo "  help         Show this help message"
+	@echo "  build               Build the Go project"
+	@echo "  run                 Run the Go project"
+	@echo "  docker-up           Start Docker Compose"
+	@echo "  docker-down         Stop Docker Compose"
+	@echo "  clean               Clean the build"
+	@echo "  seed                Seed database with test data"
+	@echo "  scenario-locks      Simulate a blocked session"
+	@echo "  scenario-longrunning Simulate a long-running query"
+	@echo "  scenario-slots      Create a test replication slot"
+	@echo "  scenarios-clean     Remove dynamic scenarios"
+	@echo "  help                Show this help message"
 
-.PHONY: build run docker-up docker-down clean help
+.PHONY: build run docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean help

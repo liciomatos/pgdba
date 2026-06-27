@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/liciomatos/pgdba-cli/config"
 )
 
@@ -35,7 +34,8 @@ func (m *VersionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *VersionModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n\n", m.version)
-	s += lipgloss.NewStyle().Faint(true).Render("r refresh • q back")
+	s := RenderHeader("Check Version") + "\n"
+	s += fmt.Sprintf("Server version: %s\n", m.version)
+	s += "\n" + FooterStyle.Render("r refresh • q back")
 	return s
 }
