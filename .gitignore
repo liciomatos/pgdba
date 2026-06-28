@@ -43,3 +43,12 @@ vendor/
 
 # Dependency directories
 node_modules/
+
+# Compiled binary
+pgdba-cli/pgdba-cli
+
+# Downloaded packages (dev tooling)
+pgdba-cli/*.deb
+
+# OS
+.DS_Store

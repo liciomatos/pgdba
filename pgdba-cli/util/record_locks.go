@@ -8,18 +8,32 @@ import (
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+type lockDetail struct {
+	blocked  string
+	blocking string
+}
+
 type RecordLocksModel struct {
 	table            table.Model
+	allRows          []table.Row
+	lockDetails      map[string]lockDetail // blockedPID:blockingPID → statements
+	filterText       string
+	filterMode       bool
+	detailMode       bool
+	detailText       string
 	initialModel     func() tea.Model
 	confirmTerminate bool
 	pidToTerminate   int
+	width            int
+	height           int
 }
 
-func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
+func (m RecordLocksModel) IsInputMode() bool { return m.filterMode }
+
+func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	query := `
         SELECT
             blocked_locks.pid AS blocked_pid,
@@ -35,7 +49,7 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
         JOIN
             pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
         JOIN
-            pg_catalog.pg_locks blocking_locks 
+            pg_catalog.pg_locks blocking_locks
             ON blocking_locks.locktype = blocked_locks.locktype
             AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
             AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
@@ -55,8 +69,7 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
-		fmt.Printf("Error executing query: %v\n", err)
-		return RecordLocksModel{}
+		return NewErrorModel(err, "Loading record locks", initialModel)
 	}
 	defer rows.Close()
 
@@ -67,32 +80,31 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
 		{Title: "Blocking User", Width: 15},
 		{Title: "Blocked Statement", Width: 50},
 		{Title: "Blocking Statement", Width: 50},
-		{Title: "Blocked Application", Width: 20},
-		{Title: "Blocking Application", Width: 20},
+		{Title: "Blocked App", Width: 20},
+		{Title: "Blocking App", Width: 20},
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]lockDetail)
+
 	for rows.Next() {
 		var blockedPID, blockingPID int
 		var blockedUser, blockingUser, blockedStatement, blockingStatement, blockedApplication, blockingApplication string
 
-		err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication)
-		if err != nil {
-			fmt.Printf("Error scanning row: %v\n", err)
-			return RecordLocksModel{}
+		if err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication); err != nil {
+			return NewErrorModel(err, "Scanning record locks row", initialModel)
 		}
 
-		// Replace newline characters with spaces to prevent wrapping
+		key := fmt.Sprintf("%d:%d", blockedPID, blockingPID)
+		details[key] = lockDetail{blocked: blockedStatement, blocking: blockingStatement}
+
 		blockedStatement = strings.ReplaceAll(blockedStatement, "\n", " ")
 		blockingStatement = strings.ReplaceAll(blockingStatement, "\n", " ")
-
-		// Truncate the queries to a fixed length to prevent wrapping
-		maxQueryLength := 50
-		if len(blockedStatement) > maxQueryLength {
-			blockedStatement = blockedStatement[:maxQueryLength] + "..."
+		if len(blockedStatement) > 50 {
+			blockedStatement = blockedStatement[:50] + "..."
 		}
-		if len(blockingStatement) > maxQueryLength {
-			blockingStatement = blockingStatement[:maxQueryLength] + "..."
+		if len(blockingStatement) > 50 {
+			blockingStatement = blockingStatement[:50] + "..."
 		}
 
 		rowsData = append(rowsData, table.Row{
@@ -111,19 +123,88 @@ func CheckRecordLocks(initialModel func() tea.Model) RecordLocksModel {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return RecordLocksModel{table: t, initialModel: initialModel}
+	return RecordLocksModel{
+		table:        t,
+		allRows:      rowsData,
+		lockDetails:  details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
-func (m RecordLocksModel) Init() tea.Cmd {
-	return nil
-}
+func (m RecordLocksModel) Init() tea.Cmd { return nil }
 
 func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		fixedCols := []int{0, 1, 2, 3, 6, 7}
+		fixed := 0
+		cols := m.table.Columns()
+		for _, i := range fixedCols {
+			fixed += cols[i].Width
+		}
+		stmtWidth := (msg.Width - fixed - len(cols) - 2) / 2
+		if stmtWidth < 20 {
+			stmtWidth = 20
+		}
+		cols[4].Width = stmtWidth
+		cols[5].Width = stmtWidth
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "enter":
+			if !m.confirmTerminate {
+				row := m.table.SelectedRow()
+				if len(row) >= 3 {
+					key := row[0] + ":" + row[2] // blockedPID:blockingPID (plain, no ANSI)
+					if d, ok := m.lockDetails[key]; ok {
+						m.detailText = "── Blocked Statement ──\n" + d.blocked +
+							"\n\n── Blocking Statement ──\n" + d.blocking
+						m.detailMode = true
+					}
+				}
+			}
+			return m, nil
+		case "/":
+			if !m.confirmTerminate {
+				m.filterMode = true
+			}
+			return m, nil
 		case "q", "esc":
 			if m.confirmTerminate {
 				m.confirmTerminate = false
@@ -132,56 +213,38 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.initialModel(), nil
 		case "t":
 			if m.confirmTerminate {
-				if msg.String() == "y" {
-					err := terminateSession(m.pidToTerminate)
-					if err != nil {
-						fmt.Printf("Error terminating session: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
-					}
-				}
 				m.confirmTerminate = false
 				return m, nil
 			}
 			selectedRow := m.table.SelectedRow()
-			m.pidToTerminate, _ = strconv.Atoi(selectedRow[2]) // Assuming Blocking PID is at index 2
+			if len(selectedRow) == 0 {
+				return m, nil
+			}
+			m.pidToTerminate, _ = strconv.Atoi(selectedRow[2])
 			m.confirmTerminate = true
 			return m, nil
 		case "a":
 			if m.confirmTerminate {
-				if msg.String() == "y" {
-					err := terminateAllSessions(m.table.Rows())
-					if err != nil {
-						fmt.Printf("Error terminating all sessions: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
-					}
-				}
 				m.confirmTerminate = false
 				return m, nil
 			}
 			m.confirmTerminate = true
-			m.pidToTerminate = 0 // Indicate that we are terminating all sessions
+			m.pidToTerminate = 0
 			return m, nil
+		case "r":
+			return CheckRecordLocks(m.initialModel), nil
 		case "y":
 			if m.confirmTerminate {
 				if m.pidToTerminate != 0 {
-					err := terminateSession(m.pidToTerminate)
-					if err != nil {
-						fmt.Printf("Error terminating session: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
+					if err := terminateSession(m.pidToTerminate); err != nil {
+						return NewErrorModel(err, fmt.Sprintf("Terminating session PID %d", m.pidToTerminate), m.initialModel), nil
 					}
 				} else {
-					err := terminateAllSessions(m.table.Rows())
-					if err != nil {
-						fmt.Printf("Error terminating all sessions: %v\n", err)
-					} else {
-						return CheckRecordLocks(m.initialModel), nil
+					if err := terminateAllSessions(m.table.Rows()); err != nil {
+						return NewErrorModel(err, "Terminating all sessions", m.initialModel), nil
 					}
 				}
-				m.confirmTerminate = false
-				return m, nil
+				return CheckRecordLocks(m.initialModel), nil
 			}
 		case "n":
 			if m.confirmTerminate {
@@ -197,29 +260,35 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RecordLocksModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
-	s += m.table.View()
+	if m.detailMode {
+		return RenderQueryDetail("Blocked Queries", m.detailText, m.width)
+	}
+	rules := []ColorRule{
+		{Column: 1, Colorize: func(string) int { return 2 }}, // Blocked User → red
+		{Column: 3, Colorize: func(string) int { return 1 }}, // Blocking User → yellow
+	}
+	s := RenderHeader("Blocked Queries") + "\n"
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmTerminate {
 		if m.pidToTerminate != 0 {
-			s += fmt.Sprintf("\nAre you sure you want to terminate the session with PID '%d'? (y/n)\n", m.pidToTerminate)
+			s += fmt.Sprintf("\nTerminate session with PID %d? (y/n)\n", m.pidToTerminate)
 		} else {
-			s += "\nAre you sure you want to terminate all sessions? (y/n)\n"
+			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\nPress 't' to terminate the selected session. Press 'a' to terminate all sessions. Press 'q' to quit.\n"
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a all • / filter • r refresh • q back")
 	}
 	return s
 }
 
 func terminateSession(pid int) error {
-	_, err := config.Config.DB.Exec(fmt.Sprintf("SELECT pg_terminate_backend(%d);", pid))
+	_, err := config.Config.DB.Exec("SELECT pg_terminate_backend($1)", pid)
 	return err
 }
 
 func terminateAllSessions(rows []table.Row) error {
 	for _, row := range rows {
-		pid, err := strconv.Atoi(row[2]) // Assuming Blocking PID is at index 2
+		pid, err := strconv.Atoi(row[2])
 		if err != nil {
 			return fmt.Errorf("error converting PID: %v", err)
 		}

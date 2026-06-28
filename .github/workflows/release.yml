@@ -1,26 +1,27 @@
-name: Build and Test
+name: Release
 
 on:
   push:
-    branches:
-      - main
-      - 'feature/**'
-  pull_request:
-    branches:
-      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.22'
+          go-version: '1.25'
 
       - name: Cache Go modules
         uses: actions/cache@v4
@@ -32,14 +33,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Install dependencies
-        working-directory: pgdba-cli
-        run: go mod tidy
-
-      - name: Build
-        working-directory: pgdba-cli
-        run: go build ./...
-
-      - name: Run unit tests
-        working-directory: pgdba-cli
-        run: go test ./... -short -v
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -12,11 +13,26 @@ import (
 
 type SlowQueriesModel struct {
 	table        table.Model
+	allRows      []table.Row
+	queryDetails map[string]string // queryID → full query text
+	filterText   string
+	filterMode   bool
+	detailMode   bool
+	detailText   string
 	initialModel func() tea.Model
+	width        int
+	height       int
 }
 
-func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
-	query := `
+func (m SlowQueriesModel) IsInputMode() bool { return m.filterMode }
+
+func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
+	threshold := config.Config.SlowThresholdMS
+	if threshold <= 0 {
+		threshold = 1000
+	}
+
+	query := fmt.Sprintf(`
         SELECT
             queryid,
             query,
@@ -27,56 +43,57 @@ func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
             rows
         FROM
             pg_stat_statements
+        WHERE mean_exec_time > %d
         ORDER BY
             mean_exec_time DESC
-        LIMIT 10;
-    `
+        LIMIT 20;
+    `, threshold)
 
 	rows, err := config.Config.DB.Query(query)
 	if err != nil {
-		fmt.Printf("Error executing query: %v\n", err)
-		return SlowQueriesModel{}
+		return NewErrorModel(err, "Loading slow queries", initialModel)
 	}
 	defer rows.Close()
 
 	columns := []table.Column{
-		{Title: "Query ID", Width: 10},
+		{Title: "Query ID", Width: 12},
 		{Title: "Query", Width: 50},
-		{Title: "Calls", Width: 10},
-		{Title: "Total Exec Time (ms)", Width: 20},
-		{Title: "Mean Exec Time (ms)", Width: 20},
-		{Title: "Stddev Exec Time (ms)", Width: 20},
-		{Title: "Rows", Width: 10},
+		{Title: "Calls", Width: 8},
+		{Title: "Total (ms)", Width: 14},
+		{Title: "Mean (ms)", Width: 14},
+		{Title: "Stddev (ms)", Width: 14},
+		{Title: "Rows", Width: 8},
 	}
 
 	var rowsData []table.Row
+	details := make(map[string]string)
+
 	for rows.Next() {
 		var queryID int64
-		var query string
+		var q string
 		var calls int
 		var totalExecTime, meanExecTime, stddevExecTime float64
 		var rowsReturned int
 
-		err := rows.Scan(&queryID, &query, &calls, &totalExecTime, &meanExecTime, &stddevExecTime, &rowsReturned)
-		if err != nil {
-			fmt.Printf("Error scanning row: %v\n", err)
-			return SlowQueriesModel{}
+		if err := rows.Scan(&queryID, &q, &calls, &totalExecTime, &meanExecTime, &stddevExecTime, &rowsReturned); err != nil {
+			return NewErrorModel(err, "Scanning slow queries row", initialModel)
 		}
 
-		// Replace newline characters with spaces to prevent wrapping
-		query = strings.ReplaceAll(query, "\n", " ")
+		qid := fmt.Sprintf("%d", queryID)
+		details[qid] = q
 
-		// Truncate the query to a fixed length to prevent wrapping
-		maxQueryLength := 50
-		if len(query) > maxQueryLength {
-			query = query[:maxQueryLength] + "..."
+		q = strings.ReplaceAll(q, "\n", " ")
+		if len(q) > 50 {
+			q = q[:50] + "..."
 		}
+
+		totalStr := fmt.Sprintf("%.2f", totalExecTime)
 
 		rowsData = append(rowsData, table.Row{
-			fmt.Sprintf("%d", queryID),
-			query,
+			qid,
+			q,
 			fmt.Sprintf("%d", calls),
-			fmt.Sprintf("%.2f", totalExecTime),
+			totalStr,
 			fmt.Sprintf("%.2f", meanExecTime),
 			fmt.Sprintf("%.2f", stddevExecTime),
 			fmt.Sprintf("%d", rowsReturned),
@@ -87,21 +104,75 @@ func IdentifySlowQueries(initialModel func() tea.Model) SlowQueriesModel {
 		table.WithColumns(columns),
 		table.WithRows(rowsData),
 		table.WithFocused(true),
+		table.WithHeight(20),
+		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return SlowQueriesModel{table: t, initialModel: initialModel}
+	return SlowQueriesModel{
+		table:        t,
+		allRows:      rowsData,
+		queryDetails: details,
+		initialModel: initialModel,
+		width:        120,
+		height:       30,
+	}
 }
 
-func (m SlowQueriesModel) Init() tea.Cmd {
-	return nil
-}
+func (m SlowQueriesModel) Init() tea.Cmd { return nil }
 
 func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		cols := StretchColumn(m.table.Columns(), 1, msg.Width)
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height))
+		return m, nil
 	case tea.KeyMsg:
+		if m.detailMode {
+			switch msg.String() {
+			case "q", "esc", "enter":
+				m.detailMode = false
+			}
+			return m, nil
+		}
+		if m.filterMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filterMode = false
+				m.filterText = ""
+				m.table.SetRows(m.allRows)
+			case tea.KeyBackspace:
+				if len(m.filterText) > 0 {
+					m.filterText = m.filterText[:len(m.filterText)-1]
+					m.table.SetRows(FilterRows(m.allRows, m.filterText))
+				}
+			case tea.KeyRunes:
+				m.filterText += msg.String()
+				m.table.SetRows(FilterRows(m.allRows, m.filterText))
+			case tea.KeyEnter:
+				m.filterMode = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "enter":
+			row := m.table.SelectedRow()
+			if len(row) > 0 {
+				if detail, ok := m.queryDetails[row[0]]; ok {
+					m.detailText = detail
+					m.detailMode = true
+				}
+			}
+			return m, nil
+		case "/":
+			m.filterMode = true
+			return m, nil
 		case "q", "esc":
 			return m.initialModel(), nil
+		case "r":
+			return IdentifySlowQueries(m.initialModel), nil
 		}
 	}
 
@@ -111,8 +182,30 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m SlowQueriesModel) View() string {
-	s := fmt.Sprintf("PostgreSQL Version: %s\n", config.Config.Version)
-	s += fmt.Sprintf("Connected to: %s@%s:%d/%s\n\n", config.Config.User, config.Config.Host, config.Config.Port, config.Config.DBName)
-	s += m.table.View()
+	if m.detailMode {
+		return RenderQueryDetail("Slow Queries", m.detailText, m.width)
+	}
+	threshold := config.Config.SlowThresholdMS
+	if threshold <= 0 {
+		threshold = 1000
+	}
+	rules := []ColorRule{
+		{Column: 3, Colorize: func(v string) int {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return -1
+			}
+			switch {
+			case f > float64(threshold*2):
+				return 2
+			case f > float64(threshold):
+				return 1
+			}
+			return -1
+		}},
+	}
+	s := RenderHeader("Slow Queries") + "\n"
+	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }
