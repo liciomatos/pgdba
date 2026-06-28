@@ -115,8 +115,14 @@ func (m WaitEventsModel) View() string {
 		}},
 	}
 
+	dot := func(level int, label string) string {
+		return SeverityColor("■", level) + FooterStyle.Render(" "+label)
+	}
+	legend := "  " + dot(2, "Lock") + "   " + dot(1, "IO · LWLock · BufferPin") + "   " + dot(0, "CPU")
+
 	s := RenderHeader("Wait Events") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
+	s += "\n" + legend
 	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
 	return s
 }

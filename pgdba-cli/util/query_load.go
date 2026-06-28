@@ -200,8 +200,14 @@ func (m QueryLoadModel) View() string {
 		}},
 	}
 
+	dot := func(level int, label string) string {
+		return SeverityColor("■", level) + FooterStyle.Render(" "+label)
+	}
+	legend := "  " + dot(2, "Total > 60s") + "   " + dot(1, "Total > 5s") + "   " + FooterStyle.Render("Load bar = % of total instance exec time")
+
 	s := RenderHeader("Query Load") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
+	s += "\n" + legend
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
 	return s
 }
