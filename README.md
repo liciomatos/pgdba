@@ -4,7 +4,21 @@ Terminal UI for PostgreSQL DBAs — interactive diagnostics and management direc
 
 ## Installation
 
-### Pre-built binary (recommended)
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap liciomatos/tap
+brew install pgdba-cli
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add liciomatos https://github.com/liciomatos/scoop-bucket
+scoop install pgdba-cli
+```
+
+### Pre-built binary
 
 Download the latest release from [Releases](https://github.com/liciomatos/pgdba/releases) for your OS and architecture.
 
