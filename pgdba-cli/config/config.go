@@ -13,6 +13,7 @@ type AppConfig struct {
 	SSLMode         string
 	Host            string
 	Port            int
+	URL             string
 	DB              *sql.DB
 	Version         string
 	AppInstance     *tea.Program

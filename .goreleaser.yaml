@@ -58,5 +58,5 @@ changelog:
 release:
   github:
     owner: liciomatos
-    name: pgdba-cli
+    name: pgdba
   name_template: "v{{ .Version }}"

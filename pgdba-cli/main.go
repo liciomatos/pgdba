@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,8 +66,45 @@ func lookupPgPassFile(path, host string, port int, dbname, user string) string {
 	return ""
 }
 
+// buildConnStr returns a lib/pq connection string. When --url is given, it
+// parses the URI to populate config fields (for display in headers/errors) and
+// returns the URI itself directly to the driver. Without --url, it assembles the
+// string from individual flags, falling back to ~/.pgpass for missing passwords.
+func buildConnStr() (string, error) {
+	if config.Config.URL != "" {
+		u, err := url.Parse(config.Config.URL)
+		if err != nil {
+			return "", err
+		}
+		config.Config.Host = u.Hostname()
+		if portStr := u.Port(); portStr != "" {
+			config.Config.Port, _ = strconv.Atoi(portStr)
+		}
+		if u.User != nil {
+			config.Config.User = u.User.Username()
+			config.Config.Password, _ = u.User.Password()
+		}
+		config.Config.DBName = strings.TrimPrefix(u.Path, "/")
+		if sslmode := u.Query().Get("sslmode"); sslmode != "" {
+			config.Config.SSLMode = sslmode
+		}
+		return config.Config.URL, nil
+	}
+
+	if config.Config.Password == "" {
+		config.Config.Password = lookupPgPass(
+			config.Config.Host, config.Config.Port,
+			config.Config.DBName, config.Config.User,
+		)
+	}
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		config.Config.Host, config.Config.Port, config.Config.User,
+		config.Config.Password, config.Config.DBName, config.Config.SSLMode), nil
+}
+
 func main() {
-	flag.StringVar(&config.Config.Host, "host", getEnv("PGHOST", ""), "database host (mandatory)")
+	flag.StringVar(&config.Config.URL, "url", getEnv("DATABASE_URL", ""), "PostgreSQL connection URI (postgres://user:pass@host:5432/db?sslmode=disable)")
+	flag.StringVar(&config.Config.Host, "host", getEnv("PGHOST", ""), "database host")
 	flag.IntVar(&config.Config.Port, "port", getEnvInt("PGPORT", 5432), "database port")
 	flag.StringVar(&config.Config.User, "user", getEnv("PGUSER", "postgres"), "database user")
 	flag.StringVar(&config.Config.Password, "password", getEnv("PGPASSWORD", ""), "database password")
@@ -75,18 +113,12 @@ func main() {
 	flag.IntVar(&config.Config.SlowThresholdMS, "slow-ms", getEnvInt("PG_SLOW_MS", 1000), "slow query threshold in ms (default 1000)")
 	flag.Parse()
 
-	if config.Config.Password == "" {
-		config.Config.Password = lookupPgPass(
-			config.Config.Host, config.Config.Port,
-			config.Config.DBName, config.Config.User,
-		)
+	connStr, err := buildConnStr()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pgdba-cli: invalid connection URL: %v\n", err)
+		os.Exit(1)
 	}
 
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Config.Host, config.Config.Port, config.Config.User,
-		config.Config.Password, config.Config.DBName, config.Config.SSLMode)
-
-	var err error
 	config.Config.DB, err = sql.Open("postgres", connStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pgdba-cli: failed to open database connection\n")
