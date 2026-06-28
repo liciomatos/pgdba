@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -19,24 +20,10 @@ type WaitEventsModel struct {
 // by wait_event_type and wait_event. Sessions on CPU (no wait event) are
 // shown as type "CPU". Distribution bar shows each event's share of total.
 func CheckWaitEvents(initialModel func() tea.Model) tea.Model {
-	rows, err := config.Config.DB.Query(`
-		SELECT
-			COALESCE(wait_event_type, 'CPU') AS event_type,
-			COALESCE(wait_event, '-') AS event,
-			count(*) AS count,
-			COALESCE(
-				ROUND(100.0 * count(*) / NULLIF(SUM(count(*)) OVER(), 0), 1),
-				0
-			) AS pct
-		FROM pg_stat_activity
-		WHERE state = 'active' OR wait_event IS NOT NULL
-		GROUP BY wait_event_type, wait_event
-		ORDER BY count DESC
-	`)
+	events, err := FetchWaitEvents(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading wait events", initialModel)
 	}
-	defer rows.Close()
 
 	// Distribution bar is last column (multi-byte block chars safe for ColorizeTable).
 	columns := []table.Column{
@@ -47,21 +34,12 @@ func CheckWaitEvents(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-
-	for rows.Next() {
-		var eventType, event string
-		var count int
-		var pct float64
-
-		if err := rows.Scan(&eventType, &event, &count, &pct); err != nil {
-			return NewErrorModel(err, "Scanning wait events row", initialModel)
-		}
-
+	for _, e := range events {
 		rowsData = append(rowsData, table.Row{
-			eventType,
-			event,
-			fmt.Sprintf("%d", count),
-			RenderBar(pct, 12),
+			e.EventType,
+			e.Event,
+			fmt.Sprintf("%d", e.Count),
+			RenderBar(e.Pct, 12),
 		})
 	}
 

@@ -1,6 +1,8 @@
 package util
 
 import (
+	"context"
+
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -20,22 +22,10 @@ type ExtensionsModel struct {
 func (m ExtensionsModel) IsInputMode() bool { return m.filterMode }
 
 func CheckExtensions(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT e.extname AS name,
-               e.extversion AS version,
-               n.nspname AS schema,
-               COALESCE(ae.comment, '-') AS description
-        FROM pg_extension e
-        JOIN pg_namespace n ON n.oid = e.extnamespace
-        LEFT JOIN pg_available_extensions ae ON ae.name = e.extname
-        ORDER BY e.extname;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	exts, err := FetchExtensions(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading extensions", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Name", Width: 20},
@@ -45,12 +35,8 @@ func CheckExtensions(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	for rows.Next() {
-		var name, version, schema, description string
-		if err := rows.Scan(&name, &version, &schema, &description); err != nil {
-			return NewErrorModel(err, "Scanning extensions row", initialModel)
-		}
-		rowsData = append(rowsData, table.Row{name, version, schema, description})
+	for _, e := range exts {
+		rowsData = append(rowsData, table.Row{e.Name, e.Version, e.Schema, e.Description})
 	}
 
 	t := table.New(

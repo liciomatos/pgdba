@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -32,28 +33,10 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		threshold = 1000
 	}
 
-	query := fmt.Sprintf(`
-        SELECT
-            queryid,
-            query,
-            calls,
-            total_exec_time,
-            mean_exec_time,
-            stddev_exec_time,
-            rows
-        FROM
-            pg_stat_statements
-        WHERE mean_exec_time > %d
-        ORDER BY
-            mean_exec_time DESC
-        LIMIT 20;
-    `, threshold)
-
-	rows, err := config.Config.DB.Query(query)
+	queries, err := FetchSlowQueries(context.Background(), config.Config.DB, threshold, 20)
 	if err != nil {
 		return NewErrorModel(err, "Loading slow queries", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Query ID", Width: 12},
@@ -68,35 +51,23 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 	var rowsData []table.Row
 	details := make(map[string]string)
 
-	for rows.Next() {
-		var queryID int64
-		var q string
-		var calls int
-		var totalExecTime, meanExecTime, stddevExecTime float64
-		var rowsReturned int
+	for _, sq := range queries {
+		qid := fmt.Sprintf("%d", sq.QueryID)
+		details[qid] = sq.Query
 
-		if err := rows.Scan(&queryID, &q, &calls, &totalExecTime, &meanExecTime, &stddevExecTime, &rowsReturned); err != nil {
-			return NewErrorModel(err, "Scanning slow queries row", initialModel)
+		displayQuery := strings.ReplaceAll(sq.Query, "\n", " ")
+		if len(displayQuery) > 50 {
+			displayQuery = displayQuery[:50] + "..."
 		}
-
-		qid := fmt.Sprintf("%d", queryID)
-		details[qid] = q
-
-		q = strings.ReplaceAll(q, "\n", " ")
-		if len(q) > 50 {
-			q = q[:50] + "..."
-		}
-
-		totalStr := fmt.Sprintf("%.2f", totalExecTime)
 
 		rowsData = append(rowsData, table.Row{
 			qid,
-			q,
-			fmt.Sprintf("%d", calls),
-			totalStr,
-			fmt.Sprintf("%.2f", meanExecTime),
-			fmt.Sprintf("%.2f", stddevExecTime),
-			fmt.Sprintf("%d", rowsReturned),
+			displayQuery,
+			fmt.Sprintf("%d", sq.Calls),
+			fmt.Sprintf("%.2f", sq.TotalExecTimeMS),
+			fmt.Sprintf("%.2f", sq.MeanExecTimeMS),
+			fmt.Sprintf("%.2f", sq.StddevExecTimeMS),
+			fmt.Sprintf("%d", sq.Rows),
 		})
 	}
 

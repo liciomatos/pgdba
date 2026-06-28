@@ -1,6 +1,9 @@
 package util
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -20,30 +23,10 @@ type UsersModel struct {
 func (m UsersModel) IsInputMode() bool { return m.filterMode }
 
 func CheckUsers(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT r.rolname,
-               CASE WHEN r.rolsuper THEN 'yes' ELSE 'no' END AS superuser,
-               CASE WHEN r.rolcreatedb THEN 'yes' ELSE 'no' END AS createdb,
-               CASE WHEN r.rolcreaterole THEN 'yes' ELSE 'no' END AS createrole,
-               CASE WHEN r.rolreplication THEN 'yes' ELSE 'no' END AS replication,
-               CASE WHEN r.rolconnlimit = -1 THEN 'unlimited'
-                    ELSE r.rolconnlimit::text END AS conn_limit,
-               COALESCE(to_char(r.rolvaliduntil, 'YYYY-MM-DD'), 'never') AS valid_until,
-               COALESCE(string_agg(m.rolname, ', ' ORDER BY m.rolname), '-') AS member_of
-        FROM pg_roles r
-        LEFT JOIN pg_auth_members am ON am.member = r.oid
-        LEFT JOIN pg_roles m ON m.oid = am.roleid
-        WHERE r.rolcanlogin = true
-        GROUP BY r.rolname, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolreplication,
-                 r.rolconnlimit, r.rolvaliduntil
-        ORDER BY r.rolname;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	users, err := FetchUsers(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading users", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Username", Width: 20},
@@ -56,15 +39,36 @@ func CheckUsers(initialModel func() tea.Model) tea.Model {
 		{Title: "Member Of", Width: 30},
 	}
 
-	var rowsData []table.Row
-	for rows.Next() {
-		var rolname, superuser, createdb, createrole, replication, connLimit, validUntil, memberOf string
-		if err := rows.Scan(&rolname, &superuser, &createdb, &createrole, &replication, &connLimit, &validUntil, &memberOf); err != nil {
-			return NewErrorModel(err, "Scanning users row", initialModel)
+	boolStr := func(b bool) string {
+		if b {
+			return "yes"
 		}
+		return "no"
+	}
 
+	var rowsData []table.Row
+	for _, u := range users {
+		connLimitStr := "unlimited"
+		if u.ConnLimit != -1 {
+			connLimitStr = fmt.Sprintf("%d", u.ConnLimit)
+		}
+		validUntilStr := "never"
+		if u.ValidUntil != nil {
+			validUntilStr = u.ValidUntil.Format("2006-01-02")
+		}
+		memberOfStr := u.MemberOf
+		if memberOfStr == "" {
+			memberOfStr = "-"
+		}
 		rowsData = append(rowsData, table.Row{
-			rolname, superuser, createdb, createrole, replication, connLimit, validUntil, memberOf,
+			u.RoleName,
+			boolStr(u.Superuser),
+			boolStr(u.CreateDB),
+			boolStr(u.CreateRole),
+			boolStr(u.Replication),
+			connLimitStr,
+			validUntilStr,
+			memberOfStr,
 		})
 	}
 

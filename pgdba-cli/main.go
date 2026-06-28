@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	_ "github.com/lib/pq"
 	"github.com/liciomatos/pgdba-cli/config"
+	"github.com/liciomatos/pgdba-cli/mcpserver"
 	"github.com/liciomatos/pgdba-cli/util"
 )
 
@@ -111,6 +112,10 @@ func main() {
 	flag.StringVar(&config.Config.DBName, "dbname", getEnv("PGDATABASE", "mydb"), "database name")
 	flag.StringVar(&config.Config.SSLMode, "sslmode", getEnv("PGSSLMODE", "disable"), "ssl mode (disable, require, verify-ca, verify-full)")
 	flag.IntVar(&config.Config.SlowThresholdMS, "slow-ms", getEnvInt("PG_SLOW_MS", 1000), "slow query threshold in ms (default 1000)")
+	var serveMCP bool
+	var mcpPort int
+	flag.BoolVar(&serveMCP, "mcp", false, "Start MCP server mode (HTTP/SSE on --mcp-port)")
+	flag.IntVar(&mcpPort, "mcp-port", 8811, "Port for MCP SSE server (used with --mcp)")
 	flag.Parse()
 
 	connStr, err := buildConnStr()
@@ -140,6 +145,14 @@ func main() {
 	if err = config.Config.DB.QueryRow("SHOW server_version;").Scan(&config.Config.Version); err != nil {
 		fmt.Fprintf(os.Stderr, "pgdba-cli: connected but could not read server version: %v\n", err)
 		os.Exit(1)
+	}
+
+	if serveMCP {
+		if err := mcpserver.Serve(mcpPort); err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: MCP server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	config.Config.AppInstance = tea.NewProgram(navigator{child: util.CheckDashboard()}, tea.WithAltScreen())

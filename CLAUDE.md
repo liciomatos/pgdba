@@ -40,6 +40,47 @@ Integration tests use `testcontainers-go` to spin up a real PostgreSQL container
 
 ## Architecture
 
+### Shared Data Layer (fetch.go)
+
+All SQL lives in `util/fetch.go`. Every diagnostic screen has a corresponding `Fetch*` function that:
+- Takes `ctx context.Context`, `db *sql.DB`, and optional parameters
+- Returns a typed struct or slice (e.g. `[]SlowQuery`, `ConnectionsResult`)
+- Never does any display formatting
+
+```
+util/fetch.go      → Fetch* functions + typed result structs (all SQL here)
+util/<screen>.go   → Check* builder calls Fetch*, converts to table.Row (display only)
+mcpserver/tools.go → MCP handlers call Fetch*, marshal to JSON
+```
+
+**TUI flow:**
+```
+Check*(initialModel) → Fetch*(ctx, db, params) → []XxxResult → table.Row → tea.Model
+```
+
+**MCP flow:**
+```
+handleXxx(ctx, req) → Fetch*(ctx, db, params) → []XxxResult → json.Marshal → ToolResult
+```
+
+When adding a new diagnostic:
+1. Add `FetchMyThing(ctx, db, params)` to `util/fetch.go` returning a typed struct.
+2. Create `util/my_thing.go` with `CheckMyThing` calling `FetchMyThing`, converting to `table.Row`.
+3. Add `handleCheckMyThing` to `mcpserver/tools.go` calling `FetchMyThing`, marshaling to JSON.
+4. Register the tool in `mcpserver/server.go` with `s.AddTool(...)`.
+
+### MCP Server Mode
+
+`pgdba-cli --mcp [--mcp-port PORT]` starts an HTTP/SSE MCP server (default port 8811). The DB connection is established with the same flags as TUI mode. Credentials are **never** in the MCP config file.
+
+```bash
+# Start the server with DB credentials
+pgdba-cli --mcp --url "postgres://user:pass@host/db"
+
+# Claude Code .mcp.json (no credentials)
+{"mcpServers": {"pgdba": {"url": "http://localhost:8811/sse"}}}
+```
+
 ### TUI Model Pattern (Bubbletea)
 
 Every screen is a Go struct that implements `tea.Model` (Init / Update / View). Navigation works by passing an `initialModel func() tea.Model` closure into each screen — pressing `q`/`esc` calls `m.initialModel()` to return to the main menu.
@@ -48,14 +89,16 @@ Every screen is a Go struct that implements `tea.Model` (Init / Update / View). 
 main.go          → root menu model + flag parsing + DB init
 config/config.go → global AppConfig singleton (DB, Version, Host, User, …)
 util/*.go        → one file per screen (SlowQueriesModel, RecordLocksModel, …)
+mcpserver/       → MCP server registration (server.go) and tool handlers (tools.go)
 ```
 
 ### Adding a new screen
 
-1. Create `util/my_screen.go` with a `MyScreenModel` struct (fields: `table table.Model`, `initialModel func() tea.Model`, plus any confirmation-state fields).
-2. Write a builder `func CheckMyScreen(initialModel func() tea.Model) tea.Model` that queries `config.Config.DB`, builds `[]table.Row`, and returns the model (or `NewErrorModel(err, "context", initialModel)` on failure).
+1. Add `FetchMyScreen(ctx, db, params)` to `util/fetch.go` with typed result struct.
+2. Create `util/my_screen.go` with `CheckMyScreen` calling `FetchMyScreen`, building `[]table.Row`.
 3. Implement `Init() tea.Cmd`, `Update(tea.Msg) (tea.Model, tea.Cmd)`, `View() string`.
-4. Register in `main.go`: add a label to `choices` and a `case N:` in `Update`.
+4. Register in `main.go`: add a key binding in the navigator `Update` switch.
+5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in `mcpserver/server.go`.
 
 ### Confirmation dialogs
 
@@ -124,7 +167,8 @@ Add a comment when the WHY is non-obvious: a hidden constraint, a subtle invaria
 All model types use **value receivers** (`func (m MyModel) Method()`). Never use pointer receivers (`func (m *MyModel)`) on Bubbletea models — value semantics are required so that state updates return a new model value rather than mutating in place.
 
 ### Clean architecture
-- Data fetching lives in `Check*` / `Identify*` builder functions — they query the DB, build `[]table.Row`, and return the model.
+- Data fetching lives in `Fetch*` functions in `util/fetch.go` — they run SQL and return typed structs.
+- `Check*` / `Identify*` builder functions call `Fetch*`, convert to `table.Row`, and return the model.
 - Model state lives in the struct fields; Update returns a new value.
 - Rendering lives in `View()` — no DB calls or side effects.
 - Detail maps (`queryDetails map[string]string`) are keyed by a unique row identifier (never by row index, which breaks under filter).

@@ -1,7 +1,7 @@
 package util
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,30 +29,10 @@ type AutovacuumModel struct {
 func (m AutovacuumModel) IsInputMode() bool { return m.filterMode }
 
 func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT
-            schemaname,
-            relname,
-            n_dead_tup,
-            n_live_tup,
-            CASE WHEN n_live_tup + n_dead_tup = 0 THEN NULL
-                 ELSE ROUND(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
-            END AS dead_pct,
-            last_vacuum,
-            last_analyze,
-            last_autovacuum,
-            last_autoanalyze,
-            autovacuum_count
-        FROM pg_stat_user_tables
-        ORDER BY n_dead_tup DESC
-        LIMIT 20;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	tables, err := FetchAutovacuum(context.Background(), config.Config.DB, 20)
 	if err != nil {
 		return NewErrorModel(err, "Loading autovacuum monitor", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Schema", Width: 12},
@@ -67,41 +47,30 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		{Title: "Vac Count", Width: 10},
 	}
 
+	formatTime := func(t *time.Time) string {
+		if t == nil {
+			return "never"
+		}
+		return t.Format("2006-01-02 15:04")
+	}
+
 	var rowsData []table.Row
-	for rows.Next() {
-		var schemaname, relname string
-		var nDeadTup, nLiveTup, autovacuumCount int64
-		var deadPct sql.NullFloat64
-		var lastVacuum, lastAnalyze, lastAutovacuum, lastAutoanalyze *time.Time
-
-		if err := rows.Scan(&schemaname, &relname, &nDeadTup, &nLiveTup, &deadPct,
-			&lastVacuum, &lastAnalyze, &lastAutovacuum, &lastAutoanalyze, &autovacuumCount); err != nil {
-			return NewErrorModel(err, "Scanning autovacuum row", initialModel)
-		}
-
-		formatTime := func(t *time.Time) string {
-			if t == nil {
-				return "never"
-			}
-			return t.Format("2006-01-02 15:04")
-		}
-
+	for _, av := range tables {
 		deadPctStr := "N/A"
-		if deadPct.Valid {
-			deadPctStr = fmt.Sprintf("%.1f%%", deadPct.Float64)
+		if av.DeadPct != nil {
+			deadPctStr = fmt.Sprintf("%.1f%%", *av.DeadPct)
 		}
-
 		rowsData = append(rowsData, table.Row{
-			schemaname,
-			relname,
-			fmt.Sprintf("%d", nDeadTup),
-			fmt.Sprintf("%d", nLiveTup),
+			av.SchemaName,
+			av.TableName,
+			fmt.Sprintf("%d", av.DeadTuples),
+			fmt.Sprintf("%d", av.LiveTuples),
 			deadPctStr,
-			formatTime(lastVacuum),
-			formatTime(lastAnalyze),
-			formatTime(lastAutovacuum),
-			formatTime(lastAutoanalyze),
-			fmt.Sprintf("%d", autovacuumCount),
+			formatTime(av.LastVacuum),
+			formatTime(av.LastAnalyze),
+			formatTime(av.LastAutovacuum),
+			formatTime(av.LastAutoanalyze),
+			fmt.Sprintf("%d", av.AutovacuumCount),
 		})
 	}
 

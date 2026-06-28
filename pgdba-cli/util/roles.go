@@ -1,6 +1,8 @@
 package util
 
 import (
+	"context"
+
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -20,26 +22,10 @@ type RolesModel struct {
 func (m RolesModel) IsInputMode() bool { return m.filterMode }
 
 func CheckRoles(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT r.rolname,
-               CASE WHEN r.rolsuper THEN 'yes' ELSE 'no' END AS superuser,
-               CASE WHEN r.rolinherit THEN 'yes' ELSE 'no' END AS inherit,
-               CASE WHEN r.rolcreaterole THEN 'yes' ELSE 'no' END AS createrole,
-               CASE WHEN r.rolcreatedb THEN 'yes' ELSE 'no' END AS createdb,
-               COALESCE(string_agg(m.rolname, ', ' ORDER BY m.rolname), '-') AS members
-        FROM pg_roles r
-        LEFT JOIN pg_auth_members am ON am.roleid = r.oid
-        LEFT JOIN pg_roles m ON m.oid = am.member
-        WHERE r.rolcanlogin = false AND r.rolname NOT LIKE 'pg_%'
-        GROUP BY r.rolname, r.rolsuper, r.rolinherit, r.rolcreaterole, r.rolcreatedb
-        ORDER BY r.rolname;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	roles, err := FetchRoles(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading roles", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Role", Width: 20},
@@ -50,14 +36,27 @@ func CheckRoles(initialModel func() tea.Model) tea.Model {
 		{Title: "Members", Width: 40},
 	}
 
-	var rowsData []table.Row
-	for rows.Next() {
-		var rolname, superuser, inherit, createrole, createdb, members string
-		if err := rows.Scan(&rolname, &superuser, &inherit, &createrole, &createdb, &members); err != nil {
-			return NewErrorModel(err, "Scanning roles row", initialModel)
+	boolStr := func(b bool) string {
+		if b {
+			return "yes"
 		}
+		return "no"
+	}
 
-		rowsData = append(rowsData, table.Row{rolname, superuser, inherit, createrole, createdb, members})
+	var rowsData []table.Row
+	for _, r := range roles {
+		membersStr := r.Members
+		if membersStr == "" {
+			membersStr = "-"
+		}
+		rowsData = append(rowsData, table.Row{
+			r.RoleName,
+			boolStr(r.Superuser),
+			boolStr(r.Inherit),
+			boolStr(r.CreateRole),
+			boolStr(r.CreateDB),
+			membersStr,
+		})
 	}
 
 	t := table.New(

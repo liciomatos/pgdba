@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,29 +24,10 @@ type CacheHitModel struct {
 func (m CacheHitModel) IsInputMode() bool { return m.filterMode }
 
 func CheckCacheHit(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT
-            relname,
-            heap_blks_read,
-            heap_blks_hit,
-            CASE WHEN heap_blks_hit + heap_blks_read = 0 THEN 0
-                 ELSE ROUND(100.0 * heap_blks_hit / (heap_blks_hit + heap_blks_read), 2)
-            END AS cache_hit_ratio,
-            idx_blks_read,
-            idx_blks_hit,
-            CASE WHEN idx_blks_hit + idx_blks_read = 0 THEN 0
-                 ELSE ROUND(100.0 * idx_blks_hit / (idx_blks_hit + idx_blks_read), 2)
-            END AS idx_cache_hit_ratio
-        FROM pg_statio_user_tables
-        ORDER BY heap_blks_read DESC
-        LIMIT 20;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	tables, err := FetchCacheHit(context.Background(), config.Config.DB, 20)
 	if err != nil {
 		return NewErrorModel(err, "Loading cache hit ratios", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Table", Width: 25},
@@ -58,26 +40,15 @@ func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	for rows.Next() {
-		var relname string
-		var heapRead, heapHit, idxRead, idxHit int64
-		var cacheHitRatio, idxCacheHitRatio float64
-
-		if err := rows.Scan(&relname, &heapRead, &heapHit, &cacheHitRatio, &idxRead, &idxHit, &idxCacheHitRatio); err != nil {
-			return NewErrorModel(err, "Scanning cache hit row", initialModel)
-		}
-
-		hitPctStr := fmt.Sprintf("%.2f%%", cacheHitRatio)
-		idxHitPctStr := fmt.Sprintf("%.2f%%", idxCacheHitRatio)
-
+	for _, ct := range tables {
 		rowsData = append(rowsData, table.Row{
-			relname,
-			fmt.Sprintf("%d", heapRead),
-			fmt.Sprintf("%d", heapHit),
-			hitPctStr,
-			fmt.Sprintf("%d", idxRead),
-			fmt.Sprintf("%d", idxHit),
-			idxHitPctStr,
+			ct.TableName,
+			fmt.Sprintf("%d", ct.HeapBlksRead),
+			fmt.Sprintf("%d", ct.HeapBlksHit),
+			fmt.Sprintf("%.2f%%", ct.CacheHitRatio),
+			fmt.Sprintf("%d", ct.IdxBlksRead),
+			fmt.Sprintf("%d", ct.IdxBlksHit),
+			fmt.Sprintf("%.2f%%", ct.IdxCacheHitRatio),
 		})
 	}
 

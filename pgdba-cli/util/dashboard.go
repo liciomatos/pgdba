@@ -1,7 +1,7 @@
 package util
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
@@ -22,106 +22,80 @@ type DashboardModel struct {
 }
 
 func CheckDashboard() tea.Model {
-	var metrics []dashboardMetric
-
-	// Connections
-	var usedConns int
-	var maxConns int
-	config.Config.DB.QueryRow(`SELECT count(*) FROM pg_stat_activity`).Scan(&usedConns)
-	config.Config.DB.QueryRow(`SELECT setting::int FROM pg_settings WHERE name='max_connections'`).Scan(&maxConns)
-	connPct := 0.0
-	if maxConns > 0 {
-		connPct = float64(usedConns) / float64(maxConns) * 100
-	}
-	connLevel := 0
-	if connPct >= 90 {
-		connLevel = 2
-	} else if connPct >= 70 {
-		connLevel = 1
-	}
-	metrics = append(metrics, dashboardMetric{
-		"Connections",
-		fmt.Sprintf("%d / %d  (%.0f%%)", usedConns, maxConns, connPct),
-		connLevel,
-	})
-
-	// Active / Blocked
-	var activeQueries, blockedQueries int
-	config.Config.DB.QueryRow(`
-		SELECT
-			count(*) FILTER (WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'),
-			count(*) FILTER (WHERE wait_event_type = 'Lock')
-		FROM pg_stat_activity`).Scan(&activeQueries, &blockedQueries)
-	metrics = append(metrics, dashboardMetric{"Active queries", fmt.Sprintf("%d", activeQueries), 0})
-	blockedLevel := 0
-	if blockedQueries > 0 {
-		blockedLevel = 2
-	}
-	metrics = append(metrics, dashboardMetric{"Blocked queries", fmt.Sprintf("%d", blockedQueries), blockedLevel})
-
-	// Slow queries using the configured threshold
 	threshold := config.Config.SlowThresholdMS
 	if threshold <= 0 {
 		threshold = 1000
 	}
-	var slowCount int
-	err := config.Config.DB.QueryRow(
-		fmt.Sprintf(`SELECT count(*) FROM pg_stat_statements WHERE mean_exec_time > %d`, threshold),
-	).Scan(&slowCount)
-	slowLabel := fmt.Sprintf("Slow queries (>%dms)", threshold)
+	data, err := FetchDashboard(context.Background(), config.Config.DB, threshold)
 	if err != nil {
+		return DashboardModel{
+			metrics: []dashboardMetric{{"Error loading dashboard", err.Error(), 2}},
+			width:   80, height: 24,
+		}
+	}
+
+	var metrics []dashboardMetric
+
+	connLevel := 0
+	if data.ConnectionPct >= 90 {
+		connLevel = 2
+	} else if data.ConnectionPct >= 70 {
+		connLevel = 1
+	}
+	metrics = append(metrics, dashboardMetric{
+		"Connections",
+		fmt.Sprintf("%d / %d  (%.0f%%)", data.UsedConnections, data.MaxConnections, data.ConnectionPct),
+		connLevel,
+	})
+
+	metrics = append(metrics, dashboardMetric{"Active queries", fmt.Sprintf("%d", data.ActiveQueries), 0})
+
+	blockedLevel := 0
+	if data.BlockedQueries > 0 {
+		blockedLevel = 2
+	}
+	metrics = append(metrics, dashboardMetric{"Blocked queries", fmt.Sprintf("%d", data.BlockedQueries), blockedLevel})
+
+	slowLabel := fmt.Sprintf("Slow queries (>%dms)", threshold)
+	if data.SlowQueryCount == -1 {
 		metrics = append(metrics, dashboardMetric{slowLabel, "N/A (pg_stat_statements not enabled)", 1})
 	} else {
 		slowLevel := 0
-		if slowCount > 20 {
+		if data.SlowQueryCount > 20 {
 			slowLevel = 2
-		} else if slowCount > 5 {
+		} else if data.SlowQueryCount > 5 {
 			slowLevel = 1
 		}
-		metrics = append(metrics, dashboardMetric{slowLabel, fmt.Sprintf("%d", slowCount), slowLevel})
+		metrics = append(metrics, dashboardMetric{slowLabel, fmt.Sprintf("%d", data.SlowQueryCount), slowLevel})
 	}
 
-	// Cache hit ratio
-	var cacheHit sql.NullFloat64
-	config.Config.DB.QueryRow(`
-		SELECT ROUND(100.0 * sum(heap_blks_hit) / NULLIF(sum(heap_blks_hit)+sum(heap_blks_read),0), 1)
-		FROM pg_statio_user_tables`).Scan(&cacheHit)
-	if cacheHit.Valid {
+	if data.CacheHitRatio != nil {
 		cacheLevel := 0
-		if cacheHit.Float64 < 70 {
+		if *data.CacheHitRatio < 70 {
 			cacheLevel = 2
-		} else if cacheHit.Float64 < 90 {
+		} else if *data.CacheHitRatio < 90 {
 			cacheLevel = 1
 		}
-		metrics = append(metrics, dashboardMetric{"Cache hit ratio", fmt.Sprintf("%.1f%%", cacheHit.Float64), cacheLevel})
+		metrics = append(metrics, dashboardMetric{"Cache hit ratio", fmt.Sprintf("%.1f%%", *data.CacheHitRatio), cacheLevel})
 	} else {
 		metrics = append(metrics, dashboardMetric{"Cache hit ratio", "N/A", 0})
 	}
 
-	// Dead tuples
-	var deadTuples int64
-	config.Config.DB.QueryRow(`SELECT COALESCE(sum(n_dead_tup),0) FROM pg_stat_user_tables`).Scan(&deadTuples)
 	deadLevel := 0
-	if deadTuples > 100000 {
+	if data.DeadTuples > 100000 {
 		deadLevel = 2
-	} else if deadTuples > 10000 {
+	} else if data.DeadTuples > 10000 {
 		deadLevel = 1
 	}
-	metrics = append(metrics, dashboardMetric{"Dead tuples", fmt.Sprintf("%d", deadTuples), deadLevel})
+	metrics = append(metrics, dashboardMetric{"Dead tuples", fmt.Sprintf("%d", data.DeadTuples), deadLevel})
 
-	// Invalid indexes
-	var invalidIndexes int
-	config.Config.DB.QueryRow(`SELECT count(*) FROM pg_index WHERE NOT indisvalid`).Scan(&invalidIndexes)
 	invalidLevel := 0
-	if invalidIndexes > 0 {
+	if data.InvalidIndexes > 0 {
 		invalidLevel = 2
 	}
-	metrics = append(metrics, dashboardMetric{"Invalid indexes", fmt.Sprintf("%d", invalidIndexes), invalidLevel})
+	metrics = append(metrics, dashboardMetric{"Invalid indexes", fmt.Sprintf("%d", data.InvalidIndexes), invalidLevel})
 
-	// Replication slots
-	var repSlots int
-	config.Config.DB.QueryRow(`SELECT count(*) FROM pg_replication_slots`).Scan(&repSlots)
-	metrics = append(metrics, dashboardMetric{"Replication slots", fmt.Sprintf("%d", repSlots), 0})
+	metrics = append(metrics, dashboardMetric{"Replication slots", fmt.Sprintf("%d", data.ReplicationSlots), 0})
 
 	return DashboardModel{metrics: metrics, width: 80, height: 24}
 }

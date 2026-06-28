@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,27 +30,10 @@ func (m QueryLoadModel) IsInputMode() bool { return m.filterMode }
 // pg_stat_statements, computes each query's share of total instance load,
 // and includes buffer and temp disk usage as resource proxies.
 func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
-	rows, err := config.Config.DB.Query(`
-		SELECT
-			queryid::text,
-			query,
-			calls,
-			ROUND(total_exec_time::numeric) AS total_ms,
-			ROUND(mean_exec_time::numeric, 2) AS mean_ms,
-			ROUND(((shared_blks_hit + shared_blks_read) * 8.0 / 1024)::numeric, 1) AS buffer_mb,
-			ROUND((temp_blks_written * 8.0 / 1024)::numeric, 1) AS temp_mb,
-			COALESCE(
-				ROUND((100.0 * total_exec_time / NULLIF(SUM(total_exec_time) OVER(), 0))::numeric, 1),
-				0
-			) AS load_pct
-		FROM pg_stat_statements
-		ORDER BY total_exec_time DESC
-		LIMIT 20
-	`)
+	queries, err := FetchQueryLoad(context.Background(), config.Config.DB, 20)
 	if err != nil {
 		return NewErrorModel(err, "Loading query load (pg_stat_statements required)", initialModel)
 	}
-	defer rows.Close()
 
 	// Load bar is the last column so its multi-byte block chars (█ ░) don't
 	// shift the byte positions that ColorizeTable uses for earlier columns.
@@ -67,31 +51,23 @@ func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
 	var rowsData []table.Row
 	details := make(map[string]string)
 
-	for rows.Next() {
-		var queryID, fullQuery string
-		var calls int
-		var totalMS, meanMS, bufferMB, tempMB, loadPct float64
+	for _, ql := range queries {
+		details[ql.QueryID] = ql.Query
 
-		if err := rows.Scan(&queryID, &fullQuery, &calls, &totalMS, &meanMS, &bufferMB, &tempMB, &loadPct); err != nil {
-			return NewErrorModel(err, "Scanning query load row", initialModel)
-		}
-
-		details[queryID] = fullQuery
-
-		displayQuery := strings.ReplaceAll(fullQuery, "\n", " ")
+		displayQuery := strings.ReplaceAll(ql.Query, "\n", " ")
 		if len(displayQuery) > 36 {
 			displayQuery = displayQuery[:36] + "..."
 		}
 
 		rowsData = append(rowsData, table.Row{
-			queryID,
+			ql.QueryID,
 			displayQuery,
-			fmt.Sprintf("%d", calls),
-			fmt.Sprintf("%.0f", totalMS),
-			fmt.Sprintf("%.2f", meanMS),
-			fmt.Sprintf("%.1f", bufferMB),
-			fmt.Sprintf("%.1f", tempMB),
-			RenderBar(loadPct, 12),
+			fmt.Sprintf("%d", ql.Calls),
+			fmt.Sprintf("%.0f", ql.TotalMS),
+			fmt.Sprintf("%.2f", ql.MeanMS),
+			fmt.Sprintf("%.1f", ql.BufferMB),
+			fmt.Sprintf("%.1f", ql.TempMB),
+			RenderBar(ql.LoadPct, 12),
 		})
 	}
 

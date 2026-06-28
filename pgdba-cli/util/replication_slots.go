@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -18,20 +19,10 @@ type ReplicationSlotsModel struct {
 }
 
 func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT
-            slot_name,
-            pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS size,
-            active
-        FROM
-            pg_replication_slots;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	slots, err := FetchReplicationSlots(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading replication slots", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Slot Name", Width: 20},
@@ -40,21 +31,11 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	for rows.Next() {
-		var slotName, size string
-		var active bool
-
-		err := rows.Scan(&slotName, &size, &active)
-		if err != nil {
-			return NewErrorModel(err, "Scanning replication slots row", initialModel)
-		}
-
-		activeStr := fmt.Sprintf("%t", active)
-
+	for _, s := range slots {
 		rowsData = append(rowsData, table.Row{
-			slotName,
-			size,
-			activeStr,
+			s.SlotName,
+			s.WALLag,
+			fmt.Sprintf("%t", s.Active),
 		})
 	}
 
