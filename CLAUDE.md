@@ -108,7 +108,7 @@ If password is still empty after flag parsing, `~/.pgpass` is consulted (`hostna
 ## Coding Standards
 
 ### Language
-All code, comments, variable names, constants, and identifiers must be in **English**. No Portuguese or other languages anywhere in the codebase.
+All code, comments, variable names, constants, and identifiers must be in **English**. No Portuguese or other languages anywhere in the codebase. This rule extends to all repository files including `README.md` — documentation must be written in English.
 
 ### Naming
 Use descriptive names — single-letter or abbreviated identifiers are not acceptable. Prefer clarity over brevity:
