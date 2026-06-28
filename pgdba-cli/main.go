@@ -213,8 +213,6 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckExtensions(dashboard)), nil
 			case "D":
 				return n.wrapChild(util.CheckDatabases(dashboard)), nil
-			case "v":
-				return n.wrapChild(util.CheckVersion(dashboard)), nil
 			}
 		}
 	}
