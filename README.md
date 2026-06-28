@@ -59,6 +59,63 @@ pgdba-cli --dbname=production
 pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=500
 ```
 
+## Screenshots
+
+### Dashboard
+
+![Dashboard](docs/screenshots/dashboard.svg)
+
+### Slow Queries
+
+![Slow Queries](docs/screenshots/slow_queries.svg)
+
+### Index Usage
+
+![Index Usage](docs/screenshots/index_usage.svg)
+
+### Autovacuum Monitor
+
+![Autovacuum](docs/screenshots/autovacuum.svg)
+
+### Config Parameters
+
+![Config Parameters](docs/screenshots/config.svg)
+
+<details>
+<summary>More screenshots</summary>
+
+### Long Running Queries
+![Long Running Queries](docs/screenshots/long_running.svg)
+
+### Blocked Queries
+![Blocked Queries](docs/screenshots/blocked_queries.svg)
+
+### Connections
+![Connections](docs/screenshots/connections.svg)
+
+### Cache Hit Ratio
+![Cache Hit Ratio](docs/screenshots/cache_hit.svg)
+
+### Users
+![Users](docs/screenshots/users.svg)
+
+### Roles
+![Roles](docs/screenshots/roles.svg)
+
+### Schema Browser
+![Schema Browser](docs/screenshots/schema_browser.svg)
+
+### Extensions
+![Extensions](docs/screenshots/extensions.svg)
+
+### Replication Slots
+![Replication Slots](docs/screenshots/replication_slots.svg)
+
+### Version
+![Version](docs/screenshots/version.svg)
+
+</details>
+
 ## Features
 
 Navigate with `↑↓` or `j/k`. Press `r` to refresh and `q`/`esc` to go back.
