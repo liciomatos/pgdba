@@ -36,6 +36,34 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - name: pgdba-cli
+    repository:
+      owner: liciomatos
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    homepage: "https://github.com/liciomatos/pgdba"
+    description: "Terminal UI for PostgreSQL DBAs — interactive diagnostics directly in the terminal."
+    license: "MIT"
+    install: |
+      bin.install "pgdba-cli"
+
+scoops:
+  - name: pgdba-cli
+    repository:
+      owner: liciomatos
+      name: scoop-bucket
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    homepage: "https://github.com/liciomatos/pgdba"
+    description: "Terminal UI for PostgreSQL DBAs — interactive diagnostics directly in the terminal."
+    license: MIT
+
 changelog:
   sort: asc
   use: github
