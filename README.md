@@ -8,6 +8,7 @@ Terminal UI for PostgreSQL DBAs — interactive diagnostics and management direc
 
 ```bash
 brew tap liciomatos/tap
+brew trust liciomatos/tap
 brew install pgdba-cli
 ```
 
