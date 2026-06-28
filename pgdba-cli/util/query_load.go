@@ -34,8 +34,8 @@ func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
 			queryid::text,
 			query,
 			calls,
-			ROUND(total_exec_time) AS total_ms,
-			ROUND(mean_exec_time, 2) AS mean_ms,
+			ROUND(total_exec_time::numeric) AS total_ms,
+			ROUND(mean_exec_time::numeric, 2) AS mean_ms,
 			ROUND((shared_blks_hit + shared_blks_read) * 8.0 / 1024, 1) AS buffer_mb,
 			ROUND(temp_blks_written * 8.0 / 1024, 1) AS temp_mb,
 			COALESCE(
