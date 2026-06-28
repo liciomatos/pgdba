@@ -14,6 +14,20 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 func stripAnsi(s string) string { return ansiEscape.ReplaceAllString(s, "") }
 
+// RenderBar returns a fixed-width bar with a percentage label.
+// barWidth controls the number of block characters; the full string is
+// barWidth + 7 chars wide (bar + space + " xx.x%").
+func RenderBar(pct float64, barWidth int) string {
+	filled := int(pct / 100.0 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled) + fmt.Sprintf(" %5.1f%%", pct)
+}
+
 // FilterRows returns rows where any cell contains filter (case-insensitive, ANSI-stripped).
 func FilterRows(rows []table.Row, filter string) []table.Row {
 	if filter == "" {

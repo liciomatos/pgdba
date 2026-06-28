@@ -138,7 +138,8 @@ From the main dashboard, open each screen with its shortcut key:
 | `s` | **Schema Browser** | Tables and columns by schema | `enter` describe table |
 | `e` | **Extensions** | Installed extensions | — |
 | `D` | **Switch Database** | Switch database without restarting | `enter` connect |
-| `v` | **Version** | PostgreSQL server version | — |
+| `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
+| `w` | **Wait Events** | Active wait events grouped by type with distribution bar | — |
 
 All list screens support live filtering via `/`.
 
