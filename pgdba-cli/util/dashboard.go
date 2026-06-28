@@ -186,7 +186,8 @@ func (m DashboardModel) View() string {
 		renderKey("s") + " " + renderLabel("schema") + "  " +
 		renderKey("e") + " " + renderLabel("ext") + "  " +
 		renderKey("D") + " " + renderLabel("switch-db") + "  " +
-		renderKey("v") + " " + renderLabel("version") + "  " +
+		renderKey("L") + " " + renderLabel("load") + "  " +
+		renderKey("w") + " " + renderLabel("waits") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 

@@ -111,8 +111,11 @@ pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=50
 ### Replication Slots
 ![Replication Slots](docs/screenshots/replication_slots.svg)
 
-### Version
-![Version](docs/screenshots/version.svg)
+### Query Load
+![Query Load](docs/screenshots/query_load.svg)
+
+### Wait Events
+![Wait Events](docs/screenshots/wait_events.svg)
 
 </details>
 
@@ -138,7 +141,8 @@ From the main dashboard, open each screen with its shortcut key:
 | `s` | **Schema Browser** | Tables and columns by schema | `enter` describe table |
 | `e` | **Extensions** | Installed extensions | — |
 | `D` | **Switch Database** | Switch database without restarting | `enter` connect |
-| `v` | **Version** | PostgreSQL server version | — |
+| `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
+| `w` | **Wait Events** | Active wait events grouped by type with distribution bar | — |
 
 All list screens support live filtering via `/`.
 
