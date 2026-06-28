@@ -36,10 +36,10 @@ func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
 			calls,
 			ROUND(total_exec_time::numeric) AS total_ms,
 			ROUND(mean_exec_time::numeric, 2) AS mean_ms,
-			ROUND((shared_blks_hit + shared_blks_read) * 8.0 / 1024, 1) AS buffer_mb,
-			ROUND(temp_blks_written * 8.0 / 1024, 1) AS temp_mb,
+			ROUND(((shared_blks_hit + shared_blks_read) * 8.0 / 1024)::numeric, 1) AS buffer_mb,
+			ROUND((temp_blks_written * 8.0 / 1024)::numeric, 1) AS temp_mb,
 			COALESCE(
-				ROUND(100.0 * total_exec_time / NULLIF(SUM(total_exec_time) OVER(), 0), 1),
+				ROUND((100.0 * total_exec_time / NULLIF(SUM(total_exec_time) OVER(), 0))::numeric, 1),
 				0
 			) AS load_pct
 		FROM pg_stat_statements

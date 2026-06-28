@@ -111,8 +111,11 @@ pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=50
 ### Replication Slots
 ![Replication Slots](docs/screenshots/replication_slots.svg)
 
-### Version
-![Version](docs/screenshots/version.svg)
+### Query Load
+![Query Load](docs/screenshots/query_load.svg)
+
+### Wait Events
+![Wait Events](docs/screenshots/wait_events.svg)
 
 </details>
 
