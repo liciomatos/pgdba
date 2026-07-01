@@ -87,6 +87,10 @@ pgdba-cli --mcp --url "postgres://user:pass@host/db"
 
 # Or via environment variables (no credentials on the command line)
 PGHOST=host PGUSER=user PGPASSWORD=pass PGDATABASE=db pgdba-cli --mcp
+
+# Or via the Makefile, against the local dev/replication test environments
+make mcp-up        # local dev database (mydb), requires `make docker-up` first
+make mcp-up-repl   # replication test environment (testdb), requires `make replication-up` first
 ```
 
 On startup, the server prints the `claude mcp add` command and the equivalent `.mcp.json`
@@ -104,8 +108,11 @@ Configure Claude Code (`.mcp.json` in your project — credentials never go here
 }
 ```
 
-The server exposes the same diagnostics as the TUI: slow queries, connections, autovacuum,
-replication slots, freeze status, streaming standbys, replication config, and more.
+The server exposes 24 tools covering every TUI screen — slow queries, connections,
+autovacuum, replication slots, freeze status, streaming standbys, replication config,
+database sizes, temp file usage, memory & checkpoint stats, and more. Every tool only
+runs `SELECT` queries and is annotated `readOnlyHint`/non-destructive, so MCP clients
+don't need to treat calls as risky.
 
 ## Screenshots
 
@@ -144,6 +151,18 @@ replication slots, freeze status, streaming standbys, replication config, and mo
 ### Replication Config
 
 ![Replication Config](docs/screenshots/replication_config.svg)
+
+### Database Sizes
+
+![Database Sizes](docs/screenshots/database_sizes.svg)
+
+### Temp Files
+
+![Temp Files](docs/screenshots/temp_files.svg)
+
+### Memory & Checkpoint Stats
+
+![Memory & Checkpoint Stats](docs/screenshots/memory_stats.svg)
 
 ### Config Parameters
 
@@ -245,6 +264,32 @@ Press `f` from the main dashboard to open the Freeze Monitor:
 - **Top Tables by XID Age** — tables closest to needing a freeze, with `% Freeze` colored
   green/yellow/red by proximity to `autovacuum_freeze_max_age`
 - Press `f` on a selected table to run `VACUUM (FREEZE, ANALYZE)` with confirmation
+
+### Database Sizes
+
+Press `S` from the main dashboard for on-disk sizing:
+
+- **Per-database size** — owner, encoding, and size (`pg_database_size`), sorted largest first
+- **Total across databases** — sum of every non-template database
+- **Tablespaces** — size of each tablespace (`pg_tablespace_size`) and its on-disk location
+
+### Temp Files
+
+Press `t` from the main dashboard to see temp file spill activity per database
+(`pg_stat_database.temp_files`/`temp_bytes`, accumulated since the last stats reset).
+Non-zero values are highlighted — persistent growth is a sign `work_mem` may be too low
+for the workload.
+
+### Memory & Checkpoint Stats
+
+Press `m` from the main dashboard for a SQL-only view of memory health — no OS-level
+access required, so it works against remote servers:
+
+- **Memory config** — `shared_buffers`, `effective_cache_size`, `work_mem`,
+  `maintenance_work_mem`, `wal_buffers`, `huge_pages`
+- **Buffer cache hit ratio** — cluster-wide, from `pg_stat_database` (colored red/yellow/green)
+- **Checkpoint & background writer activity** — from `pg_stat_bgwriter`; flags when more
+  checkpoints happen on-demand than on schedule (a signal to raise `max_wal_size`)
 
 ¹ Requires the `pg_stat_statements` extension. Enable it with:
 ```sql

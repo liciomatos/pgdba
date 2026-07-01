@@ -119,10 +119,13 @@ def gen_dashboard():
             f"{key('p')} {label('config')}  {key('s')} {label('schema')}  "
             f"{key('e')} {label('ext')}  {key('D')} {label('switch-db')}  "
             f"{key('L')} {label('load')}  {key('w')} {label('waits')}  "
-            f"{key('f')} {label('freeze')}  {key('r')} {label('refresh')}  "
+            f"{key('f')} {label('freeze')}")
+    row3 = (f"{key('S')} {label('db-size')}  {key('t')} {label('temp-files')}  "
+            f"{key('m')} {label('memory')}  {key('r')} {label('refresh')}  "
             f"{key('q')} {label('quit')}")
     c.print(row1)
     c.print(row2)
+    c.print(row3)
     save("dashboard", c)
 
 
@@ -354,6 +357,84 @@ def gen_replication_config():
     save("replication_config", c)
 
 
+# ── Database Sizes ─────────────────────────────────────────────────────────────
+
+def gen_database_sizes():
+    c = make_console()
+    c.print(header("Database Sizes"))
+
+    cols = [("Database", 25), ("Owner", 15), ("Encoding", 10), ("Size", 15)]
+    rows = [
+        ("production",  "postgres", "UTF8", "48 GB"),
+        ("analytics",   "postgres", "UTF8", "12 GB"),
+        ("mydb",        "postgres", "UTF8", "890 MB"),
+        ("testdb",      "postgres", "UTF8", "42 MB"),
+    ]
+    c.print(make_table(cols, rows))
+    c.print()
+    c.print(f"  {label('Total across databases:')} {val('61 GB')}")
+    c.print()
+    c.print(f"  {label('Tablespaces:')}")
+    c.print(f"    {val('pg_default')} {val('60.5 GB')}  {label('(default PGDATA)')}")
+    c.print(f"    {val('pg_global')}  {val('612 kB')}   {label('(default PGDATA)')}")
+    c.print(footer("r refresh • q back"))
+    save("database_sizes", c)
+
+
+# ── Temp Files ──────────────────────────────────────────────────────────────────
+
+def gen_temp_files():
+    c = make_console()
+    c.print(header("Temp File Usage"))
+    c.print(dim("  Temp files are created when a query needs more memory than work_mem for "
+                "sorts, hashes, or materializations — persistent growth here is a sign "
+                "work_mem may be too low."))
+    c.print()
+
+    cols = [("Database", 25), ("Temp Files", 12), ("Temp Size", 15), ("Stats Reset", 25)]
+
+    def files_style(v):
+        return dim(v) if v == "0" else warn(v)
+
+    rows = [
+        ("production", "142", "3.2 GB", "2026-06-01 00:00:00+00"),
+        ("analytics",  "18",  "410 MB", "2026-06-01 00:00:00+00"),
+        ("mydb",       "0",   "0 bytes", "2026-06-01 00:00:00+00"),
+        ("testdb",     "0",   "0 bytes", "2026-06-01 00:00:00+00"),
+    ]
+    col_styles = [None, files_style, None, None]
+    c.print(make_table(cols, rows, col_styles))
+    c.print(footer("r refresh • q back"))
+    save("temp_files", c)
+
+
+# ── Memory & Checkpoint Stats ────────────────────────────────────────────────────
+
+def gen_memory_stats():
+    c = make_console()
+    c.print(header("Memory & Checkpoint Stats"))
+
+    cols = [("Parameter", 25), ("Setting", 15), ("Unit", 6), ("Description", 45)]
+    rows = [
+        ("shared_buffers",        "16384", "8kB", "Sets the number of shared memory buffers used by the server."),
+        ("effective_cache_size",  "524288", "8kB", "Sets the planner's assumption about the total size of the data caches."),
+        ("work_mem",              "4096",  "kB",  "Sets the maximum memory to be used for query workspaces."),
+        ("maintenance_work_mem",  "65536", "kB",  "Sets the maximum memory to be used for maintenance operations."),
+        ("wal_buffers",           "512",   "8kB", "Sets the number of disk-page buffers in shared memory for WAL."),
+        ("huge_pages",            "try",   "",    "Use of huge pages on Linux or Windows."),
+    ]
+    c.print(make_table(cols, rows))
+    c.print()
+    c.print(f"  {label('Buffer cache hit ratio:')} {ok('99.52%')}")
+    c.print()
+    c.print(f"  {label('Checkpoints & background writer (since stats reset):')}")
+    c.print(f"    {label('Timed:')} {val('81')}   {label('Requested:')} {val('2')}")
+    c.print(f"    {label('Buffers checkpoint:')} {val('1,152')}   "
+            f"{label('Buffers clean:')} {val('0')}   {label('Buffers backend:')} {val('740')}")
+    c.print(footer("r refresh • q back"))
+    save("memory_stats", c)
+
+
 # ── Run all ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -365,4 +446,7 @@ if __name__ == "__main__":
     gen_replication_slots()
     gen_replication_standbys()
     gen_replication_config()
+    gen_database_sizes()
+    gen_temp_files()
+    gen_memory_stats()
     print("Done.")

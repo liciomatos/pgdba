@@ -1,0 +1,111 @@
+<svg class="rich-terminal" viewBox="0 0 1482 367.2" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-509728076-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-509728076-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-509728076-r1 { fill: #00afff;font-weight: bold }
+.terminal-509728076-r2 { fill: #c5c8c6 }
+.terminal-509728076-r3 { fill: #585858 }
+.terminal-509728076-r4 { fill: #eeeeee;font-weight: bold }
+.terminal-509728076-r5 { fill: #868887 }
+.terminal-509728076-r6 { fill: #d08442 }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-509728076-clip-terminal">
+      <rect x="0" y="0" width="1463.0" height="316.2" />
+    </clipPath>
+    <clipPath id="terminal-509728076-line-0">
+    <rect x="0" y="1.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-1">
+    <rect x="0" y="25.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-2">
+    <rect x="0" y="50.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-3">
+    <rect x="0" y="74.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-4">
+    <rect x="0" y="99.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-5">
+    <rect x="0" y="123.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-6">
+    <rect x="0" y="147.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-7">
+    <rect x="0" y="172.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-8">
+    <rect x="0" y="196.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-9">
+    <rect x="0" y="221.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-10">
+    <rect x="0" y="245.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-509728076-line-11">
+    <rect x="0" y="269.9" width="1464" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1480" height="365.2" rx="8"/><text class="terminal-509728076-title" fill="#c5c8c6" text-anchor="middle" x="740" y="27">pgdba-cli</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-509728076-clip-terminal)">
+    
+    <g class="terminal-509728076-matrix">
+    <text class="terminal-509728076-r1" x="0" y="20" textLength="61" clip-path="url(#terminal-509728076-line-0)">pgdba</text><text class="terminal-509728076-r3" x="73.2" y="20" textLength="36.6" clip-path="url(#terminal-509728076-line-0)">&#160;›&#160;</text><text class="terminal-509728076-r4" x="122" y="20" textLength="183" clip-path="url(#terminal-509728076-line-0)">Temp&#160;File&#160;Usage</text><text class="terminal-509728076-r2" x="1464" y="20" textLength="12.2" clip-path="url(#terminal-509728076-line-0)">
+</text><text class="terminal-509728076-r5" x="0" y="44.4" textLength="341.6" clip-path="url(#terminal-509728076-line-1)">postgres@localhost:5432/mydb</text><text class="terminal-509728076-r2" x="1464" y="44.4" textLength="12.2" clip-path="url(#terminal-509728076-line-1)">
+</text><text class="terminal-509728076-r2" x="1464" y="68.8" textLength="12.2" clip-path="url(#terminal-509728076-line-2)">
+</text><text class="terminal-509728076-r5" x="0" y="93.2" textLength="1354.2" clip-path="url(#terminal-509728076-line-3)">&#160;&#160;Temp&#160;files&#160;are&#160;created&#160;when&#160;a&#160;query&#160;needs&#160;more&#160;memory&#160;than&#160;work_mem&#160;for&#160;sorts,&#160;hashes,&#160;or&#160;materializations&#160;—&#160;</text><text class="terminal-509728076-r2" x="1464" y="93.2" textLength="12.2" clip-path="url(#terminal-509728076-line-3)">
+</text><text class="terminal-509728076-r5" x="0" y="117.6" textLength="695.4" clip-path="url(#terminal-509728076-line-4)">persistent&#160;growth&#160;here&#160;is&#160;a&#160;sign&#160;work_mem&#160;may&#160;be&#160;too&#160;low.</text><text class="terminal-509728076-r2" x="1464" y="117.6" textLength="12.2" clip-path="url(#terminal-509728076-line-4)">
+</text><text class="terminal-509728076-r2" x="1464" y="142" textLength="12.2" clip-path="url(#terminal-509728076-line-5)">
+</text><text class="terminal-509728076-r1" x="0" y="166.4" textLength="317.2" clip-path="url(#terminal-509728076-line-6)">Database&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r1" x="353.8" y="166.4" textLength="146.4" clip-path="url(#terminal-509728076-line-6)">Temp&#160;Files&#160;&#160;</text><text class="terminal-509728076-r1" x="536.8" y="166.4" textLength="183" clip-path="url(#terminal-509728076-line-6)">Temp&#160;Size&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r1" x="756.4" y="166.4" textLength="317.2" clip-path="url(#terminal-509728076-line-6)">Stats&#160;Reset&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="1464" y="166.4" textLength="12.2" clip-path="url(#terminal-509728076-line-6)">
+</text><text class="terminal-509728076-r3" x="0" y="190.8" textLength="1073.6" clip-path="url(#terminal-509728076-line-7)">────────────────────────────────────────────────────────────────────────────────────────</text><text class="terminal-509728076-r2" x="1464" y="190.8" textLength="12.2" clip-path="url(#terminal-509728076-line-7)">
+</text><text class="terminal-509728076-r2" x="0" y="215.2" textLength="317.2" clip-path="url(#terminal-509728076-line-8)">production&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r6" x="353.8" y="215.2" textLength="36.6" clip-path="url(#terminal-509728076-line-8)">142</text><text class="terminal-509728076-r2" x="536.8" y="215.2" textLength="183" clip-path="url(#terminal-509728076-line-8)">3.2&#160;GB&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="756.4" y="215.2" textLength="317.2" clip-path="url(#terminal-509728076-line-8)">2026-06-01&#160;00:00:00+00&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="1464" y="215.2" textLength="12.2" clip-path="url(#terminal-509728076-line-8)">
+</text><text class="terminal-509728076-r2" x="0" y="239.6" textLength="317.2" clip-path="url(#terminal-509728076-line-9)">analytics&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r6" x="353.8" y="239.6" textLength="24.4" clip-path="url(#terminal-509728076-line-9)">18</text><text class="terminal-509728076-r2" x="536.8" y="239.6" textLength="183" clip-path="url(#terminal-509728076-line-9)">410&#160;MB&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="756.4" y="239.6" textLength="317.2" clip-path="url(#terminal-509728076-line-9)">2026-06-01&#160;00:00:00+00&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="1464" y="239.6" textLength="12.2" clip-path="url(#terminal-509728076-line-9)">
+</text><text class="terminal-509728076-r2" x="0" y="264" textLength="317.2" clip-path="url(#terminal-509728076-line-10)">mydb&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r5" x="353.8" y="264" textLength="12.2" clip-path="url(#terminal-509728076-line-10)">0</text><text class="terminal-509728076-r2" x="536.8" y="264" textLength="183" clip-path="url(#terminal-509728076-line-10)">0&#160;bytes&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="756.4" y="264" textLength="317.2" clip-path="url(#terminal-509728076-line-10)">2026-06-01&#160;00:00:00+00&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="1464" y="264" textLength="12.2" clip-path="url(#terminal-509728076-line-10)">
+</text><text class="terminal-509728076-r2" x="0" y="288.4" textLength="317.2" clip-path="url(#terminal-509728076-line-11)">testdb&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r5" x="353.8" y="288.4" textLength="12.2" clip-path="url(#terminal-509728076-line-11)">0</text><text class="terminal-509728076-r2" x="536.8" y="288.4" textLength="183" clip-path="url(#terminal-509728076-line-11)">0&#160;bytes&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="756.4" y="288.4" textLength="317.2" clip-path="url(#terminal-509728076-line-11)">2026-06-01&#160;00:00:00+00&#160;&#160;&#160;&#160;</text><text class="terminal-509728076-r2" x="1464" y="288.4" textLength="12.2" clip-path="url(#terminal-509728076-line-11)">
+</text><text class="terminal-509728076-r5" x="0" y="312.8" textLength="353.8" clip-path="url(#terminal-509728076-line-12)">/&#160;filter&#160;•&#160;r&#160;refresh&#160;•&#160;q&#160;back</text><text class="terminal-509728076-r2" x="1464" y="312.8" textLength="12.2" clip-path="url(#terminal-509728076-line-12)">
+</text>
+    </g>
+    </g>
+</svg>
