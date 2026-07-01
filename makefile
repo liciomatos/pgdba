@@ -53,6 +53,11 @@ scenario-slots:
 scenarios-clean:
 	@chmod +x scenarios/cleanup.sh && ./scenarios/cleanup.sh
 
+# Connect to the replication test environment primary (port 5432, testdb)
+run-repl: build
+	@echo "Connecting to replication primary..."
+	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=testdb --sslmode=disable --port=5432
+
 # Start the streaming replication test environment (primary + replica)
 replication-up:
 	@echo "Starting replication test environment..."
@@ -76,8 +81,9 @@ help:
 	@echo "  scenario-longrunning Simulate a long-running query"
 	@echo "  scenario-slots      Create a test replication slot"
 	@echo "  scenarios-clean     Remove dynamic scenarios"
+	@echo "  run-repl            Connect to replication test environment (testdb)"
 	@echo "  replication-up      Start streaming replication test environment"
 	@echo "  replication-down    Stop and remove replication test environment"
 	@echo "  help                Show this help message"
 
-.PHONY: build run docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down help
+.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down help

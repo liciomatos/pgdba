@@ -100,6 +100,50 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
 4. Register in `main.go`: add a key binding in the navigator `Update` switch.
 5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in `mcpserver/server.go`.
 
+### Global key conflicts — implement `ConsumesKey`
+
+The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `1`–`0`, …)
+**before** forwarding the message to the child model. If a screen needs to use one of those
+keys for a screen-specific action, implement the `keyConsumer` interface:
+
+```go
+func (m MyModel) ConsumesKey(key string) bool {
+    return key == "s" || key == "p"
+}
+```
+
+The navigator checks `ConsumesKey` before its own switch, so the child's handler fires
+instead of the global one. Known conflicts:
+
+| Screen | Key | Global action | Screen action |
+|---|---|---|---|
+| Replication Slots | `p` | PgConfig | Replication Config |
+| Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
+
+### Terminal size — no per-screen bookkeeping required
+
+The navigator in `main.go` **always re-injects `tea.WindowSizeMsg` after every child update**,
+so new models created by internal transitions (Enter → detail, `s`/`p` → sub-screen) receive
+the correct terminal dimensions automatically on their first frame.
+
+Consequence: **do not special-case width in `Check*` constructors**. Set `width: 0` (or omit
+it) in the initial struct; the navigator delivers the real value before the first `View()` call.
+The only place `m.width` should be set is inside the `tea.WindowSizeMsg` branch of `Update`.
+
+For `table.Model` screens, call `StretchColumn` inside `WindowSizeMsg` to fill the full width:
+```go
+case tea.WindowSizeMsg:
+    m.width = msg.Width
+    m.height = msg.Height
+    cols := StretchColumn(m.table.Columns(), stretchColIdx, msg.Width)
+    m.table.SetColumns(cols)
+    m.table.SetHeight(TableHeight(msg.Height))
+    return m, nil
+```
+
+For non-table (free-form text) screens, store `m.width` and use it in `View()` — for example
+to set a `lipgloss.NewStyle().Width(m.width)` container or to render full-width dividers.
+
 ### Confirmation dialogs
 
 Use two fields on the model (`confirmXxx bool` + `itemToXxx type`) and check them in `Update`:

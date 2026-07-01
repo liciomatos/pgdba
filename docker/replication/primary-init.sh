@@ -7,6 +7,8 @@ echo "host all postgres 0.0.0.0/0 trust"         >> "$PGDATA/pg_hba.conf"
 
 # Create a logical replication slot so the WAL-lag monitoring screens have data.
 psql -U postgres -d testdb <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
 SELECT pg_create_logical_replication_slot('test_logical_slot', 'pgoutput');
 SELECT pg_create_physical_replication_slot('test_physical_slot');
 

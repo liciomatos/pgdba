@@ -564,12 +564,15 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 	var results []ReplicationSlot
 	for rows.Next() {
 		var s ReplicationSlot
-		var safeWAL sql.NullString
+		var walLag, safeWAL sql.NullString
 		if err := rows.Scan(
 			&s.SlotName, &s.Plugin, &s.SlotType, &s.Database, &s.Active, &s.ActivePID,
-			&s.WALLag, &safeWAL, &s.TwoPhase,
+			&walLag, &safeWAL, &s.TwoPhase,
 		); err != nil {
 			return nil, err
+		}
+		if walLag.Valid {
+			s.WALLag = walLag.String
 		}
 		if safeWAL.Valid {
 			s.SafeWALSize = &safeWAL.String

@@ -103,6 +103,9 @@ var (
 // FooterStyle is the consistent faint style used for all screen footers.
 var FooterStyle = lipgloss.NewStyle().Faint(true)
 
+// HintStyle is used for contextual educational hints — readable but clearly secondary.
+var HintStyle = lipgloss.NewStyle().Foreground(ColorGray)
+
 // RenderHeader returns a styled two-line header: logo › screen name + connection info.
 func RenderHeader(screenName string) string {
 	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
@@ -144,8 +147,8 @@ func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
 			fixed += c.Width
 		}
 	}
-	// ~1 char padding per column separator, small extra buffer
-	w := termWidth - fixed - len(cols) - 2
+	// Bubbles applies Padding(0,1) to every cell: 1 char left + 1 char right = 2 per column.
+	w := termWidth - fixed - len(cols)*2
 	if w < 20 {
 		w = 20
 	}
@@ -153,6 +156,17 @@ func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
 	copy(out, cols)
 	out[colIdx].Width = w
 	return out
+}
+
+// InfoTableStyles returns table styles without any row selection highlight.
+// Use this for read-only summary tables that are not keyboard-navigable.
+func InfoTableStyles() table.Styles {
+	s := DefaultTableStyles()
+	s.Selected = s.Selected.
+		Background(lipgloss.NoColor{}).
+		Foreground(lipgloss.NoColor{}).
+		Bold(false)
+	return s
 }
 
 // DefaultTableStyles returns styled table headers and selected-row highlight.

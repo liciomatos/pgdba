@@ -15,6 +15,7 @@ type ReplicationSlotsModel struct {
 	confirmDelete bool
 	slotToDelete  string
 	height        int
+	width         int
 }
 
 func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
@@ -59,15 +60,23 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 	return ReplicationSlotsModel{table: t, initialModel: initialModel, height: 30}
 }
 
-func (m ReplicationSlotsModel) Init() tea.Cmd {
-	return nil
+func (m ReplicationSlotsModel) Init() tea.Cmd { return nil }
+
+// ConsumesKey prevents the navigator from intercepting "p" (replication config),
+// which would otherwise route to the global PgConfig screen.
+// "S" (standbys) uses uppercase to avoid the conflict entirely.
+func (m ReplicationSlotsModel) ConsumesKey(key string) bool {
+	return key == "p"
 }
 
 func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
-		m.table.SetHeight(TableHeight(msg.Height))
+		m.width = msg.Width
+		cols := StretchColumn(m.table.Columns(), 0, msg.Width)
+		m.table.SetColumns(cols)
+		m.table.SetHeight(TableHeight(msg.Height) - 1) // -1 for hint line
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -91,7 +100,7 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			return CheckReplicationSlotsStatus(m.initialModel), nil
-		case "s":
+		case "S":
 			if m.confirmDelete {
 				return m, nil
 			}
@@ -140,12 +149,14 @@ func (m ReplicationSlotsModel) View() string {
 			return -1
 		}},
 	}
+	hint := "  Slots guarantee WAL is kept until consumers catch up. Inactive slots (red) accumulate WAL silently — drop unused ones to prevent disk exhaustion."
 	s := RenderHeader("Replication Slots") + "\n"
+	s += HintStyle.Render(hint) + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmDelete {
 		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • s standbys • p config • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • S all standbys • p repl config • r refresh • q back")
 	}
 	return s
 }

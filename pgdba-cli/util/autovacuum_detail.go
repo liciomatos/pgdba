@@ -3,9 +3,9 @@ package util
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lib/pq"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,10 +26,34 @@ type AutovacuumDetailModel struct {
 	bloatLoading  bool
 	bloatError    string
 	confirmVacuum bool
-	offset        int
+	paramTable    table.Model
 	initialModel  func() tea.Model
 	width         int
 	height        int
+}
+
+func buildParamRows(params []AutovacuumParam) []table.Row {
+	var rows []table.Row
+	for _, p := range params {
+		tableVal := "(inherited)"
+		if p.TableValue != "" {
+			tableVal = p.TableValue + " *"
+		}
+		globalVal := p.GlobalValue
+		if p.Unit != "" {
+			globalVal += " " + p.Unit
+		}
+		rows = append(rows, table.Row{p.Name, tableVal, globalVal})
+	}
+	return rows
+}
+
+func paramTableColumns() []table.Column {
+	return []table.Column{
+		{Title: "Parameter", Width: 40},
+		{Title: "Table value", Width: 18},
+		{Title: "Global default", Width: 20},
+	}
 }
 
 func CheckAutovacuumDetail(schema, tableName string, initialModel func() tea.Model) tea.Model {
@@ -38,14 +62,22 @@ func CheckAutovacuumDetail(schema, tableName string, initialModel func() tea.Mod
 		return NewErrorModel(err, fmt.Sprintf("Loading autovacuum detail for %s.%s", schema, tableName), initialModel)
 	}
 	params, _ := FetchAutovacuumParams(context.Background(), config.Config.DB, schema, tableName)
+
+	tbl := table.New(
+		table.WithColumns(paramTableColumns()),
+		table.WithRows(buildParamRows(params)),
+		table.WithFocused(true),
+		table.WithHeight(10),
+		table.WithStyles(DefaultTableStyles()),
+	)
+
 	return AutovacuumDetailModel{
 		schema:       schema,
 		tableName:    tableName,
 		stats:        stats,
 		params:       params,
+		paramTable:   tbl,
 		initialModel: initialModel,
-		width:        120,
-		height:       40,
 	}
 }
 
@@ -63,6 +95,14 @@ func (m AutovacuumDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Summary header takes ~9 lines (header 3 + stats 2 + history 2 + freeze 1 + blank 1)
+		tableH := TableHeight(msg.Height) - 7
+		if tableH < 4 {
+			tableH = 4
+		}
+		m.paramTable.SetHeight(tableH)
+		cols := StretchColumn(m.paramTable.Columns(), 2, msg.Width)
+		m.paramTable.SetColumns(cols)
 		return m, nil
 
 	case bloatLoadedMsg:
@@ -118,26 +158,15 @@ func (m AutovacuumDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmVacuum = false
 				return m, nil
 			}
-		case "up", "k":
-			if m.offset > 0 {
-				m.offset--
-			}
-			return m, nil
-		case "down", "j":
-			m.offset++
-			return m, nil
 		}
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.paramTable, cmd = m.paramTable.Update(msg)
+	return m, cmd
 }
 
 func (m AutovacuumDetailModel) View() string {
-	header := RenderHeader(fmt.Sprintf("Autovacuum Detail — %s.%s", m.schema, m.tableName))
-
-	renderLabel := lipgloss.NewStyle().Width(26).Foreground(ColorGray).Render
-	renderValue := lipgloss.NewStyle().Foreground(ColorWhite).Render
-	renderSection := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render
-
 	fmtTime := func(t *time.Time) string {
 		if t == nil {
 			return "never"
@@ -146,138 +175,107 @@ func (m AutovacuumDetailModel) View() string {
 	}
 	fmtNum := func(n int64) string { return fmt.Sprintf("%d", n) }
 
-	var lines []string
+	renderKey := lipgloss.NewStyle().Foreground(ColorGray).Render
+	renderVal := lipgloss.NewStyle().Foreground(ColorWhite).Render
 
-	// STATS section
-	lines = append(lines, renderSection("STATS"))
-	lines = append(lines, fmt.Sprintf("  %s %s     %s %s",
-		renderLabel("Live tuples:"), renderValue(fmtNum(m.stats.LiveTuples)),
-		renderLabel("Table size:"), renderValue(m.stats.TableSize)))
-	lines = append(lines, fmt.Sprintf("  %s %s     %s %s",
-		renderLabel("Dead tuples:"), renderValue(fmtNum(m.stats.DeadTuples)),
-		renderLabel("Total size:"), renderValue(m.stats.TotalSize)))
-	lines = append(lines, fmt.Sprintf("  %s %s     %s %s",
-		renderLabel("Modified since analyze:"), renderValue(fmtNum(m.stats.ModSinceAnalyze)),
-		renderLabel("Toast+Index size:"), renderValue(m.stats.ToastAndIndexSize)))
-	lines = append(lines, "")
+	header := RenderHeader(fmt.Sprintf("Autovacuum Detail — %s.%s", m.schema, m.tableName))
 
-	// VACUUM HISTORY section
-	lines = append(lines, renderSection("VACUUM HISTORY"))
-	lines = append(lines, fmt.Sprintf("  %s %s     Count: %s",
-		renderLabel("Last vacuum:"), renderValue(fmtTime(m.stats.LastVacuum)),
-		renderValue(fmtNum(m.stats.VacuumCount))))
-	lines = append(lines, fmt.Sprintf("  %s %s     Count: %s",
-		renderLabel("Last autovacuum:"), renderValue(fmtTime(m.stats.LastAutovacuum)),
-		renderValue(fmtNum(m.stats.AutovacuumCount))))
-	lines = append(lines, fmt.Sprintf("  %s %s     Count: %s",
-		renderLabel("Last analyze:"), renderValue(fmtTime(m.stats.LastAnalyze)),
-		renderValue(fmtNum(m.stats.AnalyzeCount))))
-	lines = append(lines, fmt.Sprintf("  %s %s     Count: %s",
-		renderLabel("Last autoanalyze:"), renderValue(fmtTime(m.stats.LastAutoanalyze)),
-		renderValue(fmtNum(m.stats.AutoanalyzeCount))))
-	lines = append(lines, "")
+	// Stats summary — one line, key metrics side by side
+	statsLine := fmt.Sprintf("  %s %s   %s %s   %s %s   %s %s",
+		renderKey("Live:"), renderVal(fmtNum(m.stats.LiveTuples)),
+		renderKey("Dead:"), renderVal(fmtNum(m.stats.DeadTuples)),
+		renderKey("Modified:"), renderVal(fmtNum(m.stats.ModSinceAnalyze)),
+		renderKey("Size:"), renderVal(m.stats.TotalSize))
 
-	// FREEZE STATUS section
-	lines = append(lines, renderSection("FREEZE STATUS"))
+	// Vacuum history — two lines
+	vacuumLine := fmt.Sprintf("  %s %s (×%s)   %s %s (×%s)",
+		renderKey("Last vacuum:"), renderVal(fmtTime(m.stats.LastVacuum)),
+		renderVal(fmtNum(m.stats.VacuumCount)),
+		renderKey("Last autovacuum:"), renderVal(fmtTime(m.stats.LastAutovacuum)),
+		renderVal(fmtNum(m.stats.AutovacuumCount)))
+	analyzeLine := fmt.Sprintf("  %s %s (×%s)   %s %s (×%s)",
+		renderKey("Last analyze:"), renderVal(fmtTime(m.stats.LastAnalyze)),
+		renderVal(fmtNum(m.stats.AnalyzeCount)),
+		renderKey("Last autoanalyze:"), renderVal(fmtTime(m.stats.LastAutoanalyze)),
+		renderVal(fmtNum(m.stats.AutoanalyzeCount)))
+
+	// Freeze status — one line with bar and effective freeze_max_age for context
+	freezeMaxAge := int64(200_000_000) // PostgreSQL default
+	for _, p := range m.params {
+		if p.Name == "autovacuum_freeze_max_age" {
+			effective := p.GlobalValue
+			if p.TableValue != "" {
+				effective = p.TableValue
+			}
+			var n int64
+			if cnt, _ := fmt.Sscanf(effective, "%d", &n); cnt == 1 && n > 0 {
+				freezeMaxAge = n
+			}
+			break
+		}
+	}
 	freezePct := 0.0
 	if m.stats.FrozenXIDAge > 0 {
-		// Rough pct using typical 200M freeze_max_age
-		freezePct = float64(m.stats.FrozenXIDAge) / 200_000_000 * 100
+		freezePct = float64(m.stats.FrozenXIDAge) / float64(freezeMaxAge) * 100
 		if freezePct > 100 {
 			freezePct = 100
 		}
 	}
-	freezeBar := RenderBar(freezePct, 20)
 	freezeLevel := 0
 	if freezePct > 75 {
 		freezeLevel = 2
 	} else if freezePct > 50 {
 		freezeLevel = 1
 	}
-	lines = append(lines, fmt.Sprintf("  %s %s   %s",
-		renderLabel("relfrozenxid age:"),
-		SeverityColor(fmt.Sprintf("%d", m.stats.FrozenXIDAge), freezeLevel),
-		freezeBar))
-	lines = append(lines, fmt.Sprintf("  %s %s",
-		renderLabel("relminmxid age:"), renderValue(fmtNum(m.stats.MXIDAge))))
-	lines = append(lines, "")
+	freezeLine := fmt.Sprintf("  %s %s   %s  %s",
+		renderKey("XID age:"),
+		SeverityColor(fmtNum(m.stats.FrozenXIDAge), freezeLevel),
+		RenderBar(freezePct, 20),
+		renderKey(fmt.Sprintf("of freeze_max_age %dM", freezeMaxAge/1_000_000)))
 
-	// CUSTOM PARAMETERS section
-	lines = append(lines, renderSection("CUSTOM PARAMETERS  (* = overridden for this table)"))
-	lines = append(lines, fmt.Sprintf("  %-42s %-16s %s",
-		lipgloss.NewStyle().Foreground(ColorGray).Render("Parameter"),
-		lipgloss.NewStyle().Foreground(ColorGray).Render("Table value"),
-		lipgloss.NewStyle().Foreground(ColorGray).Render("Global value")))
-	for _, p := range m.params {
-		tableVal := "(inherited)"
-		tableStyle := lipgloss.NewStyle().Foreground(ColorGray)
-		marker := " "
-		if p.TableValue != "" {
-			tableVal = p.TableValue + " *"
-			tableStyle = lipgloss.NewStyle().Foreground(ColorYellow)
-			marker = "*"
-		}
-		_ = marker
-		lines = append(lines, fmt.Sprintf("  %-42s %-16s %s",
-			renderLabel(p.Name),
-			tableStyle.Render(tableVal),
-			renderValue(p.GlobalValue+" "+p.Unit)))
+	// Params table with color rule for table-overridden values
+	rules := []ColorRule{
+		{Column: 1, Colorize: func(v string) int {
+			if v == "(inherited)" {
+				return 3 // gray
+			}
+			return 1 // yellow = overridden
+		}},
 	}
-	lines = append(lines, "")
+	paramSection := ColorizeTable(m.paramTable.View(), m.paramTable.Columns(), rules)
 
-	// BLOAT section
-	lines = append(lines, renderSection("PRECISE BLOAT  (pgstattuple)"))
+	// Bloat status line (shown below the table)
+	bloatLine := ""
 	switch {
 	case m.bloatLoading:
-		lines = append(lines, "  Running pgstattuple…")
+		bloatLine = "  " + FooterStyle.Render("Running pgstattuple…")
 	case m.bloatError != "":
-		lines = append(lines, "  "+SeverityColor(m.bloatError, 1))
+		bloatLine = "  " + SeverityColor(m.bloatError, 1)
 	case m.bloat != nil:
-		lines = append(lines, fmt.Sprintf("  %s %s   %s %s",
-			renderLabel("Dead tuple len:"),
-			renderValue(fmt.Sprintf("%d bytes", m.bloat.DeadTupleLen)),
-			renderLabel("Free space:"),
-			renderValue(fmt.Sprintf("%d bytes", m.bloat.FreeSpace))))
 		bloatLevel := 0
 		if m.bloat.RealBloatPct > 30 {
 			bloatLevel = 2
 		} else if m.bloat.RealBloatPct > 10 {
 			bloatLevel = 1
 		}
-		lines = append(lines, fmt.Sprintf("  %s %s",
-			renderLabel("Real bloat:"),
-			SeverityColor(fmt.Sprintf("%.2f%%", m.bloat.RealBloatPct), bloatLevel)))
-	default:
-		lines = append(lines, "  b → run pgstattuple for precise bloat (full table scan)")
+		bloatLine = fmt.Sprintf("  %s %s   %s %d bytes free",
+			renderKey("Bloat:"),
+			SeverityColor(fmt.Sprintf("%.2f%%", m.bloat.RealBloatPct), bloatLevel),
+			renderKey("Dead tuple len:"),
+			m.bloat.DeadTupleLen)
 	}
 
-	// Clamp offset
-	visibleRows := m.height - 6 // header + footer
-	if visibleRows < 5 {
-		visibleRows = 5
-	}
-	maxOffset := len(lines) - visibleRows
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.offset > maxOffset {
-		m.offset = maxOffset
-	}
-
-	end := m.offset + visibleRows
-	if end > len(lines) {
-		end = len(lines)
-	}
-
-	content := strings.Join(lines[m.offset:end], "\n")
-
-	footer := ""
+	var footer string
 	if m.confirmVacuum {
-		footer = fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n",
-			m.schema, m.tableName)
+		footer = fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schema, m.tableName)
 	} else {
-		footer = "\n" + FooterStyle.Render("↑↓ scroll • b precise bloat • v vacuum analyze • r refresh • q back")
+		footer = "\n" + FooterStyle.Render("↑↓ navigate • b precise bloat • v vacuum analyze • r refresh • q back")
 	}
 
-	return header + "\n" + content + footer
+	summary := statsLine + "\n" + vacuumLine + "\n" + analyzeLine + "\n" + freezeLine + "\n"
+	if bloatLine != "" {
+		summary += bloatLine + "\n"
+	}
+
+	return header + "\n" + summary + "\n" + paramSection + footer
 }

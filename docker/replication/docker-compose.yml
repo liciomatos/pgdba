@@ -11,7 +11,7 @@ version: '3.8'
 
 services:
   postgres-primary:
-    image: postgres:15
+    image: docker.io/library/postgres:15
     container_name: pgdba_primary
     environment:
       POSTGRES_USER: postgres
@@ -38,7 +38,7 @@ services:
       retries: 10
 
   postgres-replica:
-    image: postgres:15
+    image: docker.io/library/postgres:15
     container_name: pgdba_replica
     environment:
       POSTGRES_PASSWORD: postgres

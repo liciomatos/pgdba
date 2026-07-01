@@ -60,6 +60,8 @@ pgdba-cli --host=<host> --user=<user> --password=<password> --dbname=<dbname>
 | `--dbname` | `PGDATABASE` | `mydb` | Database name |
 | `--sslmode` | `PGSSLMODE` | `disable` | SSL mode (`disable`, `require`, `verify-ca`, `verify-full`) |
 | `--slow-ms` | `PG_SLOW_MS` | `1000` | Threshold in ms to classify a query as slow |
+| `--mcp` | — | — | Start MCP server mode (HTTP/SSE) |
+| `--mcp-port` | — | `8811` | Port for MCP server |
 
 All flags fall back to their environment variable counterpart. If `--password` is not set and `PGPASSWORD` is empty, `~/.pgpass` is consulted automatically.
 
@@ -73,6 +75,34 @@ pgdba-cli --dbname=production
 # Custom slow query threshold
 pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=500
 ```
+
+## MCP Server Mode
+
+pgdba-cli can run as an [MCP](https://modelcontextprotocol.io) server, exposing all diagnostic
+screens as tools callable by LLMs (Claude Code, Claude Desktop).
+
+```bash
+# Start the MCP server with DB credentials
+pgdba-cli --mcp --url "postgres://user:pass@host/db"
+
+# Or via environment variables (no credentials on the command line)
+PGHOST=host PGUSER=user PGPASSWORD=pass PGDATABASE=db pgdba-cli --mcp
+```
+
+Configure Claude Code (`.mcp.json` in your project — credentials never go here):
+
+```json
+{
+  "mcpServers": {
+    "pgdba": {
+      "url": "http://localhost:8811/sse"
+    }
+  }
+}
+```
+
+The server exposes the same diagnostics as the TUI: slow queries, connections, autovacuum,
+replication slots, freeze status, streaming standbys, replication config, and more.
 
 ## Screenshots
 
@@ -91,6 +121,26 @@ pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=50
 ### Autovacuum Monitor
 
 ![Autovacuum](docs/screenshots/autovacuum.svg)
+
+### Autovacuum Detail
+
+![Autovacuum Detail](docs/screenshots/autovacuum_detail.svg)
+
+### Freeze Monitor
+
+![Freeze Monitor](docs/screenshots/freeze.svg)
+
+### Replication Slots
+
+![Replication Slots](docs/screenshots/replication_slots.svg)
+
+### Streaming Standbys
+
+![Streaming Standbys](docs/screenshots/replication_standbys.svg)
+
+### Replication Config
+
+![Replication Config](docs/screenshots/replication_config.svg)
 
 ### Config Parameters
 
@@ -123,9 +173,6 @@ pgdba-cli --url="postgres://admin:secret@db.example.com/production" --slow-ms=50
 ### Extensions
 ![Extensions](docs/screenshots/extensions.svg)
 
-### Replication Slots
-![Replication Slots](docs/screenshots/replication_slots.svg)
-
 ### Query Load
 ![Query Load](docs/screenshots/query_load.svg)
 
@@ -144,10 +191,10 @@ From the main dashboard, open each screen with its shortcut key:
 |---|---|---|---|
 | `1` | **Slow Queries** | Top queries by average execution time¹ | — |
 | `2` | **Long Running Queries** | Active queries running longer than 5 seconds | `k` kill session |
-| `3` | **Replication Slots** | Slots and accumulated WAL size | `d` drop slot |
+| `3` | **Replication Slots** | Slots, plugin, WAL lag, and safe WAL size | `d` drop slot, `s` streaming standbys, `p` replication config |
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
 | `5` | **Connections** | Connections by state with % of limit used | — |
-| `6` | **Autovacuum** | Tables with most dead tuples | `v` VACUUM ANALYZE |
+| `6` | **Autovacuum** | Tables with most dead tuples and bloat estimate | `enter` detail view, `v` VACUUM ANALYZE |
 | `7` | **Index Usage** | Indexes sorted by scan count | `enter` index detail |
 | `8` | **Cache Hit Ratio** | Buffer cache hit ratio per table | — |
 | `9` | **Users** | Login roles and their privileges | — |
@@ -158,8 +205,40 @@ From the main dashboard, open each screen with its shortcut key:
 | `D` | **Switch Database** | Switch database without restarting | `enter` connect |
 | `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
 | `w` | **Wait Events** | Active wait events grouped by type with distribution bar | — |
+| `f` | **Freeze Monitor** | XID age by database and top tables approaching wrap-around | `f` VACUUM FREEZE selected table |
 
 All list screens support live filtering via `/`.
+
+### Autovacuum Detail
+
+Press `enter` on any row in the Autovacuum screen to open the detail view for that table:
+
+- **Stats** — live/dead tuple counts, table and total size
+- **Vacuum History** — last vacuum, autovacuum, analyze, and autoanalyze timestamps with counters
+- **Freeze Status** — `relfrozenxid` age with a visual progress bar
+- **Custom Parameters** — per-table autovacuum settings vs. global defaults
+- **Precise Bloat** — press `b` to run `pgstattuple` for an exact bloat measurement (full table scan)
+
+### Streaming Standbys
+
+Press `s` from the Replication Slots screen to see all connected streaming standbys from
+`pg_stat_replication`: write/flush/replay lag, sync mode, and client address. Press `k` to
+terminate the walsender for the selected standby.
+
+### Replication Config
+
+Press `p` from the Replication Slots screen for a read-only view of all replication-related
+`pg_settings` parameters with contextual hints — highlights parameters that require attention
+(e.g., `archive_mode=off`, `wal_log_hints=off`).
+
+### Freeze Monitor
+
+Press `f` from the main dashboard to open the Freeze Monitor:
+
+- **Database XID Status** — age and percentage toward XID wrap-around for every database
+- **Top Tables by XID Age** — tables closest to needing a freeze, with `% Freeze` colored
+  green/yellow/red by proximity to `autovacuum_freeze_max_age`
+- Press `f` on a selected table to run `VACUUM (FREEZE, ANALYZE)` with confirmation
 
 ¹ Requires the `pg_stat_statements` extension. Enable it with:
 ```sql
@@ -182,7 +261,27 @@ cd pgdba-cli && go test ./... -short
 cd pgdba-cli && go test ./... -timeout 120s
 ```
 
+### Replication test environment
+
+A dedicated Docker Compose setup provides a PostgreSQL 15 primary + streaming replica with
+pre-seeded test data (replication slots, dead tuples, logical replication):
+
+```bash
+# Start primary (port 5432) + replica (port 5433)
+make replication-up
+
+# Connect to primary
+pgdba-cli --url "postgres://postgres:postgres@localhost:5432/testdb?sslmode=disable"
+
+# Stop and remove volumes
+make replication-down
+```
+
+See [`docker/replication/README.md`](docker/replication/README.md) for test scenarios covering
+each new screen.
+
 ## Requirements
 
 - PostgreSQL 13 or later
-- **Slow Queries** screen requires the `pg_stat_statements` extension
+- **Slow Queries** and **Query Load** screens require the `pg_stat_statements` extension
+- **Precise Bloat** (`b` in Autovacuum Detail) requires the `pgstattuple` extension

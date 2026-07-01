@@ -77,7 +77,7 @@ func (m ReplicationConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.width = msg.Width
-		m.table.SetHeight(TableHeight(msg.Height) - 3)
+		m.table.SetHeight(TableHeight(msg.Height) - 4) // -2 counts summary, -1 hint, -1 blank
 		cols := StretchColumn(m.table.Columns(), 4, msg.Width)
 		m.table.SetColumns(cols)
 		return m, nil
@@ -119,7 +119,9 @@ func (m ReplicationConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ReplicationConfigModel) View() string {
+	hint := "  Logical replication streams row-level changes (INSERT/UPDATE/DELETE) to subscribers using wal_level=logical and a decoder plugin (pgoutput, wal2json)."
 	s := RenderHeader("Replication Config") + "\n"
+	s += HintStyle.Render(hint) + "\n\n"
 
 	// Live counts summary line
 	renderLabel := lipgloss.NewStyle().Foreground(ColorGray).Render

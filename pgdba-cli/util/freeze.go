@@ -6,22 +6,66 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/lib/pq"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/liciomatos/pgdba-cli/config"
 )
 
 type FreezeModel struct {
-	dbStatus      []FreezeDatabaseStatus
-	table         table.Model
-	allRows       []table.Row
-	initialModel  func() tea.Model
+	dbTable      table.Model // informational only — no keyboard focus
+	tableModel   table.Model // current-DB tables, always focused
+	dbStatus     []FreezeDatabaseStatus
+	allTableRows []table.Row
+	initialModel func() tea.Model
 	confirmFreeze bool
 	schemaName    string
 	tableName     string
 	height        int
 	width         int
+}
+
+func dbFreezeColumns() []table.Column {
+	return []table.Column{
+		{Title: "Database", Width: 20},
+		{Title: "XID Age", Width: 16},
+		{Title: "% Toward Shutdown", Width: 20},
+		{Title: "Status", Width: 10},
+	}
+}
+
+func tableXIDColumns() []table.Column {
+	return []table.Column{
+		{Title: "Schema", Width: 12},
+		{Title: "Table", Width: 28},
+		{Title: "XID Age", Width: 12},
+		{Title: "MXI Age", Width: 12},
+		{Title: "% Freeze", Width: 10},
+		{Title: "Size", Width: 10},
+		{Title: "Last Autovacuum", Width: 18},
+	}
+}
+
+// buildDBRows pre-colors Status and % Toward Shutdown so the severity is visible
+// even on the selected row (short values are safe from runewidth ANSI miscounting).
+func buildDBRows(dbStatus []FreezeDatabaseStatus) []table.Row {
+	var rows []table.Row
+	for _, db := range dbStatus {
+		level := db.Status
+		rows = append(rows, table.Row{
+			db.DatabaseName,
+			fmt.Sprintf("%d", db.DBXIDAge),
+			SeverityColor(fmt.Sprintf("%.2f%%", db.PctTowardShutdown), level),
+			SeverityColor([]string{"OK", "Warning", "Critical"}[min3(level, 2)], level),
+		})
+	}
+	return rows
+}
+
+func min3(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func CheckFreezeMonitor(initialModel func() tea.Model) tea.Model {
@@ -34,15 +78,13 @@ func CheckFreezeMonitor(initialModel func() tea.Model) tea.Model {
 		return NewErrorModel(err, "Loading freeze status by table", initialModel)
 	}
 
-	columns := []table.Column{
-		{Title: "Schema", Width: 12},
-		{Title: "Table", Width: 28},
-		{Title: "XID Age", Width: 12},
-		{Title: "MXI Age", Width: 12},
-		{Title: "% Freeze", Width: 10},
-		{Title: "Size", Width: 10},
-		{Title: "Last Autovacuum", Width: 18},
-	}
+	dbTbl := table.New(
+		table.WithColumns(dbFreezeColumns()),
+		table.WithRows(buildDBRows(dbStatus)),
+		table.WithFocused(false),
+		table.WithHeight(len(dbStatus)),
+		table.WithStyles(InfoTableStyles()),
+	)
 
 	fmtTime := func(t *time.Time) string {
 		if t == nil {
@@ -51,9 +93,9 @@ func CheckFreezeMonitor(initialModel func() tea.Model) tea.Model {
 		return t.Format("2006-01-02 15:04")
 	}
 
-	var rowsData []table.Row
+	var tableRows []table.Row
 	for _, t := range tableStatus {
-		rowsData = append(rowsData, table.Row{
+		tableRows = append(tableRows, table.Row{
 			t.SchemaName,
 			t.TableName,
 			fmt.Sprintf("%d", t.XIDAge),
@@ -64,40 +106,47 @@ func CheckFreezeMonitor(initialModel func() tea.Model) tea.Model {
 		})
 	}
 
-	tbl := table.New(
-		table.WithColumns(columns),
-		table.WithRows(rowsData),
+	tableTbl := table.New(
+		table.WithColumns(tableXIDColumns()),
+		table.WithRows(tableRows),
 		table.WithFocused(true),
 		table.WithHeight(20),
 		table.WithStyles(DefaultTableStyles()),
 	)
 
 	return FreezeModel{
+		dbTable:      dbTbl,
+		tableModel:   tableTbl,
 		dbStatus:     dbStatus,
-		table:        tbl,
-		allRows:      rowsData,
+		allTableRows: tableRows,
 		initialModel: initialModel,
-		height:       40,
-		width:        120,
 	}
 }
 
 func (m FreezeModel) Init() tea.Cmd { return nil }
+
+// ConsumesKey prevents the navigator from intercepting "f" and re-opening the
+// Freeze Monitor while already on it — here "f" triggers VACUUM FREEZE.
+func (m FreezeModel) ConsumesKey(key string) bool {
+	return key == "f"
+}
 
 func (m FreezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Database summary takes ~(len(dbStatus)+3) lines; rest for table
-		dbHeaderLines := len(m.dbStatus) + 4
-		tableH := m.height - dbHeaderLines - 3
-		if tableH < 5 {
-			tableH = 5
+		// db table: 2 header lines + N rows + 1 blank + 1 hint line
+		dbRenderedLines := 2 + len(m.dbStatus) + 2
+		tableH := TableHeight(msg.Height) - dbRenderedLines
+		if tableH < 4 {
+			tableH = 4
 		}
-		m.table.SetHeight(tableH)
-		cols := StretchColumn(m.table.Columns(), 1, m.width)
-		m.table.SetColumns(cols)
+		m.tableModel.SetHeight(tableH)
+		dbCols := StretchColumn(m.dbTable.Columns(), 0, msg.Width)
+		m.dbTable.SetColumns(dbCols)
+		tblCols := StretchColumn(m.tableModel.Columns(), 1, msg.Width)
+		m.tableModel.SetColumns(tblCols)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -115,7 +164,7 @@ func (m FreezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmFreeze = false
 				return m, nil
 			}
-			selectedRow := m.table.SelectedRow()
+			selectedRow := m.tableModel.SelectedRow()
 			if len(selectedRow) < 2 {
 				return m, nil
 			}
@@ -145,41 +194,12 @@ func (m FreezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
+	m.tableModel, cmd = m.tableModel.Update(msg)
 	return m, cmd
 }
 
 func (m FreezeModel) View() string {
-	s := RenderHeader("Freeze Monitor") + "\n"
-
-	renderLabel := lipgloss.NewStyle().Width(20).Foreground(ColorGray).Render
-
-	// Database summary
-	s += lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("DATABASE XID STATUS") + "\n"
-	s += fmt.Sprintf("  %-22s  %-16s  %-12s  %s\n",
-		lipgloss.NewStyle().Foreground(ColorGray).Render("Database"),
-		lipgloss.NewStyle().Foreground(ColorGray).Render("XID Age"),
-		lipgloss.NewStyle().Foreground(ColorGray).Render("% Shutdown"),
-		lipgloss.NewStyle().Foreground(ColorGray).Render("Status"))
-	for _, db := range m.dbStatus {
-		statusStr := SeverityColor("OK", 0)
-		if db.Status == 1 {
-			statusStr = SeverityColor("Warning", 1)
-		} else if db.Status >= 2 {
-			statusStr = SeverityColor("Critical", 2)
-		}
-		s += fmt.Sprintf("  %-22s  %s  %s  %s\n",
-			db.DatabaseName,
-			renderLabel(fmt.Sprintf("%d", db.DBXIDAge)),
-			SeverityColor(fmt.Sprintf("%.2f%%", db.PctTowardShutdown), db.Status),
-			statusStr)
-	}
-	s += "\n"
-
-	// Table section
-	s += lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("TOP TABLES BY XID AGE") + "\n"
-
-	rules := []ColorRule{
+	tableRules := []ColorRule{
 		{Column: 4, Colorize: func(v string) int {
 			var pct float64
 			fmt.Sscanf(v, "%f%%", &pct)
@@ -193,13 +213,23 @@ func (m FreezeModel) View() string {
 			}
 		}},
 	}
-	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
+
+	hint := "  XIDs overflow at ~2.1B transactions — PostgreSQL will refuse writes. VACUUM FREEZE resets the counter before that threshold."
+
+	s := RenderHeader("Freeze Monitor") + "\n"
+	s += HintStyle.Render(hint) + "\n"
+	s += m.dbTable.View()
+	s += "\n"
+
+	currentDB := config.Config.DBName
+	s += HintStyle.Render(fmt.Sprintf("  Tables in current database: %s  (use D to switch databases)", currentDB)) + "\n"
+	s += ColorizeTable(m.tableModel.View(), m.tableModel.Columns(), tableRules)
 
 	if m.confirmFreeze {
 		s += fmt.Sprintf("\nVACUUM (FREEZE, ANALYZE) %s.%s? (y/n) — this can be slow on large tables\n",
 			m.schemaName, m.tableName)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • f vacuum freeze selected table • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • f vacuum freeze • D switch database • r refresh • q back")
 	}
 	return s
 }

@@ -167,6 +167,14 @@ type inputModer interface {
 	IsInputMode() bool
 }
 
+// keyConsumer is implemented by screens that need to handle keys that would otherwise
+// be intercepted by the navigator's global shortcuts (e.g. "s", "p", "f").
+// The navigator checks this before dispatching global shortcuts so sub-screens can
+// claim keys without the global binding firing underneath them.
+type keyConsumer interface {
+	ConsumesKey(key string) bool
+}
+
 type navigator struct {
 	child  tea.Model
 	width  int
@@ -196,7 +204,11 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if im, ok := n.child.(inputModer); ok {
 			inInputMode = im.IsInputMode()
 		}
-		if !inInputMode {
+		childConsumes := false
+		if kc, ok := n.child.(keyConsumer); ok {
+			childConsumes = kc.ConsumesKey(key.String())
+		}
+		if !inInputMode && !childConsumes {
 			switch key.String() {
 			case "1":
 				return n.wrapChild(util.IdentifySlowQueries(dashboard)), nil
@@ -236,6 +248,15 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	newChild, cmd := n.child.Update(msg)
+	// After every internal update, re-deliver the current terminal size to the child.
+	// wrapChild() does this for top-level shortcuts; internal transitions (Enter into a
+	// detail screen, s/p sub-views) bypass wrapChild and create new models with hardcoded
+	// default dimensions. Always re-injecting here ensures any newly-returned model
+	// receives the correct dimensions without any per-screen bookkeeping. All
+	// WindowSizeMsg handlers return nil cmd, so the second cmd is safe to discard.
+	if n.width > 0 {
+		newChild, _ = newChild.Update(tea.WindowSizeMsg{Width: n.width, Height: n.height})
+	}
 	n.child = newChild
 	return n, cmd
 }
