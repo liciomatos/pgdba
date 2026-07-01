@@ -831,3 +831,145 @@ func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) 
 		ActiveSlots:   counts.ActiveSlots,
 	})
 }
+
+// --- database sizes ---
+
+type databaseSizeResponse struct {
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	Encoding   string `json:"encoding"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SizePretty string `json:"size_pretty"`
+}
+
+type tablespaceSizeResponse struct {
+	Name       string `json:"name"`
+	Location   string `json:"location"`
+	SizeBytes  int64  `json:"size_bytes"`
+	SizePretty string `json:"size_pretty"`
+}
+
+type databaseSizeReportResponse struct {
+	Databases   []databaseSizeResponse   `json:"databases"`
+	Tablespaces []tablespaceSizeResponse `json:"tablespaces"`
+	TotalBytes  int64                    `json:"total_bytes"`
+	TotalPretty string                   `json:"total_pretty"`
+}
+
+func handleCheckDatabaseSizes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	report, err := util.FetchDatabaseSizes(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	databases := make([]databaseSizeResponse, 0, len(report.Databases))
+	for _, d := range report.Databases {
+		databases = append(databases, databaseSizeResponse{
+			Name:       d.Name,
+			Owner:      d.Owner,
+			Encoding:   d.Encoding,
+			SizeBytes:  d.SizeBytes,
+			SizePretty: d.SizePretty,
+		})
+	}
+	tablespaces := make([]tablespaceSizeResponse, 0, len(report.Tablespaces))
+	for _, t := range report.Tablespaces {
+		tablespaces = append(tablespaces, tablespaceSizeResponse{
+			Name:       t.Name,
+			Location:   t.Location,
+			SizeBytes:  t.SizeBytes,
+			SizePretty: t.SizePretty,
+		})
+	}
+	return jsonResult(databaseSizeReportResponse{
+		Databases:   databases,
+		Tablespaces: tablespaces,
+		TotalBytes:  report.TotalBytes,
+		TotalPretty: report.TotalPretty,
+	})
+}
+
+// --- temp file usage ---
+
+type tempFileUsageResponse struct {
+	Database   string `json:"database"`
+	TempFiles  int64  `json:"temp_files"`
+	TempBytes  int64  `json:"temp_bytes"`
+	TempPretty string `json:"temp_pretty"`
+	StatsReset string `json:"stats_reset"`
+}
+
+func handleCheckTempFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	usage, err := util.FetchTempFileUsage(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]tempFileUsageResponse, 0, len(usage))
+	for _, u := range usage {
+		resp = append(resp, tempFileUsageResponse{
+			Database:   u.Database,
+			TempFiles:  u.TempFiles,
+			TempBytes:  u.TempBytes,
+			TempPretty: u.TempPretty,
+			StatsReset: u.StatsReset,
+		})
+	}
+	return jsonResult(resp)
+}
+
+// --- memory & checkpoint stats ---
+
+type memoryConfigResponse struct {
+	Name      string `json:"name"`
+	Setting   string `json:"setting"`
+	Unit      string `json:"unit"`
+	ShortDesc string `json:"short_desc"`
+}
+
+type checkpointStatsResponse struct {
+	CheckpointsTimed    int64  `json:"checkpoints_timed"`
+	CheckpointsReq      int64  `json:"checkpoints_req"`
+	BuffersCheckpoint   int64  `json:"buffers_checkpoint"`
+	BuffersClean        int64  `json:"buffers_clean"`
+	MaxwrittenClean     int64  `json:"maxwritten_clean"`
+	BuffersBackend      int64  `json:"buffers_backend"`
+	BuffersBackendFsync int64  `json:"buffers_backend_fsync"`
+	BuffersAlloc        int64  `json:"buffers_alloc"`
+	StatsReset          string `json:"stats_reset"`
+}
+
+type memoryStatsResponse struct {
+	Configs       []memoryConfigResponse  `json:"configs"`
+	CacheHitRatio float64                 `json:"cache_hit_ratio"`
+	Checkpoint    checkpointStatsResponse `json:"checkpoint"`
+}
+
+func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	stats, err := util.FetchMemoryStats(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	configs := make([]memoryConfigResponse, 0, len(stats.Configs))
+	for _, c := range stats.Configs {
+		configs = append(configs, memoryConfigResponse{
+			Name:      c.Name,
+			Setting:   c.Setting,
+			Unit:      c.Unit,
+			ShortDesc: c.ShortDesc,
+		})
+	}
+	return jsonResult(memoryStatsResponse{
+		Configs:       configs,
+		CacheHitRatio: stats.CacheHitRatio,
+		Checkpoint: checkpointStatsResponse{
+			CheckpointsTimed:    stats.Checkpoint.CheckpointsTimed,
+			CheckpointsReq:      stats.Checkpoint.CheckpointsReq,
+			BuffersCheckpoint:   stats.Checkpoint.BuffersCheckpoint,
+			BuffersClean:        stats.Checkpoint.BuffersClean,
+			MaxwrittenClean:     stats.Checkpoint.MaxwrittenClean,
+			BuffersBackend:      stats.Checkpoint.BuffersBackend,
+			BuffersBackendFsync: stats.Checkpoint.BuffersBackendFsync,
+			BuffersAlloc:        stats.Checkpoint.BuffersAlloc,
+			StatsReset:          stats.Checkpoint.StatsReset,
+		},
+	})
+}

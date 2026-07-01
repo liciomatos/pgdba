@@ -177,10 +177,13 @@ func (m DashboardModel) View() string {
 		renderKey("D") + " " + renderLabel("switch-db") + "  " +
 		renderKey("L") + " " + renderLabel("load") + "  " +
 		renderKey("w") + " " + renderLabel("waits") + "  " +
-		renderKey("f") + " " + renderLabel("freeze") + "  " +
+		renderKey("f") + " " + renderLabel("freeze")
+	shortcutRow3 := renderKey("S") + " " + renderLabel("db-size") + "  " +
+		renderKey("t") + " " + renderLabel("temp-files") + "  " +
+		renderKey("m") + " " + renderLabel("memory") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 
-	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2
+	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3
 	return s
 }

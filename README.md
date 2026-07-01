@@ -209,6 +209,9 @@ From the main dashboard, open each screen with its shortcut key:
 | `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
 | `w` | **Wait Events** | Active wait events grouped by type with distribution bar | — |
 | `f` | **Freeze Monitor** | XID age by database and top tables approaching wrap-around | `f` VACUUM FREEZE selected table |
+| `S` | **Database Sizes** | On-disk size of every database and tablespace, plus cluster total | — |
+| `t` | **Temp Files** | Temp file spill activity per database (`pg_stat_database`) | — |
+| `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 
 All list screens support live filtering via `/`.
 

@@ -154,6 +154,18 @@ func Serve(port int) error {
 		mcp.WithDescription("Replication-related pg_settings parameters (wal_level, synchronous_commit, slots, archive, etc.) with contextual hints about risk or misconfiguration."),
 	), handleCheckReplicationConfig)
 
+	s.AddTool(mcp.NewTool("check_database_sizes",
+		mcp.WithDescription("On-disk size of every database and tablespace, plus the total cluster size."),
+	), handleCheckDatabaseSizes)
+
+	s.AddTool(mcp.NewTool("check_temp_files",
+		mcp.WithDescription("Temp file spill activity per database from pg_stat_database (temp_files, temp_bytes) since the last stats reset. High values suggest work_mem is too low."),
+	), handleCheckTempFiles)
+
+	s.AddTool(mcp.NewTool("check_memory_stats",
+		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers."),
+	), handleCheckMemoryStats)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))

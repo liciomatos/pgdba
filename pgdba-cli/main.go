@@ -244,6 +244,12 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckWaitEvents(dashboard)), nil
 			case "f":
 				return n.wrapChild(util.CheckFreezeMonitor(dashboard)), nil
+			case "S":
+				return n.wrapChild(util.CheckDatabaseSizes(dashboard)), nil
+			case "t":
+				return n.wrapChild(util.CheckTempFiles(dashboard)), nil
+			case "m":
+				return n.wrapChild(util.CheckMemoryStats(dashboard)), nil
 			}
 		}
 	}

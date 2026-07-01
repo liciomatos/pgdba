@@ -1298,3 +1298,230 @@ func FetchReplicationConfig(ctx context.Context, db *sql.DB) ([]ReplicationParam
 
 	return results, counts, nil
 }
+
+// --- Database Sizes ---
+
+// DatabaseSize is one row from pg_database with its on-disk size.
+type DatabaseSize struct {
+	Name       string
+	Owner      string
+	Encoding   string
+	SizeBytes  int64
+	SizePretty string
+}
+
+// TablespaceSize is one row from pg_tablespace with its on-disk size.
+type TablespaceSize struct {
+	Name       string
+	Location   string
+	SizeBytes  int64
+	SizePretty string
+}
+
+// DatabaseSizeReport aggregates per-database sizes, tablespace sizes, and the cluster total.
+type DatabaseSizeReport struct {
+	Databases   []DatabaseSize
+	Tablespaces []TablespaceSize
+	TotalBytes  int64
+	TotalPretty string
+}
+
+func FetchDatabaseSizes(ctx context.Context, db *sql.DB) (DatabaseSizeReport, error) {
+	var report DatabaseSizeReport
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			d.datname,
+			pg_catalog.pg_get_userbyid(d.datdba),
+			pg_encoding_to_char(d.encoding),
+			pg_database_size(d.datname),
+			pg_size_pretty(pg_database_size(d.datname))
+		FROM pg_database d
+		WHERE NOT d.datistemplate
+		ORDER BY pg_database_size(d.datname) DESC`)
+	if err != nil {
+		return report, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d DatabaseSize
+		if err := rows.Scan(&d.Name, &d.Owner, &d.Encoding, &d.SizeBytes, &d.SizePretty); err != nil {
+			return report, err
+		}
+		report.Databases = append(report.Databases, d)
+	}
+	if err := rows.Err(); err != nil {
+		return report, err
+	}
+
+	tsRows, err := db.QueryContext(ctx, `
+		SELECT
+			spcname,
+			COALESCE(pg_tablespace_location(oid), ''),
+			pg_tablespace_size(spcname),
+			pg_size_pretty(pg_tablespace_size(spcname))
+		FROM pg_tablespace
+		ORDER BY pg_tablespace_size(spcname) DESC`)
+	if err != nil {
+		return report, err
+	}
+	defer tsRows.Close()
+	for tsRows.Next() {
+		var t TablespaceSize
+		if err := tsRows.Scan(&t.Name, &t.Location, &t.SizeBytes, &t.SizePretty); err != nil {
+			return report, err
+		}
+		report.Tablespaces = append(report.Tablespaces, t)
+	}
+	if err := tsRows.Err(); err != nil {
+		return report, err
+	}
+
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(pg_database_size(datname)), 0),
+			pg_size_pretty(COALESCE(SUM(pg_database_size(datname)), 0))
+		FROM pg_database
+		WHERE NOT datistemplate`,
+	).Scan(&report.TotalBytes, &report.TotalPretty); err != nil {
+		return report, err
+	}
+
+	return report, nil
+}
+
+// --- Temp File Usage ---
+
+// TempFileUsage is one row from pg_stat_database showing temp file spill activity
+// accumulated since the last stats reset.
+type TempFileUsage struct {
+	Database   string
+	TempFiles  int64
+	TempBytes  int64
+	TempPretty string
+	StatsReset string
+}
+
+func FetchTempFileUsage(ctx context.Context, db *sql.DB) ([]TempFileUsage, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			datname,
+			temp_files,
+			temp_bytes,
+			pg_size_pretty(temp_bytes),
+			COALESCE(stats_reset::text, '')
+		FROM pg_stat_database
+		WHERE datname IS NOT NULL
+		ORDER BY temp_bytes DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []TempFileUsage
+	for rows.Next() {
+		var t TempFileUsage
+		if err := rows.Scan(&t.Database, &t.TempFiles, &t.TempBytes, &t.TempPretty, &t.StatsReset); err != nil {
+			return nil, err
+		}
+		results = append(results, t)
+	}
+	return results, rows.Err()
+}
+
+// --- Memory & Checkpoint Stats ---
+
+// MemoryConfig is one memory-related row from pg_settings.
+type MemoryConfig struct {
+	Name      string
+	Setting   string
+	Unit      string
+	ShortDesc string
+}
+
+// CheckpointStats holds pg_stat_bgwriter counters for checkpoint and background writer activity.
+type CheckpointStats struct {
+	CheckpointsTimed    int64
+	CheckpointsReq      int64
+	BuffersCheckpoint   int64
+	BuffersClean        int64
+	MaxwrittenClean     int64
+	BuffersBackend      int64
+	BuffersBackendFsync int64
+	BuffersAlloc        int64
+	StatsReset          string
+}
+
+// MemoryStats aggregates memory-related config, the cluster-wide buffer cache hit ratio,
+// and checkpoint/background writer activity — all derived from SQL only, so it works
+// against remote servers where OS-level CPU/RAM metrics are not reachable.
+type MemoryStats struct {
+	Configs       []MemoryConfig
+	CacheHitRatio float64
+	Checkpoint    CheckpointStats
+}
+
+func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
+	var stats MemoryStats
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, setting, COALESCE(unit, ''), COALESCE(short_desc, '')
+		FROM pg_settings
+		WHERE name IN (
+			'shared_buffers', 'effective_cache_size', 'work_mem',
+			'maintenance_work_mem', 'wal_buffers', 'huge_pages'
+		)
+		ORDER BY
+			CASE name
+				WHEN 'shared_buffers'        THEN 1
+				WHEN 'effective_cache_size'  THEN 2
+				WHEN 'work_mem'              THEN 3
+				WHEN 'maintenance_work_mem'  THEN 4
+				WHEN 'wal_buffers'           THEN 5
+				WHEN 'huge_pages'            THEN 6
+				ELSE 99
+			END`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c MemoryConfig
+		if err := rows.Scan(&c.Name, &c.Setting, &c.Unit, &c.ShortDesc); err != nil {
+			return stats, err
+		}
+		stats.Configs = append(stats.Configs, c)
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+
+	var hit, read int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(blks_hit), 0), COALESCE(SUM(blks_read), 0)
+		FROM pg_stat_database`,
+	).Scan(&hit, &read); err != nil {
+		return stats, err
+	}
+	if total := hit + read; total > 0 {
+		stats.CacheHitRatio = float64(hit) / float64(total) * 100
+	}
+
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			checkpoints_timed, checkpoints_req,
+			buffers_checkpoint, buffers_clean, maxwritten_clean,
+			buffers_backend, buffers_backend_fsync, buffers_alloc,
+			COALESCE(stats_reset::text, '')
+		FROM pg_stat_bgwriter`,
+	).Scan(
+		&stats.Checkpoint.CheckpointsTimed, &stats.Checkpoint.CheckpointsReq,
+		&stats.Checkpoint.BuffersCheckpoint, &stats.Checkpoint.BuffersClean, &stats.Checkpoint.MaxwrittenClean,
+		&stats.Checkpoint.BuffersBackend, &stats.Checkpoint.BuffersBackendFsync, &stats.Checkpoint.BuffersAlloc,
+		&stats.Checkpoint.StatsReset,
+	); err != nil {
+		return stats, err
+	}
+
+	return stats, nil
+}
