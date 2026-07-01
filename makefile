@@ -3,6 +3,7 @@ BINARY_NAME=pgdba-cli
 DOCKER_COMPOSE_FILE=docker-compose.yaml
 COMPOSE := $(shell which podman-compose 2>/dev/null || which docker-compose 2>/dev/null)
 CONTAINER_NAME=postgres_pgdba
+MCP_PORT=8811
 
 # Build the Go project
 build:
@@ -53,6 +54,34 @@ scenario-slots:
 scenarios-clean:
 	@chmod +x scenarios/cleanup.sh && ./scenarios/cleanup.sh
 
+# Connect to the replication test environment primary (port 5432, testdb)
+run-repl: build
+	@echo "Connecting to replication primary..."
+	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=testdb --sslmode=disable --port=5432
+
+# Start the streaming replication test environment (primary + replica)
+replication-up:
+	@echo "Starting replication test environment..."
+	$(COMPOSE) -f docker/replication/docker-compose.yml up -d
+
+# Stop and remove the streaming replication environment
+replication-down:
+	@echo "Stopping replication test environment..."
+	$(COMPOSE) -f docker/replication/docker-compose.yml down -v
+
+# Start the MCP server against the local dev database (requires docker-up first).
+# Runs in the foreground on MCP_PORT so it can be pointed at from Claude Code.
+mcp-up: build
+	@echo "Starting MCP server on port $(MCP_PORT) against local dev database (mydb)..."
+	./pgdba-cli/$(BINARY_NAME) --mcp --mcp-port=$(MCP_PORT) \
+		--host=localhost --user=postgres --password=postgres --dbname=mydb --sslmode=disable --port=5432
+
+# Start the MCP server against the replication test environment (requires replication-up first)
+mcp-up-repl: build
+	@echo "Starting MCP server on port $(MCP_PORT) against replication test environment (testdb)..."
+	./pgdba-cli/$(BINARY_NAME) --mcp --mcp-port=$(MCP_PORT) \
+		--host=localhost --user=postgres --password=postgres --dbname=testdb --sslmode=disable --port=5432
+
 # Help
 help:
 	@echo "Makefile commands:"
@@ -66,6 +95,11 @@ help:
 	@echo "  scenario-longrunning Simulate a long-running query"
 	@echo "  scenario-slots      Create a test replication slot"
 	@echo "  scenarios-clean     Remove dynamic scenarios"
+	@echo "  run-repl            Connect to replication test environment (testdb)"
+	@echo "  replication-up      Start streaming replication test environment"
+	@echo "  replication-down    Stop and remove replication test environment"
+	@echo "  mcp-up              Start the MCP server against the local dev database (mydb)"
+	@echo "  mcp-up-repl         Start the MCP server against the replication test environment (testdb)"
 	@echo "  help                Show this help message"
 
-.PHONY: build run docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean help
+.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl help

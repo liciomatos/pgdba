@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,26 +30,10 @@ type LongRunningQueriesModel struct {
 func (m LongRunningQueriesModel) IsInputMode() bool { return m.filterMode }
 
 func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT
-            pid,
-            usename,
-            application_name,
-            state,
-            ROUND(EXTRACT(EPOCH FROM (now() - query_start))::numeric, 1) AS duration_seconds,
-            COALESCE(query, '') AS query
-        FROM pg_stat_activity
-        WHERE state != 'idle'
-          AND query_start IS NOT NULL
-          AND now() - query_start > interval '5 seconds'
-        ORDER BY duration_seconds DESC;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	queries, err := FetchLongRunningQueries(context.Background(), config.Config.DB, 5, 100)
 	if err != nil {
 		return NewErrorModel(err, "Loading long running queries", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "PID", Width: 8},
@@ -62,33 +47,22 @@ func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
 	var rowsData []table.Row
 	details := make(map[string]string)
 
-	for rows.Next() {
-		var pid int
-		var usename, applicationName, state string
-		var durationSeconds float64
-		var q string
+	for _, lrq := range queries {
+		pidStr := fmt.Sprintf("%d", lrq.PID)
+		details[pidStr] = lrq.Query
 
-		if err := rows.Scan(&pid, &usename, &applicationName, &state, &durationSeconds, &q); err != nil {
-			return NewErrorModel(err, "Scanning long running queries row", initialModel)
+		displayQuery := strings.ReplaceAll(lrq.Query, "\n", " ")
+		if len(displayQuery) > 80 {
+			displayQuery = displayQuery[:80] + "..."
 		}
-
-		pidStr := fmt.Sprintf("%d", pid)
-		details[pidStr] = q
-
-		q = strings.ReplaceAll(q, "\n", " ")
-		if len(q) > 80 {
-			q = q[:80] + "..."
-		}
-
-		durStr := fmt.Sprintf("%.1fs", durationSeconds)
 
 		rowsData = append(rowsData, table.Row{
 			pidStr,
-			usename,
-			applicationName,
-			state,
-			durStr,
-			q,
+			lrq.Username,
+			lrq.ApplicationName,
+			lrq.State,
+			fmt.Sprintf("%.1fs", lrq.DurationSeconds),
+			displayQuery,
 		})
 	}
 

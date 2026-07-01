@@ -1,6 +1,8 @@
 package util
 
 import (
+	"context"
+
 	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -20,22 +22,10 @@ type PgConfigModel struct {
 func (m PgConfigModel) IsInputMode() bool { return m.filterMode }
 
 func CheckPgConfig(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT name,
-               setting,
-               COALESCE(unit, '') AS unit,
-               category,
-               source,
-               COALESCE(short_desc, '') AS description
-        FROM pg_settings
-        ORDER BY category, name;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	settings, err := FetchPgConfig(context.Background(), config.Config.DB, "")
 	if err != nil {
 		return NewErrorModel(err, "Loading pg_settings", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Name", Width: 35},
@@ -47,12 +37,8 @@ func CheckPgConfig(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	for rows.Next() {
-		var name, setting, unit, category, source, description string
-		if err := rows.Scan(&name, &setting, &unit, &category, &source, &description); err != nil {
-			return NewErrorModel(err, "Scanning pg_settings row", initialModel)
-		}
-		rowsData = append(rowsData, table.Row{name, setting, unit, category, source, description})
+	for _, s := range settings {
+		rowsData = append(rowsData, table.Row{s.Name, s.Setting, s.Unit, s.Category, s.Source, s.Description})
 	}
 
 	t := table.New(

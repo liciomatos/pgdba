@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -34,44 +35,10 @@ type RecordLocksModel struct {
 func (m RecordLocksModel) IsInputMode() bool { return m.filterMode }
 
 func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT
-            blocked_locks.pid AS blocked_pid,
-            blocked_activity.usename AS blocked_user,
-            blocking_locks.pid AS blocking_pid,
-            blocking_activity.usename AS blocking_user,
-            blocked_activity.query AS blocked_statement,
-            blocking_activity.query AS current_statement_in_blocking_process,
-            blocked_activity.application_name AS blocked_application,
-            blocking_activity.application_name AS blocking_application
-        FROM
-            pg_catalog.pg_locks blocked_locks
-        JOIN
-            pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
-        JOIN
-            pg_catalog.pg_locks blocking_locks
-            ON blocking_locks.locktype = blocked_locks.locktype
-            AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
-            AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
-            AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
-            AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
-            AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
-            AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
-            AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
-            AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
-            AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
-            AND blocking_locks.pid != blocked_locks.pid
-        JOIN
-            pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
-        WHERE
-            NOT blocked_locks.GRANTED;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	blocked, err := FetchBlockedQueries(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading record locks", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "Blocked PID", Width: 15},
@@ -87,35 +54,28 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	var rowsData []table.Row
 	details := make(map[string]lockDetail)
 
-	for rows.Next() {
-		var blockedPID, blockingPID int
-		var blockedUser, blockingUser, blockedStatement, blockingStatement, blockedApplication, blockingApplication string
+	for _, bq := range blocked {
+		key := fmt.Sprintf("%d:%d", bq.BlockedPID, bq.BlockingPID)
+		details[key] = lockDetail{blocked: bq.BlockedStatement, blocking: bq.BlockingStatement}
 
-		if err := rows.Scan(&blockedPID, &blockedUser, &blockingPID, &blockingUser, &blockedStatement, &blockingStatement, &blockedApplication, &blockingApplication); err != nil {
-			return NewErrorModel(err, "Scanning record locks row", initialModel)
+		blockedStmt := strings.ReplaceAll(bq.BlockedStatement, "\n", " ")
+		blockingStmt := strings.ReplaceAll(bq.BlockingStatement, "\n", " ")
+		if len(blockedStmt) > 50 {
+			blockedStmt = blockedStmt[:50] + "..."
 		}
-
-		key := fmt.Sprintf("%d:%d", blockedPID, blockingPID)
-		details[key] = lockDetail{blocked: blockedStatement, blocking: blockingStatement}
-
-		blockedStatement = strings.ReplaceAll(blockedStatement, "\n", " ")
-		blockingStatement = strings.ReplaceAll(blockingStatement, "\n", " ")
-		if len(blockedStatement) > 50 {
-			blockedStatement = blockedStatement[:50] + "..."
-		}
-		if len(blockingStatement) > 50 {
-			blockingStatement = blockingStatement[:50] + "..."
+		if len(blockingStmt) > 50 {
+			blockingStmt = blockingStmt[:50] + "..."
 		}
 
 		rowsData = append(rowsData, table.Row{
-			fmt.Sprintf("%d", blockedPID),
-			blockedUser,
-			fmt.Sprintf("%d", blockingPID),
-			blockingUser,
-			blockedStatement,
-			blockingStatement,
-			blockedApplication,
-			blockingApplication,
+			fmt.Sprintf("%d", bq.BlockedPID),
+			bq.BlockedUser,
+			fmt.Sprintf("%d", bq.BlockingPID),
+			bq.BlockingUser,
+			blockedStmt,
+			blockingStmt,
+			bq.BlockedApplication,
+			bq.BlockingApplication,
 		})
 	}
 

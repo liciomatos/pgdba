@@ -1,8 +1,8 @@
 package util
 
 import (
+	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/liciomatos/pgdba-cli/config"
 
@@ -24,18 +24,10 @@ type ConnectionsModel struct {
 func (m ConnectionsModel) IsInputMode() bool { return m.filterMode }
 
 func CheckConnections(initialModel func() tea.Model) tea.Model {
-	query := `
-        SELECT COALESCE(state, 'background'), count(*)
-        FROM pg_stat_activity
-        GROUP BY state
-        ORDER BY count(*) DESC;
-    `
-
-	rows, err := config.Config.DB.Query(query)
+	result, err := FetchConnections(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading connections overview", initialModel)
 	}
-	defer rows.Close()
 
 	columns := []table.Column{
 		{Title: "State", Width: 25},
@@ -43,22 +35,9 @@ func CheckConnections(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	usedConns := 0
-	for rows.Next() {
-		var state string
-		var count int
-		if err := rows.Scan(&state, &count); err != nil {
-			return NewErrorModel(err, "Scanning connections row", initialModel)
-		}
-		usedConns += count
-		rowsData = append(rowsData, table.Row{state, fmt.Sprintf("%d", count)})
+	for _, s := range result.States {
+		rowsData = append(rowsData, table.Row{s.State, fmt.Sprintf("%d", s.Count)})
 	}
-
-	var maxConnsStr string
-	if err := config.Config.DB.QueryRow("SHOW max_connections;").Scan(&maxConnsStr); err != nil {
-		return NewErrorModel(err, "Reading max_connections", initialModel)
-	}
-	maxConns, _ := strconv.Atoi(maxConnsStr)
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -71,8 +50,8 @@ func CheckConnections(initialModel func() tea.Model) tea.Model {
 	return ConnectionsModel{
 		table:        t,
 		allRows:      rowsData,
-		usedConns:    usedConns,
-		maxConns:     maxConns,
+		usedConns:    result.TotalUsed,
+		maxConns:     result.MaxAllowed,
 		initialModel: initialModel,
 		height:       30,
 	}

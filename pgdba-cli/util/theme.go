@@ -103,6 +103,9 @@ var (
 // FooterStyle is the consistent faint style used for all screen footers.
 var FooterStyle = lipgloss.NewStyle().Faint(true)
 
+// HintStyle is used for contextual educational hints — readable but clearly secondary.
+var HintStyle = lipgloss.NewStyle().Foreground(ColorGray)
+
 // RenderHeader returns a styled two-line header: logo › screen name + connection info.
 func RenderHeader(screenName string) string {
 	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
@@ -144,8 +147,8 @@ func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
 			fixed += c.Width
 		}
 	}
-	// ~1 char padding per column separator, small extra buffer
-	w := termWidth - fixed - len(cols) - 2
+	// Bubbles applies Padding(0,1) to every cell: 1 char left + 1 char right = 2 per column.
+	w := termWidth - fixed - len(cols)*2
 	if w < 20 {
 		w = 20
 	}
@@ -153,6 +156,17 @@ func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
 	copy(out, cols)
 	out[colIdx].Width = w
 	return out
+}
+
+// InfoTableStyles returns table styles without any row selection highlight.
+// Use this for read-only summary tables that are not keyboard-navigable.
+func InfoTableStyles() table.Styles {
+	s := DefaultTableStyles()
+	s.Selected = s.Selected.
+		Background(lipgloss.NoColor{}).
+		Foreground(lipgloss.NoColor{}).
+		Bold(false)
+	return s
 }
 
 // DefaultTableStyles returns styled table headers and selected-row highlight.
@@ -164,10 +178,12 @@ func DefaultTableStyles() table.Styles {
 		BorderBottom(true).
 		Bold(true).
 		Foreground(ColorBlue)
-	// Foreground intentionally omitted so per-cell colors injected by ColorizeTable
-	// remain visible on non-selected rows without fighting a global white override.
+	// Dark gray background, no explicit foreground: selection is clear without saturated
+	// color competing with green/yellow/red status indicators in other rows. No foreground
+	// override lets ColorizeTable inject severity colors with plain SeverityColor (which
+	// closes with \x1b[0m) — terminal default fg on default bg remains readable after reset.
 	s.Selected = s.Selected.
-		Background(lipgloss.Color("57")).
+		Background(lipgloss.Color("237")).
 		Bold(false)
 	return s
 }
@@ -185,8 +201,12 @@ type ColorRule struct {
 // function keeps plain text in cells and injects colors after the table renders, so
 // runewidth never sees the sequences.
 //
-// Selected rows (starting with ESC from styles.Selected.Render) are skipped; the
-// purple background already distinguishes them without cell colors.
+// For selected rows (starting with ANSI escapes from styles.Selected.Render) all
+// consecutive leading escape sequences are measured and their total byte length is
+// used as an offset so cell positions stay accurate. SeverityColor (which closes with
+// \x1b[0m) is used for all rows; after the reset the terminal falls back to default
+// fg/bg which is readable because DefaultTableStyles uses a dark background for
+// selection with no explicit foreground override.
 //
 // Assumes DefaultTableStyles: 2 header lines (title + border separator).
 func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) string {
@@ -216,9 +236,18 @@ func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) str
 		if len(line) == 0 {
 			continue
 		}
-		// Selected rows start with an ANSI escape byte; skip them.
-		if line[0] == '\x1b' {
-			continue
+
+		// Consume all consecutive leading ANSI sequences (\x1b[...m) to find where
+		// actual cell content starts. lipgloss may emit background and foreground as
+		// separate sequences (e.g. \x1b[48;5;237m\x1b[1m), so we scan past all of them.
+		ansiPrefix := 0
+		for ansiPrefix < len(line) && line[ansiPrefix] == '\x1b' &&
+			ansiPrefix+1 < len(line) && line[ansiPrefix+1] == '[' {
+			rel := strings.IndexByte(line[ansiPrefix:], 'm')
+			if rel < 0 {
+				break
+			}
+			ansiPrefix += rel + 1
 		}
 
 		// Process columns right-to-left: injecting at a higher byte offset does not
@@ -229,7 +258,7 @@ func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) str
 				continue
 			}
 
-			start := colValueStart[colIdx]
+			start := colValueStart[colIdx] + ansiPrefix
 			if start >= len(line) {
 				continue
 			}

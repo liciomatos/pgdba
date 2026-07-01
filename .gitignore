@@ -1,6 +1,3 @@
-# Ignore the docker-compose file
-docker-compose.yaml
-
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -49,6 +46,12 @@ pgdba-cli/pgdba-cli
 
 # Downloaded packages (dev tooling)
 pgdba-cli/*.deb
+
+# GoReleaser local build/release output
+dist/
+
+# Claude Code job/worktree/memory metadata (not part of the project source)
+.claude/
 
 # OS
 .DS_Store

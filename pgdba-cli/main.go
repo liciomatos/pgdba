@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	_ "github.com/lib/pq"
 	"github.com/liciomatos/pgdba-cli/config"
+	"github.com/liciomatos/pgdba-cli/mcpserver"
 	"github.com/liciomatos/pgdba-cli/util"
 )
 
@@ -111,6 +112,10 @@ func main() {
 	flag.StringVar(&config.Config.DBName, "dbname", getEnv("PGDATABASE", "mydb"), "database name")
 	flag.StringVar(&config.Config.SSLMode, "sslmode", getEnv("PGSSLMODE", "disable"), "ssl mode (disable, require, verify-ca, verify-full)")
 	flag.IntVar(&config.Config.SlowThresholdMS, "slow-ms", getEnvInt("PG_SLOW_MS", 1000), "slow query threshold in ms (default 1000)")
+	var serveMCP bool
+	var mcpPort int
+	flag.BoolVar(&serveMCP, "mcp", false, "Start MCP server mode (HTTP/SSE on --mcp-port)")
+	flag.IntVar(&mcpPort, "mcp-port", 8811, "Port for MCP SSE server (used with --mcp)")
 	flag.Parse()
 
 	connStr, err := buildConnStr()
@@ -142,6 +147,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if serveMCP {
+		if err := mcpserver.Serve(mcpPort); err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: MCP server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	config.Config.AppInstance = tea.NewProgram(navigator{child: util.CheckDashboard()}, tea.WithAltScreen())
 	if _, err := config.Config.AppInstance.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting program: %v\n", err)
@@ -152,6 +165,14 @@ func main() {
 // When IsInputMode returns true, the navigator skips global key interception.
 type inputModer interface {
 	IsInputMode() bool
+}
+
+// keyConsumer is implemented by screens that need to handle keys that would otherwise
+// be intercepted by the navigator's global shortcuts (e.g. "s", "p", "f").
+// The navigator checks this before dispatching global shortcuts so sub-screens can
+// claim keys without the global binding firing underneath them.
+type keyConsumer interface {
+	ConsumesKey(key string) bool
 }
 
 type navigator struct {
@@ -183,7 +204,11 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if im, ok := n.child.(inputModer); ok {
 			inInputMode = im.IsInputMode()
 		}
-		if !inInputMode {
+		childConsumes := false
+		if kc, ok := n.child.(keyConsumer); ok {
+			childConsumes = kc.ConsumesKey(key.String())
+		}
+		if !inInputMode && !childConsumes {
 			switch key.String() {
 			case "1":
 				return n.wrapChild(util.IdentifySlowQueries(dashboard)), nil
@@ -217,10 +242,27 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckQueryLoad(dashboard)), nil
 			case "w":
 				return n.wrapChild(util.CheckWaitEvents(dashboard)), nil
+			case "f":
+				return n.wrapChild(util.CheckFreezeMonitor(dashboard)), nil
+			case "S":
+				return n.wrapChild(util.CheckDatabaseSizes(dashboard)), nil
+			case "t":
+				return n.wrapChild(util.CheckTempFiles(dashboard)), nil
+			case "m":
+				return n.wrapChild(util.CheckMemoryStats(dashboard)), nil
 			}
 		}
 	}
 	newChild, cmd := n.child.Update(msg)
+	// After every internal update, re-deliver the current terminal size to the child.
+	// wrapChild() does this for top-level shortcuts; internal transitions (Enter into a
+	// detail screen, s/p sub-views) bypass wrapChild and create new models with hardcoded
+	// default dimensions. Always re-injecting here ensures any newly-returned model
+	// receives the correct dimensions without any per-screen bookkeeping. All
+	// WindowSizeMsg handlers return nil cmd, so the second cmd is safe to discard.
+	if n.width > 0 {
+		newChild, _ = newChild.Update(tea.WindowSizeMsg{Width: n.width, Height: n.height})
+	}
 	n.child = newChild
 	return n, cmd
 }
