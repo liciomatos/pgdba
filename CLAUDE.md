@@ -53,8 +53,9 @@ All SQL lives in `util/fetch.go`. Every diagnostic screen has a corresponding `F
 - Returns a typed struct or slice (e.g. `[]SlowQuery`, `ConnectionsResult`)
 - Never does any display formatting
 
-pgdba-cli targets PostgreSQL 13–18 (see `## Requirements` in README.md). Some catalog
-columns/views differ across that range (e.g. `pg_replication_slots.two_phase` requires PG15+,
+pgdba-cli targets PostgreSQL 13 or later, adding new majors to the compatibility matrix as
+they're released (see `## Requirements` in README.md). Some catalog columns/views differ
+across supported versions (e.g. `pg_replication_slots.two_phase` requires PG15+,
 `pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+). Gate these
 with a bare `pgMajorVersion()` comparison and a one-line comment naming the exact version and
 reason — see `FetchReplicationSlots`/`FetchMemoryStats` for the pattern. Represent

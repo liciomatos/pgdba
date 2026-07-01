@@ -350,8 +350,8 @@ running all 6 versions on every push/PR would be too slow for routine developmen
 
 ## Requirements
 
-- PostgreSQL 13–18. Versions 14–18 are fully supported and covered by the CI compatibility
-  matrix; PostgreSQL 13 is past its community end-of-life (2025-11-13) but pgdba-cli still
-  targets it on a best-effort basis.
+- PostgreSQL 13 or later. New major versions are added to the CI compatibility matrix as
+  they're released (currently 14–18 fully supported; PostgreSQL 13 is past its community
+  end-of-life on 2025-11-13 but pgdba-cli still targets it on a best-effort basis).
 - **Slow Queries** and **Query Load** screens require the `pg_stat_statements` extension
 - **Precise Bloat** (`b` in Autovacuum Detail) requires the `pgstattuple` extension
