@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: docker.io/library/postgres:13
+    image: docker.io/library/postgres:18
     container_name: postgres_pgdba
     environment:
       POSTGRES_USER: postgres

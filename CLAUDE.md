@@ -16,7 +16,7 @@ go run . --host=localhost --user=postgres --password=postgres --dbname=mydb --ss
 # Shortcut via Makefile (from repo root)
 make build       # cross-compiles for linux/amd64
 make run         # builds + runs against local docker-compose credentials
-make docker-up   # starts postgres:13 + pgadmin on localhost:5432 / 8080
+make docker-up   # starts postgres:18 + pgadmin on localhost:5432 / 8080
 make docker-down
 
 # Dependency hygiene
@@ -32,11 +32,17 @@ go test ./... -run "^Test[^I]"
 # All tests including integration (requires Docker)
 go test ./... -v -timeout 120s
 
+# Against a specific PostgreSQL version (13-18 supported; default is 16-alpine)
+PGDBA_TEST_PG_VERSION=17-alpine go test ./... -v -timeout 120s
+
+# Full compatibility matrix (13-18), one version after another
+make test-pg-matrix
+
 # Single test
 go test ./util/ -run TestReplicationSlotsModel_PressD_ActivatesConfirm -v
 ```
 
-Integration tests use `testcontainers-go` to spin up a real PostgreSQL container. The shared setup lives in `util/db_integration_test.go` (`TestMain`), which injects a live `*sql.DB` into `config.Config.DB` before any test runs.
+Integration tests use `testcontainers-go` to spin up a real PostgreSQL container. The shared setup lives in `util/db_integration_test.go` (`TestMain`), which injects a live `*sql.DB` into `config.Config.DB` before any test runs, and reads the real server version via `SHOW server_version;` so `pgMajorVersion()`-gated code in `Fetch*` functions is exercised correctly for whichever version `PGDBA_TEST_PG_VERSION` selects.
 
 ## Architecture
 
@@ -46,6 +52,15 @@ All SQL lives in `util/fetch.go`. Every diagnostic screen has a corresponding `F
 - Takes `ctx context.Context`, `db *sql.DB`, and optional parameters
 - Returns a typed struct or slice (e.g. `[]SlowQuery`, `ConnectionsResult`)
 - Never does any display formatting
+
+pgdba-cli targets PostgreSQL 13–18 (see `## Requirements` in README.md). Some catalog
+columns/views differ across that range (e.g. `pg_replication_slots.two_phase` requires PG15+,
+`pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+). Gate these
+with a bare `pgMajorVersion()` comparison and a one-line comment naming the exact version and
+reason — see `FetchReplicationSlots`/`FetchMemoryStats` for the pattern. Represent
+fields that genuinely don't exist on older/newer versions as nullable pointers (`*int64`,
+`*bool`, `*string`), not zero values — a `nil` means "not applicable on this version," which
+is different from a real `0`/`false`.
 
 ```
 util/fetch.go      → Fetch* functions + typed result structs (all SQL here)
@@ -118,6 +133,7 @@ instead of the global one. Known conflicts:
 | Screen | Key | Global action | Screen action |
 |---|---|---|---|
 | Replication Slots | `p` | PgConfig | Replication Config |
+| Replication Slots | `S` | Database Sizes | Streaming Standbys |
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
 
 ### Terminal size — no per-screen bookkeeping required

@@ -528,21 +528,37 @@ func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, er
 
 // ReplicationSlot holds information from pg_replication_slots.
 type ReplicationSlot struct {
-	SlotName    string
-	Plugin      string
-	SlotType    string
-	Database    *string
-	Active      bool
-	ActivePID   *int
-	WALLag      string
-	SafeWALSize *string // PG 13+; nil when slot has no confirmed_flush_lsn
-	TwoPhase    bool    // PG 14+
+	SlotName      string
+	Plugin        string
+	SlotType      string
+	Database      *string
+	Active        bool
+	ActivePID     *int
+	WALLag        string
+	SafeWALSize   *string // PG 13+; nil when slot has no confirmed_flush_lsn
+	TwoPhase      bool    // PG 15+
+	Failover      *bool   // PG 17+; logical slots only, nil on older PG
+	Synced        *bool   // PG 17+; standby-side physical slots only, nil otherwise
+	InactiveSince *string // PG 18+; nil on older PG or when slot is active
 }
 
 func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, error) {
+	// two_phase was added to pg_replication_slots in PostgreSQL 15.
 	twoPhaseExpr := "false AS two_phase"
-	if pgMajorVersion() >= 14 {
+	if pgMajorVersion() >= 15 {
 		twoPhaseExpr = "two_phase"
+	}
+	// failover and synced were added in PostgreSQL 17.
+	failoverExpr := "NULL::boolean AS failover"
+	syncedExpr := "NULL::boolean AS synced"
+	if pgMajorVersion() >= 17 {
+		failoverExpr = "failover"
+		syncedExpr = "synced"
+	}
+	// inactive_since was added in PostgreSQL 18.
+	inactiveSinceExpr := "NULL::text AS inactive_since"
+	if pgMajorVersion() >= 18 {
+		inactiveSinceExpr = "inactive_since::text"
 	}
 	query := `
 		SELECT
@@ -554,7 +570,10 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 			active_pid,
 			pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_lag,
 			pg_size_pretty(safe_wal_size) AS safe_wal_size,
-			` + twoPhaseExpr + `
+			` + twoPhaseExpr + `,
+			` + failoverExpr + `,
+			` + syncedExpr + `,
+			` + inactiveSinceExpr + `
 		FROM pg_replication_slots`
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -564,10 +583,11 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 	var results []ReplicationSlot
 	for rows.Next() {
 		var s ReplicationSlot
-		var walLag, safeWAL sql.NullString
+		var walLag, safeWAL, inactiveSince sql.NullString
+		var failover, synced sql.NullBool
 		if err := rows.Scan(
 			&s.SlotName, &s.Plugin, &s.SlotType, &s.Database, &s.Active, &s.ActivePID,
-			&walLag, &safeWAL, &s.TwoPhase,
+			&walLag, &safeWAL, &s.TwoPhase, &failover, &synced, &inactiveSince,
 		); err != nil {
 			return nil, err
 		}
@@ -576,6 +596,15 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 		}
 		if safeWAL.Valid {
 			s.SafeWALSize = &safeWAL.String
+		}
+		if failover.Valid {
+			s.Failover = &failover.Bool
+		}
+		if synced.Valid {
+			s.Synced = &synced.Bool
+		}
+		if inactiveSince.Valid {
+			s.InactiveSince = &inactiveSince.String
 		}
 		results = append(results, s)
 	}
@@ -1439,15 +1468,22 @@ type MemoryConfig struct {
 	ShortDesc string
 }
 
-// CheckpointStats holds pg_stat_bgwriter counters for checkpoint and background writer activity.
+// CheckpointStats holds pg_stat_bgwriter/pg_stat_checkpointer counters for checkpoint
+// and background writer activity.
+//
+// On PostgreSQL 17+, checkpoint counters moved from pg_stat_bgwriter to a new
+// pg_stat_checkpointer view (CheckpointsTimed/CheckpointsReq/BuffersCheckpoint are
+// populated from there). BuffersBackend/BuffersBackendFsync were removed entirely in
+// PG17 with no direct replacement (that data moved into pg_stat_io, a differently
+// shaped view), so they are nil on PG17+.
 type CheckpointStats struct {
 	CheckpointsTimed    int64
 	CheckpointsReq      int64
 	BuffersCheckpoint   int64
 	BuffersClean        int64
 	MaxwrittenClean     int64
-	BuffersBackend      int64
-	BuffersBackendFsync int64
+	BuffersBackend      *int64 // nil on PG17+: removed from pg_stat_bgwriter, no direct replacement
+	BuffersBackendFsync *int64 // nil on PG17+: removed from pg_stat_bgwriter, no direct replacement
 	BuffersAlloc        int64
 	StatsReset          string
 }
@@ -1507,20 +1543,43 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 		stats.CacheHitRatio = float64(hit) / float64(total) * 100
 	}
 
-	if err := db.QueryRowContext(ctx, `
-		SELECT
-			checkpoints_timed, checkpoints_req,
-			buffers_checkpoint, buffers_clean, maxwritten_clean,
-			buffers_backend, buffers_backend_fsync, buffers_alloc,
-			COALESCE(stats_reset::text, '')
-		FROM pg_stat_bgwriter`,
-	).Scan(
-		&stats.Checkpoint.CheckpointsTimed, &stats.Checkpoint.CheckpointsReq,
-		&stats.Checkpoint.BuffersCheckpoint, &stats.Checkpoint.BuffersClean, &stats.Checkpoint.MaxwrittenClean,
-		&stats.Checkpoint.BuffersBackend, &stats.Checkpoint.BuffersBackendFsync, &stats.Checkpoint.BuffersAlloc,
-		&stats.Checkpoint.StatsReset,
-	); err != nil {
-		return stats, err
+	// pg_stat_checkpointer was split out of pg_stat_bgwriter in PostgreSQL 17; checkpoint
+	// counters live there now, while buffers_backend/buffers_backend_fsync have no
+	// replacement in either view (see pg_stat_io for backend-level I/O on 17+).
+	if pgMajorVersion() >= 17 {
+		if err := db.QueryRowContext(ctx, `
+			SELECT
+				c.num_timed, c.num_requested, c.buffers_written,
+				b.buffers_clean, b.maxwritten_clean, b.buffers_alloc,
+				COALESCE(c.stats_reset::text, '')
+			FROM pg_stat_checkpointer c, pg_stat_bgwriter b`,
+		).Scan(
+			&stats.Checkpoint.CheckpointsTimed, &stats.Checkpoint.CheckpointsReq,
+			&stats.Checkpoint.BuffersCheckpoint,
+			&stats.Checkpoint.BuffersClean, &stats.Checkpoint.MaxwrittenClean, &stats.Checkpoint.BuffersAlloc,
+			&stats.Checkpoint.StatsReset,
+		); err != nil {
+			return stats, err
+		}
+	} else {
+		var buffersBackend, buffersBackendFsync int64
+		if err := db.QueryRowContext(ctx, `
+			SELECT
+				checkpoints_timed, checkpoints_req,
+				buffers_checkpoint, buffers_clean, maxwritten_clean,
+				buffers_backend, buffers_backend_fsync, buffers_alloc,
+				COALESCE(stats_reset::text, '')
+			FROM pg_stat_bgwriter`,
+		).Scan(
+			&stats.Checkpoint.CheckpointsTimed, &stats.Checkpoint.CheckpointsReq,
+			&stats.Checkpoint.BuffersCheckpoint, &stats.Checkpoint.BuffersClean, &stats.Checkpoint.MaxwrittenClean,
+			&buffersBackend, &buffersBackendFsync, &stats.Checkpoint.BuffersAlloc,
+			&stats.Checkpoint.StatsReset,
+		); err != nil {
+			return stats, err
+		}
+		stats.Checkpoint.BuffersBackend = &buffersBackend
+		stats.Checkpoint.BuffersBackendFsync = &buffersBackendFsync
 	}
 
 	return stats, nil
