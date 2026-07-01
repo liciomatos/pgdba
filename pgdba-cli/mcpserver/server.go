@@ -11,6 +11,10 @@ import (
 
 // Serve registers all diagnostic tools and starts the SSE server on the given port.
 // The caller is responsible for ensuring config.Config.DB is connected before calling.
+//
+// Every tool is annotated read-only/non-destructive: all handlers only run SELECT
+// queries via Fetch*, never Exec or DDL. Without these hints, MCP clients assume
+// the worst and treat every tool as potentially destructive.
 func Serve(port int) error {
 	s := server.NewMCPServer("pgdba", config.Config.Version,
 		server.WithToolCapabilities(false),
@@ -19,34 +23,50 @@ func Serve(port int) error {
 	// --- tools without parameters ---
 	s.AddTool(mcp.NewTool("check_dashboard",
 		mcp.WithDescription("PostgreSQL health summary: connections, active/blocked queries, cache hit ratio, dead tuples, invalid indexes, replication slots."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckDashboard)
 
 	s.AddTool(mcp.NewTool("check_blocked_queries",
 		mcp.WithDescription("Sessions blocked by row-level or relation locks, including the blocking session's statement."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckBlockedQueries)
 
 	s.AddTool(mcp.NewTool("check_connections",
 		mcp.WithDescription("Connection count by state (active, idle, idle in transaction, …) and percentage of max_connections used."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckConnections)
 
 	s.AddTool(mcp.NewTool("check_wait_events",
 		mcp.WithDescription("Active wait events grouped by type (Lock, IO, LWLock, CPU, …) with percentage distribution."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckWaitEvents)
 
 	s.AddTool(mcp.NewTool("check_replication_slots",
 		mcp.WithDescription("Replication slots with WAL accumulation size, slot type, database, and active status."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckReplicationSlots)
 
 	s.AddTool(mcp.NewTool("check_users",
 		mcp.WithDescription("Login roles with superuser/createdb/replication flags, connection limit, and expiry date."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckUsers)
 
 	s.AddTool(mcp.NewTool("check_roles",
 		mcp.WithDescription("Group roles (non-login) with privilege flags and member list."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckRoles)
 
 	s.AddTool(mcp.NewTool("check_extensions",
 		mcp.WithDescription("Installed PostgreSQL extensions with version, schema, and description."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckExtensions)
 
 	// --- tools with optional parameters ---
@@ -60,6 +80,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSlowQueries)
 
 	s.AddTool(mcp.NewTool("check_long_running_queries",
@@ -72,6 +94,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckLongRunningQueries)
 
 	s.AddTool(mcp.NewTool("check_autovacuum",
@@ -80,6 +104,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckAutovacuum)
 
 	s.AddTool(mcp.NewTool("check_index_usage",
@@ -88,6 +114,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(50),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckIndexUsage)
 
 	s.AddTool(mcp.NewTool("check_cache_hit",
@@ -96,6 +124,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(50),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckCacheHit)
 
 	s.AddTool(mcp.NewTool("check_query_load",
@@ -104,6 +134,8 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckQueryLoad)
 
 	s.AddTool(mcp.NewTool("check_pg_config",
@@ -112,6 +144,8 @@ func Serve(port int) error {
 			mcp.Description("Substring to match against parameter name or category (case-insensitive). Empty returns all."),
 			mcp.DefaultString(""),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckPgConfig)
 
 	s.AddTool(mcp.NewTool("check_schema",
@@ -120,6 +154,8 @@ func Serve(port int) error {
 			mcp.Description("Schema name to inspect"),
 			mcp.DefaultString("public"),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSchema)
 
 	s.AddTool(mcp.NewTool("check_autovacuum_detail",
@@ -132,10 +168,14 @@ func Serve(port int) error {
 			mcp.Description("Table name (required)"),
 			mcp.DefaultString(""),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckAutovacuumDetail)
 
 	s.AddTool(mcp.NewTool("check_freeze_by_database",
 		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckFreezeByDatabase)
 
 	s.AddTool(mcp.NewTool("check_freeze_by_table",
@@ -144,26 +184,38 @@ func Serve(port int) error {
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(50),
 		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckFreezeByTable)
 
 	s.AddTool(mcp.NewTool("check_streaming_standbys",
 		mcp.WithDescription("Streaming replication standbys from pg_stat_replication with write/flush/replay lag and byte lag."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckStreamingStandbys)
 
 	s.AddTool(mcp.NewTool("check_replication_config",
 		mcp.WithDescription("Replication-related pg_settings parameters (wal_level, synchronous_commit, slots, archive, etc.) with contextual hints about risk or misconfiguration."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckReplicationConfig)
 
 	s.AddTool(mcp.NewTool("check_database_sizes",
 		mcp.WithDescription("On-disk size of every database and tablespace, plus the total cluster size."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckDatabaseSizes)
 
 	s.AddTool(mcp.NewTool("check_temp_files",
 		mcp.WithDescription("Temp file spill activity per database from pg_stat_database (temp_files, temp_bytes) since the last stats reset. High values suggest work_mem is too low."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckTempFiles)
 
 	s.AddTool(mcp.NewTool("check_memory_stats",
 		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckMemoryStats)
 
 	addr := fmt.Sprintf(":%d", port)
