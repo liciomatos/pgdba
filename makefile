@@ -53,6 +53,16 @@ scenario-slots:
 scenarios-clean:
 	@chmod +x scenarios/cleanup.sh && ./scenarios/cleanup.sh
 
+# Start the streaming replication test environment (primary + replica)
+replication-up:
+	@echo "Starting replication test environment..."
+	$(COMPOSE) -f docker/replication/docker-compose.yml up -d
+
+# Stop and remove the streaming replication environment
+replication-down:
+	@echo "Stopping replication test environment..."
+	$(COMPOSE) -f docker/replication/docker-compose.yml down -v
+
 # Help
 help:
 	@echo "Makefile commands:"
@@ -66,6 +76,8 @@ help:
 	@echo "  scenario-longrunning Simulate a long-running query"
 	@echo "  scenario-slots      Create a test replication slot"
 	@echo "  scenarios-clean     Remove dynamic scenarios"
+	@echo "  replication-up      Start streaming replication test environment"
+	@echo "  replication-down    Stop and remove replication test environment"
 	@echo "  help                Show this help message"
 
-.PHONY: build run docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean help
+.PHONY: build run docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down help

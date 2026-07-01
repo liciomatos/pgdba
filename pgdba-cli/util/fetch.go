@@ -4,10 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/liciomatos/pgdba-cli/config"
 )
+
+// pgMajorVersion returns the major version number of the connected PostgreSQL server.
+func pgMajorVersion() int {
+	v := config.Config.Version
+	if idx := strings.Index(v, "."); idx > 0 {
+		n, _ := strconv.Atoi(v[:idx])
+		return n
+	}
+	n, _ := strconv.Atoi(v)
+	return n
+}
 
 // DashboardResult holds all metrics shown on the main dashboard.
 type DashboardResult struct {
@@ -23,7 +35,10 @@ type DashboardResult struct {
 	CacheHitRatio    *float64 // nil when no table I/O data exists
 	DeadTuples       int64
 	InvalidIndexes   int
-	ReplicationSlots int
+	ReplicationSlots    int
+	FreezeOldestDB      string
+	FreezeOldestDBAge   int64
+	FreezePctToward     float64
 }
 
 func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (DashboardResult, error) {
@@ -78,6 +93,15 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_replication_slots`).Scan(&result.ReplicationSlots); err != nil {
 		return result, err
 	}
+	// Non-fatal: freeze status is informational; ignore errors on older setups.
+	_ = db.QueryRowContext(ctx, `
+		SELECT datname, age(datfrozenxid),
+		       round(age(datfrozenxid)::numeric / 2100000000 * 100, 2)
+		FROM pg_database
+		WHERE datallowconn
+		ORDER BY age(datfrozenxid) DESC
+		LIMIT 1
+	`).Scan(&result.FreezeOldestDB, &result.FreezeOldestDBAge, &result.FreezePctToward)
 	return result, nil
 }
 
@@ -266,6 +290,7 @@ type AutovacuumTable struct {
 	DeadTuples       int64
 	LiveTuples       int64
 	DeadPct          *float64
+	TotalSize        string
 	LastVacuum       *time.Time
 	LastAnalyze      *time.Time
 	LastAutovacuum   *time.Time
@@ -276,20 +301,22 @@ type AutovacuumTable struct {
 func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTable, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
-			schemaname,
-			relname,
-			n_dead_tup,
-			n_live_tup,
-			CASE WHEN n_live_tup + n_dead_tup = 0 THEN NULL
-				 ELSE ROUND(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
+			s.schemaname,
+			s.relname,
+			s.n_dead_tup,
+			s.n_live_tup,
+			CASE WHEN s.n_live_tup + s.n_dead_tup = 0 THEN NULL
+				 ELSE ROUND(100.0 * s.n_dead_tup / (s.n_live_tup + s.n_dead_tup), 1)
 			END AS dead_pct,
-			last_vacuum,
-			last_analyze,
-			last_autovacuum,
-			last_autoanalyze,
-			autovacuum_count
-		FROM pg_stat_user_tables
-		ORDER BY n_dead_tup DESC
+			pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
+			s.last_vacuum,
+			s.last_analyze,
+			s.last_autovacuum,
+			s.last_autoanalyze,
+			s.autovacuum_count
+		FROM pg_stat_user_tables s
+		JOIN pg_class c ON c.oid = s.relid
+		ORDER BY s.n_dead_tup DESC
 		LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -301,6 +328,7 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 		var deadPct sql.NullFloat64
 		if err := rows.Scan(
 			&t.SchemaName, &t.TableName, &t.DeadTuples, &t.LiveTuples, &deadPct,
+			&t.TotalSize,
 			&t.LastVacuum, &t.LastAnalyze, &t.LastAutovacuum, &t.LastAutoanalyze,
 			&t.AutovacuumCount,
 		); err != nil {
@@ -500,24 +528,35 @@ func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, er
 
 // ReplicationSlot holds information from pg_replication_slots.
 type ReplicationSlot struct {
-	SlotName  string
-	SlotType  string
-	Database  *string
-	Active    bool
-	ActivePID *int
-	WALLag    string
+	SlotName    string
+	Plugin      string
+	SlotType    string
+	Database    *string
+	Active      bool
+	ActivePID   *int
+	WALLag      string
+	SafeWALSize *string // PG 13+; nil when slot has no confirmed_flush_lsn
+	TwoPhase    bool    // PG 14+
 }
 
 func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, error) {
-	rows, err := db.QueryContext(ctx, `
+	twoPhaseExpr := "false AS two_phase"
+	if pgMajorVersion() >= 14 {
+		twoPhaseExpr = "two_phase"
+	}
+	query := `
 		SELECT
 			slot_name,
+			COALESCE(plugin, ''),
 			slot_type,
 			database,
 			active,
 			active_pid,
-			pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_lag
-		FROM pg_replication_slots`)
+			pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_lag,
+			pg_size_pretty(safe_wal_size) AS safe_wal_size,
+			` + twoPhaseExpr + `
+		FROM pg_replication_slots`
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -525,8 +564,15 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 	var results []ReplicationSlot
 	for rows.Next() {
 		var s ReplicationSlot
-		if err := rows.Scan(&s.SlotName, &s.SlotType, &s.Database, &s.Active, &s.ActivePID, &s.WALLag); err != nil {
+		var safeWAL sql.NullString
+		if err := rows.Scan(
+			&s.SlotName, &s.Plugin, &s.SlotType, &s.Database, &s.Active, &s.ActivePID,
+			&s.WALLag, &safeWAL, &s.TwoPhase,
+		); err != nil {
 			return nil, err
+		}
+		if safeWAL.Valid {
+			s.SafeWALSize = &safeWAL.String
 		}
 		results = append(results, s)
 	}
@@ -772,4 +818,480 @@ func FetchSchema(ctx context.Context, db *sql.DB, schema string) ([]SchemaTable,
 		results = append(results, *tableMap[key])
 	}
 	return results, nil
+}
+
+// --- Autovacuum detail ---
+
+// AutovacuumDetailStats holds per-table vacuum statistics for the detail view.
+type AutovacuumDetailStats struct {
+	SchemaName        string
+	TableName         string
+	LiveTuples        int64
+	DeadTuples        int64
+	ModSinceAnalyze   int64
+	VacuumCount       int64
+	AutovacuumCount   int64
+	AnalyzeCount      int64
+	AutoanalyzeCount  int64
+	TableSize         string
+	TotalSize         string
+	ToastAndIndexSize string
+	FrozenXIDAge      int64
+	MXIDAge           int64
+	LastVacuum        *time.Time
+	LastAutovacuum    *time.Time
+	LastAnalyze       *time.Time
+	LastAutoanalyze   *time.Time
+}
+
+func FetchAutovacuumDetail(ctx context.Context, db *sql.DB, schema, table string) (AutovacuumDetailStats, error) {
+	var d AutovacuumDetailStats
+	d.SchemaName = schema
+	d.TableName = table
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			s.n_live_tup,
+			s.n_dead_tup,
+			s.n_mod_since_analyze,
+			s.last_vacuum,
+			s.last_autovacuum,
+			s.last_analyze,
+			s.last_autoanalyze,
+			s.vacuum_count,
+			s.autovacuum_count,
+			s.analyze_count,
+			s.autoanalyze_count,
+			pg_size_pretty(pg_relation_size(c.oid))                               AS table_size,
+			pg_size_pretty(pg_total_relation_size(c.oid))                         AS total_size,
+			pg_size_pretty(pg_total_relation_size(c.oid) - pg_relation_size(c.oid)) AS toast_and_index_size,
+			age(c.relfrozenxid)                                                   AS frozen_xid_age,
+			mxid_age(c.relminmxid)                                                AS mxid_age
+		FROM pg_stat_user_tables s
+		JOIN pg_class c ON c.oid = s.relid
+		WHERE s.schemaname = $1 AND s.relname = $2`,
+		schema, table,
+	).Scan(
+		&d.LiveTuples, &d.DeadTuples, &d.ModSinceAnalyze,
+		&d.LastVacuum, &d.LastAutovacuum, &d.LastAnalyze, &d.LastAutoanalyze,
+		&d.VacuumCount, &d.AutovacuumCount, &d.AnalyzeCount, &d.AutoanalyzeCount,
+		&d.TableSize, &d.TotalSize, &d.ToastAndIndexSize,
+		&d.FrozenXIDAge, &d.MXIDAge,
+	)
+	return d, err
+}
+
+// AutovacuumParam holds one autovacuum parameter with its table-level and global value.
+type AutovacuumParam struct {
+	Name        string
+	TableValue  string // "" means inherited from global
+	GlobalValue string
+	Unit        string
+}
+
+var autovacuumParamNames = []string{
+	"autovacuum_vacuum_scale_factor",
+	"autovacuum_vacuum_threshold",
+	"autovacuum_analyze_scale_factor",
+	"autovacuum_analyze_threshold",
+	"autovacuum_vacuum_cost_delay",
+	"autovacuum_vacuum_cost_limit",
+	"autovacuum_freeze_min_age",
+	"autovacuum_freeze_max_age",
+	"autovacuum_freeze_table_age",
+}
+
+func FetchAutovacuumParams(ctx context.Context, db *sql.DB, schema, table string) ([]AutovacuumParam, error) {
+	// Read table's reloptions as a comma-separated string.
+	var relopts string
+	_ = db.QueryRowContext(ctx, `
+		SELECT COALESCE(array_to_string(c.reloptions, ','), '')
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`,
+		schema, table,
+	).Scan(&relopts)
+
+	tableParams := make(map[string]string)
+	for _, opt := range strings.Split(relopts, ",") {
+		opt = strings.TrimSpace(opt)
+		if opt == "" {
+			continue
+		}
+		parts := strings.SplitN(opt, "=", 2)
+		if len(parts) == 2 {
+			tableParams[parts[0]] = parts[1]
+		}
+	}
+
+	// Read global values from pg_settings.
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, setting, COALESCE(unit, '')
+		FROM pg_settings
+		WHERE name IN (
+			'autovacuum_vacuum_scale_factor',
+			'autovacuum_vacuum_threshold',
+			'autovacuum_analyze_scale_factor',
+			'autovacuum_analyze_threshold',
+			'autovacuum_vacuum_cost_delay',
+			'autovacuum_vacuum_cost_limit',
+			'autovacuum_freeze_min_age',
+			'autovacuum_freeze_max_age',
+			'autovacuum_freeze_table_age'
+		)
+		ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	globalMap := make(map[string]AutovacuumParam)
+	for rows.Next() {
+		var name, setting, unit string
+		if err := rows.Scan(&name, &setting, &unit); err != nil {
+			return nil, err
+		}
+		globalMap[name] = AutovacuumParam{Name: name, GlobalValue: setting, Unit: unit}
+	}
+
+	var results []AutovacuumParam
+	for _, name := range autovacuumParamNames {
+		p := globalMap[name]
+		p.Name = name
+		p.TableValue = tableParams[name] // "" if not customized
+		results = append(results, p)
+	}
+	return results, rows.Err()
+}
+
+// AutovacuumBloatDetail holds precise bloat information from pgstattuple.
+// Returned only when the pgstattuple extension is installed.
+type AutovacuumBloatDetail struct {
+	TableLen       int64
+	TupleCount     int64
+	DeadTupleCount int64
+	DeadTupleLen   int64
+	FreeSpace      int64
+	RealBloatPct   float64
+}
+
+// FetchAutovacuumBloat runs pgstattuple for the given table.
+// Returns nil, nil when the pgstattuple extension is not installed.
+func FetchAutovacuumBloat(ctx context.Context, db *sql.DB, schema, table string) (*AutovacuumBloatDetail, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgstattuple')`).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+	var d AutovacuumBloatDetail
+	// format('%I.%I', ...) safely quotes identifiers server-side.
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			table_len,
+			tuple_count,
+			dead_tuple_count,
+			dead_tuple_len,
+			free_space,
+			CASE WHEN table_len > 0
+			     THEN ROUND((dead_tuple_len + free_space)::numeric / table_len * 100, 2)
+			     ELSE 0 END AS real_bloat_pct
+		FROM pgstattuple(format('%I.%I', $1::text, $2::text))`,
+		schema, table,
+	).Scan(&d.TableLen, &d.TupleCount, &d.DeadTupleCount, &d.DeadTupleLen, &d.FreeSpace, &d.RealBloatPct); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// --- Freeze Monitor ---
+
+// FreezeDatabaseStatus is the XID freeze status for one database.
+type FreezeDatabaseStatus struct {
+	DatabaseName      string
+	DBXIDAge          int64
+	PctTowardShutdown float64
+	DBMXIDAge         int64
+	Status            int // 0=ok 1=warn 2=critical
+}
+
+func FetchFreezeByDatabase(ctx context.Context, db *sql.DB) ([]FreezeDatabaseStatus, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			datname,
+			age(datfrozenxid)                                             AS db_xid_age,
+			round(age(datfrozenxid)::numeric / 2100000000 * 100, 2)      AS pct_toward_shutdown,
+			age(datminmxid)                                               AS db_mxid_age
+		FROM pg_database
+		WHERE datallowconn
+		ORDER BY age(datfrozenxid) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []FreezeDatabaseStatus
+	for rows.Next() {
+		var s FreezeDatabaseStatus
+		if err := rows.Scan(&s.DatabaseName, &s.DBXIDAge, &s.PctTowardShutdown, &s.DBMXIDAge); err != nil {
+			return nil, err
+		}
+		switch {
+		case s.PctTowardShutdown > 8.6:
+			s.Status = 2
+		case s.PctTowardShutdown > 7.1:
+			s.Status = 1
+		default:
+			s.Status = 0
+		}
+		results = append(results, s)
+	}
+	return results, rows.Err()
+}
+
+// FreezeTableStatus is the XID freeze status for one table.
+type FreezeTableStatus struct {
+	SchemaName      string
+	TableName       string
+	XIDAge          int64
+	MXIDAge         int64
+	FreezeMaxAge    int64
+	PctTowardFreeze float64
+	TotalSize       string
+	LastAutovacuum  *time.Time
+	Status          int // 0=ok 1=warn 2=critical
+}
+
+func FetchFreezeByTable(ctx context.Context, db *sql.DB, limit int) ([]FreezeTableStatus, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			n.nspname                                                                         AS schema,
+			c.relname                                                                         AS table,
+			age(c.relfrozenxid)                                                               AS xid_age,
+			mxid_age(c.relminmxid)                                                            AS mxid_age,
+			(SELECT setting::bigint FROM pg_settings WHERE name = 'autovacuum_freeze_max_age') AS freeze_max_age,
+			round(age(c.relfrozenxid)::numeric
+				/ NULLIF((SELECT setting::bigint FROM pg_settings WHERE name = 'autovacuum_freeze_max_age'), 0)
+				* 100, 1)                                                                      AS pct_toward_freeze,
+			pg_size_pretty(pg_total_relation_size(c.oid))                                     AS total_size,
+			s.last_autovacuum
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+		WHERE c.relkind = 'r'
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND c.relfrozenxid != 0
+		ORDER BY age(c.relfrozenxid) DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []FreezeTableStatus
+	for rows.Next() {
+		var t FreezeTableStatus
+		var pct sql.NullFloat64
+		if err := rows.Scan(
+			&t.SchemaName, &t.TableName, &t.XIDAge, &t.MXIDAge,
+			&t.FreezeMaxAge, &pct, &t.TotalSize, &t.LastAutovacuum,
+		); err != nil {
+			return nil, err
+		}
+		if pct.Valid {
+			t.PctTowardFreeze = pct.Float64
+		}
+		switch {
+		case t.PctTowardFreeze > 75:
+			t.Status = 2
+		case t.PctTowardFreeze > 50:
+			t.Status = 1
+		default:
+			t.Status = 0
+		}
+		results = append(results, t)
+	}
+	return results, rows.Err()
+}
+
+// --- Streaming Replication ---
+
+// StreamingStandby is one row from pg_stat_replication.
+type StreamingStandby struct {
+	ApplicationName string
+	ClientAddr      string
+	State           string
+	SyncState       string
+	SentLSN         string
+	WriteLSN        string
+	FlushLSN        string
+	ReplayLSN       string
+	WriteLag        string
+	FlushLag        string
+	ReplayLag       string
+	LagBytes        int64
+	PID             int
+}
+
+func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			COALESCE(application_name, ''),
+			COALESCE(client_addr::text, ''),
+			state,
+			sync_state,
+			sent_lsn::text,
+			write_lsn::text,
+			flush_lsn::text,
+			replay_lsn::text,
+			COALESCE(write_lag::text, ''),
+			COALESCE(flush_lag::text, ''),
+			COALESCE(replay_lag::text, ''),
+			COALESCE(pg_wal_lsn_diff(sent_lsn, replay_lsn), 0) AS lag_bytes,
+			pid
+		FROM pg_stat_replication
+		ORDER BY lag_bytes DESC NULLS LAST`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []StreamingStandby
+	for rows.Next() {
+		var s StreamingStandby
+		if err := rows.Scan(
+			&s.ApplicationName, &s.ClientAddr, &s.State, &s.SyncState,
+			&s.SentLSN, &s.WriteLSN, &s.FlushLSN, &s.ReplayLSN,
+			&s.WriteLag, &s.FlushLag, &s.ReplayLag,
+			&s.LagBytes, &s.PID,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, rows.Err()
+}
+
+// --- Replication Config ---
+
+// ReplicationParam holds one replication-related pg_settings row with a contextual hint.
+type ReplicationParam struct {
+	Name      string
+	Setting   string
+	Unit      string
+	Context   string
+	ShortDesc string
+	Hint      string // empty means no hint
+	HintLevel int    // -1=none 0=ok 1=warn 2=error
+}
+
+// ReplicationCounts holds live counts of walsenders and replication slots.
+type ReplicationCounts struct {
+	ActiveSenders int
+	TotalSlots    int
+	ActiveSlots   int
+}
+
+func replicationHint(name, setting string) (string, int) {
+	switch name {
+	case "wal_level":
+		switch setting {
+		case "minimal":
+			return "replication disabled", 2
+		case "replica":
+			return "streaming OK; logical replication not available", 0
+		case "logical":
+			return "supports logical replication", 0
+		}
+	case "full_page_writes":
+		if setting == "off" {
+			return "risk of data corruption after crash", 2
+		}
+	case "synchronous_commit":
+		if setting == "off" {
+			return "risk of data loss on crash (async commit)", 1
+		}
+	case "wal_log_hints":
+		if setting == "off" {
+			return "required for pg_rewind; enable when using standby failover", 1
+		}
+	case "hot_standby_feedback":
+		if setting == "on" {
+			return "prevents vacuum on primary; may cause table bloat", 1
+		}
+	case "max_slot_wal_keep_size":
+		if setting != "-1" {
+			return "slots will be invalidated when WAL grows past this limit", 1
+		}
+	case "archive_mode":
+		if setting == "off" {
+			return "WAL archiving disabled; point-in-time recovery unavailable", 0
+		}
+	}
+	return "", -1
+}
+
+func FetchReplicationConfig(ctx context.Context, db *sql.DB) ([]ReplicationParam, ReplicationCounts, error) {
+	var counts ReplicationCounts
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, setting, COALESCE(unit, ''), context, COALESCE(short_desc, '')
+		FROM pg_settings
+		WHERE name IN (
+			'wal_level', 'synchronous_commit', 'full_page_writes',
+			'wal_log_hints', 'wal_compression',
+			'max_wal_senders', 'max_replication_slots',
+			'wal_keep_size', 'max_slot_wal_keep_size',
+			'hot_standby', 'hot_standby_feedback',
+			'wal_sender_timeout', 'wal_receiver_timeout',
+			'wal_receiver_status_interval', 'recovery_min_apply_delay',
+			'archive_mode', 'archive_command', 'archive_library',
+			'restore_command'
+		)
+		ORDER BY
+			CASE name
+				WHEN 'wal_level'                   THEN 1
+				WHEN 'synchronous_commit'           THEN 2
+				WHEN 'full_page_writes'             THEN 3
+				WHEN 'wal_log_hints'                THEN 4
+				WHEN 'wal_compression'              THEN 5
+				WHEN 'max_wal_senders'              THEN 6
+				WHEN 'max_replication_slots'        THEN 7
+				WHEN 'wal_keep_size'                THEN 8
+				WHEN 'max_slot_wal_keep_size'       THEN 9
+				WHEN 'hot_standby'                  THEN 10
+				WHEN 'hot_standby_feedback'         THEN 11
+				WHEN 'wal_sender_timeout'           THEN 12
+				WHEN 'wal_receiver_timeout'         THEN 13
+				WHEN 'wal_receiver_status_interval' THEN 14
+				WHEN 'recovery_min_apply_delay'     THEN 15
+				WHEN 'archive_mode'                 THEN 16
+				WHEN 'archive_command'              THEN 17
+				WHEN 'archive_library'              THEN 18
+				WHEN 'restore_command'              THEN 19
+				ELSE 99
+			END`)
+	if err != nil {
+		return nil, counts, err
+	}
+	defer rows.Close()
+
+	var results []ReplicationParam
+	for rows.Next() {
+		var p ReplicationParam
+		if err := rows.Scan(&p.Name, &p.Setting, &p.Unit, &p.Context, &p.ShortDesc); err != nil {
+			return nil, counts, err
+		}
+		p.Hint, p.HintLevel = replicationHint(p.Name, p.Setting)
+		results = append(results, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, counts, err
+	}
+
+	_ = db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM pg_stat_replication),
+			(SELECT count(*) FROM pg_replication_slots),
+			(SELECT count(*) FROM pg_replication_slots WHERE active_pid IS NOT NULL)
+	`).Scan(&counts.ActiveSenders, &counts.TotalSlots, &counts.ActiveSlots)
+
+	return results, counts, nil
 }

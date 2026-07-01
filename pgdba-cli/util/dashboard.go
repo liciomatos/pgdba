@@ -97,6 +97,21 @@ func CheckDashboard() tea.Model {
 
 	metrics = append(metrics, dashboardMetric{"Replication slots", fmt.Sprintf("%d", data.ReplicationSlots), 0})
 
+	if data.FreezeOldestDB != "" {
+		freezeLevel := 0
+		if data.FreezePctToward > 8.6 {
+			freezeLevel = 2
+		} else if data.FreezePctToward > 7.1 {
+			freezeLevel = 1
+		}
+		metrics = append(metrics, dashboardMetric{
+			"Freeze status",
+			fmt.Sprintf("oldest: %s  %dM txns (%.1f%%)",
+				data.FreezeOldestDB, data.FreezeOldestDBAge/1_000_000, data.FreezePctToward),
+			freezeLevel,
+		})
+	}
+
 	return DashboardModel{metrics: metrics, width: 80, height: 24}
 }
 
@@ -162,6 +177,7 @@ func (m DashboardModel) View() string {
 		renderKey("D") + " " + renderLabel("switch-db") + "  " +
 		renderKey("L") + " " + renderLabel("load") + "  " +
 		renderKey("w") + " " + renderLabel("waits") + "  " +
+		renderKey("f") + " " + renderLabel("freeze") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 

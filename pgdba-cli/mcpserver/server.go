@@ -122,6 +122,38 @@ func Serve(port int) error {
 		),
 	), handleCheckSchema)
 
+	s.AddTool(mcp.NewTool("check_autovacuum_detail",
+		mcp.WithDescription("Detailed autovacuum statistics for one table: live/dead tuples, vacuum history, freeze status, and custom autovacuum parameters vs globals."),
+		mcp.WithString("schema",
+			mcp.Description("Schema name"),
+			mcp.DefaultString("public"),
+		),
+		mcp.WithString("table",
+			mcp.Description("Table name (required)"),
+			mcp.DefaultString(""),
+		),
+	), handleCheckAutovacuumDetail)
+
+	s.AddTool(mcp.NewTool("check_freeze_by_database",
+		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),
+	), handleCheckFreezeByDatabase)
+
+	s.AddTool(mcp.NewTool("check_freeze_by_table",
+		mcp.WithDescription("Top tables by relfrozenxid age with wraparound risk percentage relative to autovacuum_freeze_max_age."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of rows to return"),
+			mcp.DefaultNumber(50),
+		),
+	), handleCheckFreezeByTable)
+
+	s.AddTool(mcp.NewTool("check_streaming_standbys",
+		mcp.WithDescription("Streaming replication standbys from pg_stat_replication with write/flush/replay lag and byte lag."),
+	), handleCheckStreamingStandbys)
+
+	s.AddTool(mcp.NewTool("check_replication_config",
+		mcp.WithDescription("Replication-related pg_settings parameters (wal_level, synchronous_commit, slots, archive, etc.) with contextual hints about risk or misconfiguration."),
+	), handleCheckReplicationConfig)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))
 	log.Printf("pgdba MCP server listening on %s", addr)

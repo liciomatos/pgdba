@@ -4,10 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/liciomatos/pgdba-cli/config"
-
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/liciomatos/pgdba-cli/config"
 )
 
 type ReplicationSlotsModel struct {
@@ -25,17 +24,27 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 	}
 
 	columns := []table.Column{
-		{Title: "Slot Name", Width: 20},
-		{Title: "Size (GB)", Width: 10},
-		{Title: "Active", Width: 10},
+		{Title: "Slot Name", Width: 22},
+		{Title: "Plugin", Width: 14},
+		{Title: "Type", Width: 10},
+		{Title: "Active", Width: 8},
+		{Title: "WAL Lag", Width: 12},
+		{Title: "Safe WAL", Width: 12},
 	}
 
 	var rowsData []table.Row
 	for _, s := range slots {
+		safeWAL := ""
+		if s.SafeWALSize != nil {
+			safeWAL = *s.SafeWALSize
+		}
 		rowsData = append(rowsData, table.Row{
 			s.SlotName,
-			s.WALLag,
+			s.Plugin,
+			s.SlotType,
 			fmt.Sprintf("%t", s.Active),
+			s.WALLag,
+			safeWAL,
 		})
 	}
 
@@ -74,11 +83,30 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			selectedRow := m.table.SelectedRow()
+			if len(selectedRow) == 0 {
+				return m, nil
+			}
 			m.slotToDelete = selectedRow[0]
 			m.confirmDelete = true
 			return m, nil
 		case "r":
 			return CheckReplicationSlotsStatus(m.initialModel), nil
+		case "s":
+			if m.confirmDelete {
+				return m, nil
+			}
+			parent := m.initialModel
+			return CheckReplicationStandbys(func() tea.Model {
+				return CheckReplicationSlotsStatus(parent)
+			}), nil
+		case "p":
+			if m.confirmDelete {
+				return m, nil
+			}
+			parent := m.initialModel
+			return CheckReplicationConfig(func() tea.Model {
+				return CheckReplicationSlotsStatus(parent)
+			}), nil
 		case "y":
 			if m.confirmDelete {
 				if err := dropReplicationSlot(m.slotToDelete); err != nil {
@@ -100,8 +128,9 @@ func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ReplicationSlotsModel) View() string {
+	// Column 3 = Active: color false slots red (inactive = potential WAL accumulation risk)
 	rules := []ColorRule{
-		{Column: 2, Colorize: func(v string) int {
+		{Column: 3, Colorize: func(v string) int {
 			switch v {
 			case "true":
 				return 0
@@ -116,7 +145,7 @@ func (m ReplicationSlotsModel) View() string {
 	if m.confirmDelete {
 		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • s standbys • p config • r refresh • q back")
 	}
 	return s
 }

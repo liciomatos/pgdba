@@ -221,6 +221,7 @@ type autovacuumTableResponse struct {
 	DeadTuples      int64    `json:"dead_tuples"`
 	LiveTuples      int64    `json:"live_tuples"`
 	DeadPct         *float64 `json:"dead_pct"`
+	TotalSize       string   `json:"total_size"`
 	LastVacuum      string   `json:"last_vacuum"`
 	LastAnalyze     string   `json:"last_analyze"`
 	LastAutovacuum  string   `json:"last_autovacuum"`
@@ -242,6 +243,7 @@ func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			DeadTuples:      t.DeadTuples,
 			LiveTuples:      t.LiveTuples,
 			DeadPct:         t.DeadPct,
+			TotalSize:       t.TotalSize,
 			LastVacuum:      formatTime(t.LastVacuum),
 			LastAnalyze:     formatTime(t.LastAnalyze),
 			LastAutovacuum:  formatTime(t.LastAutovacuum),
@@ -386,12 +388,15 @@ func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 // --- replication slots ---
 
 type replicationSlotResponse struct {
-	SlotName  string  `json:"slot_name"`
-	SlotType  string  `json:"slot_type"`
-	Database  *string `json:"database"`
-	Active    bool    `json:"active"`
-	ActivePID *int    `json:"active_pid"`
-	WALLag    string  `json:"wal_lag"`
+	SlotName    string  `json:"slot_name"`
+	Plugin      string  `json:"plugin"`
+	SlotType    string  `json:"slot_type"`
+	Database    *string `json:"database"`
+	Active      bool    `json:"active"`
+	ActivePID   *int    `json:"active_pid"`
+	WALLag      string  `json:"wal_lag"`
+	SafeWALSize *string `json:"safe_wal_size"`
+	TwoPhase    bool    `json:"two_phase"`
 }
 
 func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -402,12 +407,15 @@ func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (
 	resp := make([]replicationSlotResponse, 0, len(slots))
 	for _, s := range slots {
 		resp = append(resp, replicationSlotResponse{
-			SlotName:  s.SlotName,
-			SlotType:  s.SlotType,
-			Database:  s.Database,
-			Active:    s.Active,
-			ActivePID: s.ActivePID,
-			WALLag:    s.WALLag,
+			SlotName:    s.SlotName,
+			Plugin:      s.Plugin,
+			SlotType:    s.SlotType,
+			Database:    s.Database,
+			Active:      s.Active,
+			ActivePID:   s.ActivePID,
+			WALLag:      s.WALLag,
+			SafeWALSize: s.SafeWALSize,
+			TwoPhase:    s.TwoPhase,
 		})
 	}
 	return jsonResult(resp)
@@ -579,4 +587,247 @@ func handleCheckSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		})
 	}
 	return jsonResult(resp)
+}
+
+// --- autovacuum detail ---
+
+type autovacuumDetailResponse struct {
+	SchemaName        string `json:"schema_name"`
+	TableName         string `json:"table_name"`
+	LiveTuples        int64  `json:"live_tuples"`
+	DeadTuples        int64  `json:"dead_tuples"`
+	ModSinceAnalyze   int64  `json:"mod_since_analyze"`
+	VacuumCount       int64  `json:"vacuum_count"`
+	AutovacuumCount   int64  `json:"autovacuum_count"`
+	AnalyzeCount      int64  `json:"analyze_count"`
+	AutoanalyzeCount  int64  `json:"autoanalyze_count"`
+	TableSize         string `json:"table_size"`
+	TotalSize         string `json:"total_size"`
+	ToastAndIndexSize string `json:"toast_and_index_size"`
+	FrozenXIDAge      int64  `json:"frozen_xid_age"`
+	MXIDAge           int64  `json:"mxid_age"`
+	LastVacuum        string `json:"last_vacuum"`
+	LastAutovacuum    string `json:"last_autovacuum"`
+	LastAnalyze       string `json:"last_analyze"`
+	LastAutoanalyze   string `json:"last_autoanalyze"`
+}
+
+type autovacuumParamResponse struct {
+	Name        string `json:"name"`
+	TableValue  string `json:"table_value"`
+	GlobalValue string `json:"global_value"`
+	Unit        string `json:"unit"`
+}
+
+type autovacuumDetailResult struct {
+	Stats  autovacuumDetailResponse  `json:"stats"`
+	Params []autovacuumParamResponse `json:"params"`
+}
+
+func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	schema := strParam(req, "schema", "public")
+	table := strParam(req, "table", "")
+	if table == "" {
+		return mcp.NewToolResultError("table parameter is required"), nil
+	}
+	stats, err := util.FetchAutovacuumDetail(ctx, config.Config.DB, schema, table)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	params, _ := util.FetchAutovacuumParams(ctx, config.Config.DB, schema, table)
+	paramResp := make([]autovacuumParamResponse, 0, len(params))
+	for _, p := range params {
+		paramResp = append(paramResp, autovacuumParamResponse{
+			Name:        p.Name,
+			TableValue:  p.TableValue,
+			GlobalValue: p.GlobalValue,
+			Unit:        p.Unit,
+		})
+	}
+	return jsonResult(autovacuumDetailResult{
+		Stats: autovacuumDetailResponse{
+			SchemaName:        stats.SchemaName,
+			TableName:         stats.TableName,
+			LiveTuples:        stats.LiveTuples,
+			DeadTuples:        stats.DeadTuples,
+			ModSinceAnalyze:   stats.ModSinceAnalyze,
+			VacuumCount:       stats.VacuumCount,
+			AutovacuumCount:   stats.AutovacuumCount,
+			AnalyzeCount:      stats.AnalyzeCount,
+			AutoanalyzeCount:  stats.AutoanalyzeCount,
+			TableSize:         stats.TableSize,
+			TotalSize:         stats.TotalSize,
+			ToastAndIndexSize: stats.ToastAndIndexSize,
+			FrozenXIDAge:      stats.FrozenXIDAge,
+			MXIDAge:           stats.MXIDAge,
+			LastVacuum:        formatTime(stats.LastVacuum),
+			LastAutovacuum:    formatTime(stats.LastAutovacuum),
+			LastAnalyze:       formatTime(stats.LastAnalyze),
+			LastAutoanalyze:   formatTime(stats.LastAutoanalyze),
+		},
+		Params: paramResp,
+	})
+}
+
+// --- freeze by database ---
+
+type freezeDatabaseResponse struct {
+	DatabaseName      string  `json:"database_name"`
+	DBXIDAge          int64   `json:"db_xid_age"`
+	PctTowardShutdown float64 `json:"pct_toward_shutdown"`
+	DBMXIDAge         int64   `json:"db_mxid_age"`
+	Status            string  `json:"status"`
+}
+
+func handleCheckFreezeByDatabase(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	dbs, err := util.FetchFreezeByDatabase(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	statusLabels := []string{"ok", "warning", "critical"}
+	resp := make([]freezeDatabaseResponse, 0, len(dbs))
+	for _, d := range dbs {
+		statusLabel := "ok"
+		if d.Status < len(statusLabels) {
+			statusLabel = statusLabels[d.Status]
+		}
+		resp = append(resp, freezeDatabaseResponse{
+			DatabaseName:      d.DatabaseName,
+			DBXIDAge:          d.DBXIDAge,
+			PctTowardShutdown: d.PctTowardShutdown,
+			DBMXIDAge:         d.DBMXIDAge,
+			Status:            statusLabel,
+		})
+	}
+	return jsonResult(resp)
+}
+
+// --- freeze by table ---
+
+type freezeTableResponse struct {
+	SchemaName      string  `json:"schema_name"`
+	TableName       string  `json:"table_name"`
+	XIDAge          int64   `json:"xid_age"`
+	MXIDAge         int64   `json:"mxid_age"`
+	FreezeMaxAge    int64   `json:"freeze_max_age"`
+	PctTowardFreeze float64 `json:"pct_toward_freeze"`
+	TotalSize       string  `json:"total_size"`
+	LastAutovacuum  string  `json:"last_autovacuum"`
+	Status          string  `json:"status"`
+}
+
+func handleCheckFreezeByTable(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	limit := intParam(req, "limit", 50)
+	tables, err := util.FetchFreezeByTable(ctx, config.Config.DB, limit)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	statusLabels := []string{"ok", "warning", "critical"}
+	resp := make([]freezeTableResponse, 0, len(tables))
+	for _, t := range tables {
+		statusLabel := "ok"
+		if t.Status < len(statusLabels) {
+			statusLabel = statusLabels[t.Status]
+		}
+		resp = append(resp, freezeTableResponse{
+			SchemaName:      t.SchemaName,
+			TableName:       t.TableName,
+			XIDAge:          t.XIDAge,
+			MXIDAge:         t.MXIDAge,
+			FreezeMaxAge:    t.FreezeMaxAge,
+			PctTowardFreeze: t.PctTowardFreeze,
+			TotalSize:       t.TotalSize,
+			LastAutovacuum:  formatTime(t.LastAutovacuum),
+			Status:          statusLabel,
+		})
+	}
+	return jsonResult(resp)
+}
+
+// --- streaming standbys ---
+
+type streamingStandbyResponse struct {
+	ApplicationName string `json:"application_name"`
+	ClientAddr      string `json:"client_addr"`
+	State           string `json:"state"`
+	SyncState       string `json:"sync_state"`
+	SentLSN         string `json:"sent_lsn"`
+	WriteLSN        string `json:"write_lsn"`
+	FlushLSN        string `json:"flush_lsn"`
+	ReplayLSN       string `json:"replay_lsn"`
+	WriteLag        string `json:"write_lag"`
+	FlushLag        string `json:"flush_lag"`
+	ReplayLag       string `json:"replay_lag"`
+	LagBytes        int64  `json:"lag_bytes"`
+	PID             int    `json:"pid"`
+}
+
+func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	standbys, err := util.FetchStreamingStandbys(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]streamingStandbyResponse, 0, len(standbys))
+	for _, s := range standbys {
+		resp = append(resp, streamingStandbyResponse{
+			ApplicationName: s.ApplicationName,
+			ClientAddr:      s.ClientAddr,
+			State:           s.State,
+			SyncState:       s.SyncState,
+			SentLSN:         s.SentLSN,
+			WriteLSN:        s.WriteLSN,
+			FlushLSN:        s.FlushLSN,
+			ReplayLSN:       s.ReplayLSN,
+			WriteLag:        s.WriteLag,
+			FlushLag:        s.FlushLag,
+			ReplayLag:       s.ReplayLag,
+			LagBytes:        s.LagBytes,
+			PID:             s.PID,
+		})
+	}
+	return jsonResult(resp)
+}
+
+// --- replication config ---
+
+type replicationParamResponse struct {
+	Name      string `json:"name"`
+	Setting   string `json:"setting"`
+	Unit      string `json:"unit"`
+	Context   string `json:"context"`
+	ShortDesc string `json:"short_desc"`
+	Hint      string `json:"hint"`
+	HintLevel int    `json:"hint_level"`
+}
+
+type replicationConfigResponse struct {
+	Params        []replicationParamResponse `json:"params"`
+	ActiveSenders int                        `json:"active_senders"`
+	TotalSlots    int                        `json:"total_slots"`
+	ActiveSlots   int                        `json:"active_slots"`
+}
+
+func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	params, counts, err := util.FetchReplicationConfig(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	paramResp := make([]replicationParamResponse, 0, len(params))
+	for _, p := range params {
+		paramResp = append(paramResp, replicationParamResponse{
+			Name:      p.Name,
+			Setting:   p.Setting,
+			Unit:      p.Unit,
+			Context:   p.Context,
+			ShortDesc: p.ShortDesc,
+			Hint:      p.Hint,
+			HintLevel: p.HintLevel,
+		})
+	}
+	return jsonResult(replicationConfigResponse{
+		Params:        paramResp,
+		ActiveSenders: counts.ActiveSenders,
+		TotalSlots:    counts.TotalSlots,
+		ActiveSlots:   counts.ActiveSlots,
+	})
 }

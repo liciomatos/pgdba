@@ -230,6 +230,8 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckQueryLoad(dashboard)), nil
 			case "w":
 				return n.wrapChild(util.CheckWaitEvents(dashboard)), nil
+			case "f":
+				return n.wrapChild(util.CheckFreezeMonitor(dashboard)), nil
 			}
 		}
 	}

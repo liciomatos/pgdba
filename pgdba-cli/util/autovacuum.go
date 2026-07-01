@@ -38,13 +38,10 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		{Title: "Schema", Width: 12},
 		{Title: "Table", Width: 25},
 		{Title: "Dead Tuples", Width: 12},
-		{Title: "Live Tuples", Width: 12},
 		{Title: "Dead %", Width: 8},
-		{Title: "Last Vacuum", Width: 18},
-		{Title: "Last Analyze", Width: 18},
+		{Title: "Size", Width: 10},
 		{Title: "Last Autovacuum", Width: 18},
-		{Title: "Last Autoanalyze", Width: 18},
-		{Title: "Vac Count", Width: 10},
+		{Title: "Autovac Count", Width: 14},
 	}
 
 	formatTime := func(t *time.Time) string {
@@ -64,12 +61,9 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 			av.SchemaName,
 			av.TableName,
 			fmt.Sprintf("%d", av.DeadTuples),
-			fmt.Sprintf("%d", av.LiveTuples),
 			deadPctStr,
-			formatTime(av.LastVacuum),
-			formatTime(av.LastAnalyze),
+			av.TotalSize,
 			formatTime(av.LastAutovacuum),
-			formatTime(av.LastAutoanalyze),
 			fmt.Sprintf("%d", av.AutovacuumCount),
 		})
 	}
@@ -127,6 +121,19 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.initialModel(), nil
 		case "r":
 			return CheckAutovacuum(m.initialModel), nil
+		case "enter":
+			if m.confirmVacuum {
+				return m, nil
+			}
+			selectedRow := m.table.SelectedRow()
+			if len(selectedRow) < 2 {
+				return m, nil
+			}
+			schema, tableName := selectedRow[0], selectedRow[1]
+			parent := m.initialModel
+			return CheckAutovacuumDetail(schema, tableName, func() tea.Model {
+				return CheckAutovacuum(parent)
+			}), nil
 		case "v":
 			if m.confirmVacuum {
 				m.confirmVacuum = false
@@ -167,7 +174,7 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m AutovacuumModel) View() string {
 	rules := []ColorRule{
-		{Column: 4, Colorize: func(v string) int {
+		{Column: 3, Colorize: func(v string) int {
 			// Values are "N/A" or "30.1%"; strip % and parse.
 			f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
 			if err != nil {
@@ -188,7 +195,7 @@ func (m AutovacuumModel) View() string {
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • v vacuum analyze • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "enter detail • v vacuum analyze • r refresh • q back")
 	}
 	return s
 }
