@@ -27,6 +27,10 @@ if [ -z "$(ls -A "$PGDATA")" ]; then
   echo "primary_conninfo = 'host=$PRIMARY_HOST port=$PRIMARY_PORT user=$PRIMARY_USER application_name=pgdba_replica'" \
     >> "$PGDATA/postgresql.auto.conf"
 
+  # Consume the physical slot so it shows as active in pgdba's Replication Slots screen.
+  # Without this the replica streams WAL without using any slot, leaving it inactive.
+  echo "primary_slot_name = 'test_physical_slot'" >> "$PGDATA/postgresql.auto.conf"
+
   echo "hot_standby = on"            >> "$PGDATA/postgresql.auto.conf"
   echo "wal_level = replica"         >> "$PGDATA/postgresql.auto.conf"
 

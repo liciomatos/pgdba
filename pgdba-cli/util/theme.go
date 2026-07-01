@@ -178,10 +178,12 @@ func DefaultTableStyles() table.Styles {
 		BorderBottom(true).
 		Bold(true).
 		Foreground(ColorBlue)
-	// Foreground intentionally omitted so per-cell colors injected by ColorizeTable
-	// remain visible on non-selected rows without fighting a global white override.
+	// Dark gray background, no explicit foreground: selection is clear without saturated
+	// color competing with green/yellow/red status indicators in other rows. No foreground
+	// override lets ColorizeTable inject severity colors with plain SeverityColor (which
+	// closes with \x1b[0m) — terminal default fg on default bg remains readable after reset.
 	s.Selected = s.Selected.
-		Background(lipgloss.Color("57")).
+		Background(lipgloss.Color("237")).
 		Bold(false)
 	return s
 }
@@ -199,8 +201,12 @@ type ColorRule struct {
 // function keeps plain text in cells and injects colors after the table renders, so
 // runewidth never sees the sequences.
 //
-// Selected rows (starting with ESC from styles.Selected.Render) are skipped; the
-// purple background already distinguishes them without cell colors.
+// For selected rows (starting with ANSI escapes from styles.Selected.Render) all
+// consecutive leading escape sequences are measured and their total byte length is
+// used as an offset so cell positions stay accurate. SeverityColor (which closes with
+// \x1b[0m) is used for all rows; after the reset the terminal falls back to default
+// fg/bg which is readable because DefaultTableStyles uses a dark background for
+// selection with no explicit foreground override.
 //
 // Assumes DefaultTableStyles: 2 header lines (title + border separator).
 func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) string {
@@ -230,9 +236,18 @@ func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) str
 		if len(line) == 0 {
 			continue
 		}
-		// Selected rows start with an ANSI escape byte; skip them.
-		if line[0] == '\x1b' {
-			continue
+
+		// Consume all consecutive leading ANSI sequences (\x1b[...m) to find where
+		// actual cell content starts. lipgloss may emit background and foreground as
+		// separate sequences (e.g. \x1b[48;5;237m\x1b[1m), so we scan past all of them.
+		ansiPrefix := 0
+		for ansiPrefix < len(line) && line[ansiPrefix] == '\x1b' &&
+			ansiPrefix+1 < len(line) && line[ansiPrefix+1] == '[' {
+			rel := strings.IndexByte(line[ansiPrefix:], 'm')
+			if rel < 0 {
+				break
+			}
+			ansiPrefix += rel + 1
 		}
 
 		// Process columns right-to-left: injecting at a higher byte offset does not
@@ -243,7 +258,7 @@ func ColorizeTable(tableView string, cols []table.Column, rules []ColorRule) str
 				continue
 			}
 
-			start := colValueStart[colIdx]
+			start := colValueStart[colIdx] + ansiPrefix
 			if start >= len(line) {
 				continue
 			}
