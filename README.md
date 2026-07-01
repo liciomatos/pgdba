@@ -89,6 +89,9 @@ pgdba-cli --mcp --url "postgres://user:pass@host/db"
 PGHOST=host PGUSER=user PGPASSWORD=pass PGDATABASE=db pgdba-cli --mcp
 ```
 
+On startup, the server prints the `claude mcp add` command and the equivalent `.mcp.json`
+snippet for the port it's actually listening on, so you don't have to look them up by hand.
+
 Configure Claude Code (`.mcp.json` in your project — credentials never go here):
 
 ```json

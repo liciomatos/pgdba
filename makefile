@@ -82,18 +82,6 @@ mcp-up-repl: build
 	./pgdba-cli/$(BINARY_NAME) --mcp --mcp-port=$(MCP_PORT) \
 		--host=localhost --user=postgres --password=postgres --dbname=testdb --sslmode=disable --port=5432
 
-# Print the exact steps to point Claude Code at the running MCP server
-mcp-config:
-	@echo "1) Start the server in another terminal:  make mcp-up"
-	@echo ""
-	@echo "2) Register it with the Claude Code CLI (project scope, shared via .mcp.json):"
-	@echo "   claude mcp add --transport sse pgdba http://localhost:$(MCP_PORT)/sse --scope project"
-	@echo ""
-	@echo "   ...or drop this into .mcp.json by hand:"
-	@echo '   { "mcpServers": { "pgdba": { "url": "http://localhost:$(MCP_PORT)/sse" } } }'
-	@echo ""
-	@echo "3) Verify: claude mcp list   (or /mcp inside a Claude Code session)"
-
 # Help
 help:
 	@echo "Makefile commands:"
@@ -112,7 +100,6 @@ help:
 	@echo "  replication-down    Stop and remove replication test environment"
 	@echo "  mcp-up              Start the MCP server against the local dev database (mydb)"
 	@echo "  mcp-up-repl         Start the MCP server against the replication test environment (testdb)"
-	@echo "  mcp-config          Print steps to point Claude Code at the running MCP server"
 	@echo "  help                Show this help message"
 
-.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl mcp-config help
+.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl help

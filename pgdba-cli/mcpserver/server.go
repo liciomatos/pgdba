@@ -155,7 +155,32 @@ func Serve(port int) error {
 	), handleCheckReplicationConfig)
 
 	addr := fmt.Sprintf(":%d", port)
+	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))
 	log.Printf("pgdba MCP server listening on %s", addr)
+	printClientConfig(sseURL)
 	return sseServer.Start(addr)
+}
+
+// printClientConfig prints ready-to-copy snippets so a user can wire this server
+// into Claude Code without having to look up the URL format themselves.
+func printClientConfig(sseURL string) {
+	fmt.Printf(`
+Configure Claude Code:
+
+  claude mcp add --transport sse pgdba %s --scope project
+
+Or add directly to .mcp.json:
+
+  {
+    "mcpServers": {
+      "pgdba": {
+        "url": "%s"
+      }
+    }
+  }
+
+Verify with: claude mcp list   (or /mcp inside a Claude Code session)
+
+`, sseURL, sseURL)
 }
