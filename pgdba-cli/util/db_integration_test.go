@@ -17,6 +17,17 @@ import (
 var testDB *sql.DB
 var skipIntegration bool
 
+// testPostgresImage returns the PostgreSQL image tag to test against, driven by
+// PGDBA_TEST_PG_VERSION (e.g. "17-alpine") so the compatibility matrix in
+// pg-compat.yml and `make test-pg-matrix` can exercise every supported version.
+// Defaults to today's fast local dev loop when unset.
+func testPostgresImage() string {
+	if v := os.Getenv("PGDBA_TEST_PG_VERSION"); v != "" {
+		return "postgres:" + v
+	}
+	return "postgres:16-alpine"
+}
+
 func TestMain(m *testing.M) {
 	flag.Parse()
 	if testing.Short() {
@@ -26,7 +37,7 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 	pgContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		testPostgresImage(),
 		postgres.WithDatabase("testdb"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
@@ -61,7 +72,15 @@ func TestMain(m *testing.M) {
 	config.Config.Host = "localhost"
 	config.Config.User = "postgres"
 	config.Config.DBName = "testdb"
-	config.Config.Version = "16.0"
+
+	// Read the real server version so pgMajorVersion()-gated code paths in Fetch*
+	// functions are exercised correctly for whichever image testPostgresImage() picked,
+	// instead of silently testing against a fake hardcoded version.
+	if err := testDB.QueryRow("SHOW server_version;").Scan(&config.Config.Version); err != nil {
+		os.Stderr.WriteString("WARNING: skipping integration tests (reading server_version): " + err.Error() + "\n")
+		skipIntegration = true
+		os.Exit(m.Run())
+	}
 
 	os.Exit(m.Run())
 }

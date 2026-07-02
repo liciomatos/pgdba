@@ -82,6 +82,15 @@ mcp-up-repl: build
 	./pgdba-cli/$(BINARY_NAME) --mcp --mcp-port=$(MCP_PORT) \
 		--host=localhost --user=postgres --password=postgres --dbname=testdb --sslmode=disable --port=5432
 
+# Run the full integration suite locally against every supported PostgreSQL version
+# (13-18). Requires Docker/Podman. Slow (pulls + boots 6 containers serially) — use for
+# pre-release validation, not routine dev loops (CI's pg-compat.yml covers this on tag pushes).
+test-pg-matrix:
+	@for v in 13 14 15 16 17 18; do \
+		echo "=== PostgreSQL $$v ==="; \
+		(cd pgdba-cli && PGDBA_TEST_PG_VERSION=$$v-alpine go test ./... -v -timeout 180s) || exit 1; \
+	done
+
 # Help
 help:
 	@echo "Makefile commands:"
@@ -100,6 +109,7 @@ help:
 	@echo "  replication-down    Stop and remove replication test environment"
 	@echo "  mcp-up              Start the MCP server against the local dev database (mydb)"
 	@echo "  mcp-up-repl         Start the MCP server against the replication test environment (testdb)"
+	@echo "  test-pg-matrix      Run integration tests against every supported PostgreSQL version (13-18)"
 	@echo "  help                Show this help message"
 
-.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl help
+.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl test-pg-matrix help

@@ -388,15 +388,18 @@ func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 // --- replication slots ---
 
 type replicationSlotResponse struct {
-	SlotName    string  `json:"slot_name"`
-	Plugin      string  `json:"plugin"`
-	SlotType    string  `json:"slot_type"`
-	Database    *string `json:"database"`
-	Active      bool    `json:"active"`
-	ActivePID   *int    `json:"active_pid"`
-	WALLag      string  `json:"wal_lag"`
-	SafeWALSize *string `json:"safe_wal_size"`
-	TwoPhase    bool    `json:"two_phase"`
+	SlotName      string  `json:"slot_name"`
+	Plugin        string  `json:"plugin"`
+	SlotType      string  `json:"slot_type"`
+	Database      *string `json:"database"`
+	Active        bool    `json:"active"`
+	ActivePID     *int    `json:"active_pid"`
+	WALLag        string  `json:"wal_lag"`
+	SafeWALSize   *string `json:"safe_wal_size"`
+	TwoPhase      bool    `json:"two_phase"`
+	Failover      *bool   `json:"failover,omitempty"`
+	Synced        *bool   `json:"synced,omitempty"`
+	InactiveSince *string `json:"inactive_since,omitempty"`
 }
 
 func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -407,15 +410,18 @@ func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (
 	resp := make([]replicationSlotResponse, 0, len(slots))
 	for _, s := range slots {
 		resp = append(resp, replicationSlotResponse{
-			SlotName:    s.SlotName,
-			Plugin:      s.Plugin,
-			SlotType:    s.SlotType,
-			Database:    s.Database,
-			Active:      s.Active,
-			ActivePID:   s.ActivePID,
-			WALLag:      s.WALLag,
-			SafeWALSize: s.SafeWALSize,
-			TwoPhase:    s.TwoPhase,
+			SlotName:      s.SlotName,
+			Plugin:        s.Plugin,
+			SlotType:      s.SlotType,
+			Database:      s.Database,
+			Active:        s.Active,
+			ActivePID:     s.ActivePID,
+			WALLag:        s.WALLag,
+			SafeWALSize:   s.SafeWALSize,
+			TwoPhase:      s.TwoPhase,
+			Failover:      s.Failover,
+			Synced:        s.Synced,
+			InactiveSince: s.InactiveSince,
 		})
 	}
 	return jsonResult(resp)
@@ -931,8 +937,8 @@ type checkpointStatsResponse struct {
 	BuffersCheckpoint   int64  `json:"buffers_checkpoint"`
 	BuffersClean        int64  `json:"buffers_clean"`
 	MaxwrittenClean     int64  `json:"maxwritten_clean"`
-	BuffersBackend      int64  `json:"buffers_backend"`
-	BuffersBackendFsync int64  `json:"buffers_backend_fsync"`
+	BuffersBackend      *int64 `json:"buffers_backend,omitempty"`
+	BuffersBackendFsync *int64 `json:"buffers_backend_fsync,omitempty"`
 	BuffersAlloc        int64  `json:"buffers_alloc"`
 	StatsReset          string `json:"stats_reset"`
 }

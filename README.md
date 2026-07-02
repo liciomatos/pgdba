@@ -331,8 +331,27 @@ make replication-down
 See [`docker/replication/README.md`](docker/replication/README.md) for test scenarios covering
 each new screen.
 
+### Compatibility testing across PostgreSQL versions
+
+pgdba-cli is tested against PostgreSQL 13 through 18. To run the full integration suite
+locally against a specific version:
+
+```bash
+# Test against a single version
+cd pgdba-cli && PGDBA_TEST_PG_VERSION=17-alpine go test ./... -timeout 120s
+
+# Test against every supported version (13-18) locally, one after another
+make test-pg-matrix
+```
+
+This mirrors the `pg-compat.yml` CI workflow, which runs the same matrix in GitHub Actions
+(triggered manually via `workflow_dispatch` or automatically on release-tag pushes, since
+running all 6 versions on every push/PR would be too slow for routine development).
+
 ## Requirements
 
-- PostgreSQL 13 or later
+- PostgreSQL 13 or later. New major versions are added to the CI compatibility matrix as
+  they're released (currently 14–18 fully supported; PostgreSQL 13 is past its community
+  end-of-life on 2025-11-13 but pgdba-cli still targets it on a best-effort basis).
 - **Slow Queries** and **Query Load** screens require the `pg_stat_statements` extension
 - **Precise Bloat** (`b` in Autovacuum Detail) requires the `pgstattuple` extension

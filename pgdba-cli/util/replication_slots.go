@@ -31,6 +31,9 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 		{Title: "Active", Width: 8},
 		{Title: "WAL Lag", Width: 12},
 		{Title: "Safe WAL", Width: 12},
+		{Title: "Failover", Width: 9},
+		{Title: "Synced", Width: 7},
+		{Title: "Inactive Since", Width: 20},
 	}
 
 	var rowsData []table.Row
@@ -39,6 +42,18 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 		if s.SafeWALSize != nil {
 			safeWAL = *s.SafeWALSize
 		}
+		failover := ""
+		if s.Failover != nil {
+			failover = fmt.Sprintf("%t", *s.Failover)
+		}
+		synced := ""
+		if s.Synced != nil {
+			synced = fmt.Sprintf("%t", *s.Synced)
+		}
+		inactiveSince := ""
+		if s.InactiveSince != nil {
+			inactiveSince = *s.InactiveSince
+		}
 		rowsData = append(rowsData, table.Row{
 			s.SlotName,
 			s.Plugin,
@@ -46,6 +61,9 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%t", s.Active),
 			s.WALLag,
 			safeWAL,
+			failover,
+			synced,
+			inactiveSince,
 		})
 	}
 
@@ -63,10 +81,10 @@ func CheckReplicationSlotsStatus(initialModel func() tea.Model) tea.Model {
 func (m ReplicationSlotsModel) Init() tea.Cmd { return nil }
 
 // ConsumesKey prevents the navigator from intercepting "p" (replication config),
-// which would otherwise route to the global PgConfig screen.
-// "S" (standbys) uses uppercase to avoid the conflict entirely.
+// which would otherwise route to the global PgConfig screen, and "S" (standbys),
+// which would otherwise route to the global Database Sizes screen.
 func (m ReplicationSlotsModel) ConsumesKey(key string) bool {
-	return key == "p"
+	return key == "p" || key == "S"
 }
 
 func (m ReplicationSlotsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

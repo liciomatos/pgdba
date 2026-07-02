@@ -102,6 +102,10 @@ func (m MemoryStatsModel) View() string {
 		lipgloss.NewStyle().Foreground(cacheHitColor).Render(fmt.Sprintf("%.2f%%", m.stats.CacheHitRatio)))
 
 	cp := m.stats.Checkpoint
+	buffersBackendStr := "N/A (moved to pg_stat_io in PG17+)"
+	if cp.BuffersBackend != nil {
+		buffersBackendStr = fmt.Sprintf("%d", *cp.BuffersBackend)
+	}
 	s += "\n  " + renderLabel("Checkpoints & background writer (since stats reset):") + "\n"
 	s += fmt.Sprintf("    %s %s   %s %s\n",
 		renderLabel("Timed:"), renderValue(fmt.Sprintf("%d", cp.CheckpointsTimed)),
@@ -109,7 +113,7 @@ func (m MemoryStatsModel) View() string {
 	s += fmt.Sprintf("    %s %s   %s %s   %s %s\n",
 		renderLabel("Buffers checkpoint:"), renderValue(fmt.Sprintf("%d", cp.BuffersCheckpoint)),
 		renderLabel("Buffers clean:"), renderValue(fmt.Sprintf("%d", cp.BuffersClean)),
-		renderLabel("Buffers backend:"), renderValue(fmt.Sprintf("%d", cp.BuffersBackend)))
+		renderLabel("Buffers backend:"), renderValue(buffersBackendStr))
 	if cp.CheckpointsReq > cp.CheckpointsTimed {
 		s += "    " + lipgloss.NewStyle().Foreground(ColorYellow).Render(
 			"More checkpoints happened on demand than on schedule — consider raising max_wal_size.") + "\n"
