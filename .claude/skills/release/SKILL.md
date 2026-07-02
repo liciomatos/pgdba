@@ -7,8 +7,14 @@ argument-hint: [version, e.g. 0.4.0]
 # Release checklist for pgdba-cli v$0
 
 Walk through each step below in order. Confirm with the user before any action that pushes
-to a shared ref (tag push) or otherwise triggers external side effects — never push a tag
-without explicit confirmation, same as the project's rule against pushing to `main`.
+to a shared ref (tag push, `main`) or otherwise triggers external side effects.
+
+`main` is a **protected branch on GitHub** — direct pushes are rejected outright (requires
+a PR + the `build` status check). This was discovered the hard way while cutting v0.3.0:
+a direct `git push origin main` for a changelog-only commit failed with
+`GH006: Protected branch update failed`. Any change touching `main` — even a one-line
+CHANGELOG.md edit — goes through a branch + PR + explicit merge confirmation, never a
+direct commit.
 
 ## 1. Confirm branch state
 
@@ -25,13 +31,20 @@ without explicit confirmation, same as the project's rule against pushing to `ma
   you see one, don't decide silently).
 - If `$0` wasn't given, propose a version based on the above and ask the user to confirm.
 
-## 3. Update CHANGELOG.md
+## 3. Update CHANGELOG.md (via a PR)
 
+- Create a small branch for this, e.g. `docs/changelog-vX.Y.Z` — do not attempt to commit
+  straight to `main` (see the protected-branch note above).
 - Move the relevant entries from `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD`
   section (Keep a Changelog format — `### Added`/`### Fixed`/`### Changed` etc.).
 - Add the new version's compare link at the bottom
   (`[X.Y.Z]: https://github.com/liciomatos/pgdba/compare/vPREV...vX.Y.Z`) and update
   `[Unreleased]` to compare from the new tag.
+- Commit, push the branch, open a PR against `main` (`gh pr create --base main`), wait for
+  the `build` check to pass, then **stop and confirm with the user before merging** — same
+  bar as a tag push, this is still a change to shared history.
+- After the merge, sync local `main` (`git checkout main && git pull origin main`) before
+  moving on — tagging from a stale local `main` will tag the wrong commit.
 - This is a curated, human-readable summary — not a raw commit dump. GoReleaser's
   auto-generated GitHub Release notes (from `feat:`/`fix:` commit subjects) still get
   created separately and are fine to stay terse/mechanical; CHANGELOG.md is the one meant
@@ -44,6 +57,11 @@ without explicit confirmation, same as the project's rule against pushing to `ma
 - If local Docker isn't usable, trigger `.github/workflows/pg-compat.yml` manually via
   `gh workflow run pg-compat.yml` and wait for it to go green instead.
 - Do not proceed to tagging if any supported version fails.
+- **If every version fails with the same error**, it's almost certainly a shared test-infra
+  problem, not a real per-version compatibility regression — check `TestMain` in
+  `util/db_integration_test.go` first before assuming any `Fetch*` code is broken (this
+  happened once: `pg_stat_statements` wasn't preloaded at container startup, failing
+  identically across all 6 versions — see commit `706bbc9`).
 
 ## 5. Tag and push
 
