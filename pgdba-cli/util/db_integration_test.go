@@ -41,6 +41,9 @@ func TestMain(m *testing.M) {
 		postgres.WithDatabase("testdb"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
+		// pg_stat_statements must be preloaded at server startup — CREATE EXTENSION
+		// alone fails without this, matching the root docker-compose.yaml setup.
+		testcontainers.WithCmd("postgres", "-c", "shared_preload_libraries=pg_stat_statements"),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 		),
@@ -66,7 +69,11 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 
-	testDB.Exec("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+	if _, err := testDB.Exec("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"); err != nil {
+		os.Stderr.WriteString("WARNING: skipping integration tests (pg_stat_statements): " + err.Error() + "\n")
+		skipIntegration = true
+		os.Exit(m.Run())
+	}
 
 	config.Config.DB = testDB
 	config.Config.Host = "localhost"
