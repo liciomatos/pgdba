@@ -62,6 +62,11 @@ Pushing a `vX.Y.Z` git tag is the only trigger needed — it fires two independe
 hand as part of each release — separate from GoReleaser's auto-generated GitHub Release
 notes, which are terser and commit-based. Update its `[Unreleased]` section before tagging.
 
+`main` is a **protected branch on GitHub** (PR + `build` status check required — direct
+pushes are rejected). Even a one-line CHANGELOG.md update before tagging needs its own
+branch and PR, never a direct commit. Tag pushes themselves are unaffected by this (branch
+protection doesn't apply to tags).
+
 Use the `/release` skill (`.claude/skills/release/SKILL.md`) for the full guided checklist
 before tagging.
 
