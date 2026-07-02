@@ -58,6 +58,10 @@ Pushing a `vX.Y.Z` git tag is the only trigger needed — it fires two independe
   PostgreSQL version (13–18) on the same tag push (also runnable anytime via
   `workflow_dispatch`, or locally via `make test-pg-matrix`).
 
+`CHANGELOG.md` is a curated, human-readable summary (Keep a Changelog format) maintained by
+hand as part of each release — separate from GoReleaser's auto-generated GitHub Release
+notes, which are terser and commit-based. Update its `[Unreleased]` section before tagging.
+
 Use the `/release` skill (`.claude/skills/release/SKILL.md`) for the full guided checklist
 before tagging.
 

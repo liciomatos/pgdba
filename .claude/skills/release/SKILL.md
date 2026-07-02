@@ -25,7 +25,19 @@ without explicit confirmation, same as the project's rule against pushing to `ma
   you see one, don't decide silently).
 - If `$0` wasn't given, propose a version based on the above and ask the user to confirm.
 
-## 3. Run the PostgreSQL compatibility matrix
+## 3. Update CHANGELOG.md
+
+- Move the relevant entries from `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD`
+  section (Keep a Changelog format — `### Added`/`### Fixed`/`### Changed` etc.).
+- Add the new version's compare link at the bottom
+  (`[X.Y.Z]: https://github.com/liciomatos/pgdba/compare/vPREV...vX.Y.Z`) and update
+  `[Unreleased]` to compare from the new tag.
+- This is a curated, human-readable summary — not a raw commit dump. GoReleaser's
+  auto-generated GitHub Release notes (from `feat:`/`fix:` commit subjects) still get
+  created separately and are fine to stay terse/mechanical; CHANGELOG.md is the one meant
+  to read well.
+
+## 4. Run the PostgreSQL compatibility matrix
 
 - `make test-pg-matrix` locally (tests PG13–18, ~5x slower than the normal test loop —
   requires Docker/Podman with working `testcontainers-go` support).
@@ -33,7 +45,7 @@ without explicit confirmation, same as the project's rule against pushing to `ma
   `gh workflow run pg-compat.yml` and wait for it to go green instead.
 - Do not proceed to tagging if any supported version fails.
 
-## 4. Tag and push
+## 5. Tag and push
 
 - `git tag vX.Y.Z` on `main`.
 - **Stop and confirm with the user before running `git push origin vX.Y.Z`** — this single
@@ -44,7 +56,7 @@ without explicit confirmation, same as the project's rule against pushing to `ma
     (`liciomatos/scoop-bucket`)** via `TAP_GITHUB_TOKEN` — no manual step exists for this.
   - `.github/workflows/pg-compat.yml` runs the full PG13–18 matrix again, in parallel.
 
-## 5. Verify
+## 6. Verify
 
 - `gh run list --limit 5` (or the GitHub Actions UI) — confirm both workflows go green.
 - Confirm the GitHub Release was created with all expected artifacts (linux/darwin/windows
@@ -53,7 +65,7 @@ without explicit confirmation, same as the project's rule against pushing to `ma
   If it didn't, the most likely cause is `TAP_GITHUB_TOKEN` expiring — check that secret
   before assuming GoReleaser itself is broken.
 
-## 6. Announce (optional)
+## 7. Announce (optional)
 
-- If the user wants a changelog/announcement post, offer to draft one from the same
-  `feat:`/`fix:` commits GoReleaser's changelog used.
+- If the user wants an announcement post, offer to draft one from the CHANGELOG.md entry
+  just added for this version.
