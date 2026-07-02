@@ -50,8 +50,13 @@ pgdba-cli/*.deb
 # GoReleaser local build/release output
 dist/
 
-# Claude Code job/worktree/memory metadata (not part of the project source)
-.claude/
+# Claude Code runtime state (ephemeral worktrees, background job data, local machine
+# settings) — not part of the project source. Shared config like .claude/skills/,
+# .claude/agents/, .claude/commands/, and .claude/settings.json are intentionally
+# NOT ignored, since those are meant to be committed and shared with the team.
+.claude/worktrees/
+.claude/jobs/
+.claude/settings.local.json
 
 # OS
 .DS_Store

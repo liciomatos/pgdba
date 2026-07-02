@@ -44,6 +44,23 @@ go test ./util/ -run TestReplicationSlotsModel_PressD_ActivatesConfirm -v
 
 Integration tests use `testcontainers-go` to spin up a real PostgreSQL container. The shared setup lives in `util/db_integration_test.go` (`TestMain`), which injects a live `*sql.DB` into `config.Config.DB` before any test runs, and reads the real server version via `SHOW server_version;` so `pgMajorVersion()`-gated code in `Fetch*` functions is exercised correctly for whichever version `PGDBA_TEST_PG_VERSION` selects.
 
+## Release Process
+
+Pushing a `vX.Y.Z` git tag is the only trigger needed — it fires two independent workflows:
+
+- **`.github/workflows/release.yml`** runs GoReleaser (`.goreleaser.yaml`), which
+  cross-compiles `pgdba-cli` for linux/darwin/windows (amd64+arm64), creates a GitHub
+  Release with a changelog auto-grouped by `feat:`/`fix:` commit prefixes, and
+  **automatically publishes to the Homebrew tap (`liciomatos/homebrew-tap`) and Scoop
+  bucket (`liciomatos/scoop-bucket`)** via the `TAP_GITHUB_TOKEN` secret — there is no
+  manual step for this.
+- **`.github/workflows/pg-compat.yml`** runs the full test suite against every supported
+  PostgreSQL version (13–18) on the same tag push (also runnable anytime via
+  `workflow_dispatch`, or locally via `make test-pg-matrix`).
+
+Use the `/release` skill (`.claude/skills/release/SKILL.md`) for the full guided checklist
+before tagging.
+
 ## Architecture
 
 ### Shared Data Layer (fetch.go)
@@ -83,7 +100,11 @@ When adding a new diagnostic:
 1. Add `FetchMyThing(ctx, db, params)` to `util/fetch.go` returning a typed struct.
 2. Create `util/my_thing.go` with `CheckMyThing` calling `FetchMyThing`, converting to `table.Row`.
 3. Add `handleCheckMyThing` to `mcpserver/tools.go` calling `FetchMyThing`, marshaling to JSON.
-4. Register the tool in `mcpserver/server.go` with `s.AddTool(...)`.
+4. Register the tool in `mcpserver/server.go` with `s.AddTool(...)`, including
+   `mcp.WithReadOnlyHintAnnotation(true)` and `mcp.WithDestructiveHintAnnotation(false)`
+   unless the tool actually mutates data (none do today — every handler only calls
+   `Fetch*`, never `Exec`/DDL). Without these hints, MCP clients treat the tool as
+   potentially destructive by default and prompt for confirmation on every call.
 
 ### MCP Server Mode
 
@@ -113,8 +134,12 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
 1. Add `FetchMyScreen(ctx, db, params)` to `util/fetch.go` with typed result struct.
 2. Create `util/my_screen.go` with `CheckMyScreen` calling `FetchMyScreen`, building `[]table.Row`.
 3. Implement `Init() tea.Cmd`, `Update(tea.Msg) (tea.Model, tea.Cmd)`, `View() string`.
-4. Register in `main.go`: add a key binding in the navigator `Update` switch.
-5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in `mcpserver/server.go`.
+4. Register in `main.go`: add a key binding in the navigator `Update` switch. If the new key
+   is already used by another screen for a screen-local action, that screen needs
+   `ConsumesKey` — see "Global key conflicts" below (this was missed once already: adding
+   global `S` for Database Sizes silently broke Replication Slots' own local `S` shortcut).
+5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in
+   `mcpserver/server.go`, including the read-only annotations described above.
 
 ### Global key conflicts — implement `ConsumesKey`
 
