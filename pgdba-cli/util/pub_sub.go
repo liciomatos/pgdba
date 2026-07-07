@@ -17,6 +17,8 @@ type PubSubModel struct {
 	subTable     table.Model
 	pubCount     int
 	subCount     int
+	pubH         int // allocated height for the pub section (including table header lines)
+	subH         int // allocated height for the sub section (including table header lines)
 	width        int
 	height       int
 	initialModel func() tea.Model
@@ -95,18 +97,20 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 	// renders. SetHeight(h) sets viewport.Height = h - headerLines, so passing just the
 	// data count results in 0 visible rows.
 	const tableHeaderLines = 2
+	initPubH := max2(len(pubRows), 1) + tableHeaderLines
+	initSubH := max2(len(subRows), 1) + tableHeaderLines
 	pubTbl := table.New(
 		table.WithColumns(pubColumns()),
 		table.WithRows(pubRows),
 		table.WithFocused(true),
-		table.WithHeight(max2(len(pubRows), 1)+tableHeaderLines),
+		table.WithHeight(initPubH),
 		table.WithStyles(InfoTableStyles()),
 	)
 	subTbl := table.New(
 		table.WithColumns(subColumns()),
 		table.WithRows(subRows),
 		table.WithFocused(true),
-		table.WithHeight(max2(len(subRows), 1)+tableHeaderLines),
+		table.WithHeight(initSubH),
 		table.WithStyles(InfoTableStyles()),
 	)
 
@@ -115,6 +119,8 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 		subTable:     subTbl,
 		pubCount:     len(pubs),
 		subCount:     len(subs),
+		pubH:         initPubH,
+		subH:         initSubH,
 		width:        120,
 		height:       40,
 		initialModel: initialModel,
@@ -232,6 +238,8 @@ func (m PubSubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Subscriptions get the rest; ensure at least 1 data row visible.
 		subH := max2(available-pubH, tableHeaderLines+1)
 
+		m.pubH = pubH
+		m.subH = subH
 		m.pubTable.SetHeight(pubH)
 		m.subTable.SetHeight(subH)
 
@@ -262,6 +270,9 @@ func (m PubSubModel) View() string {
 	s += pubLabel + "\n"
 	if m.pubCount == 0 {
 		s += HintStyle.Render("  No publications defined on this server.") + "\n"
+		// Pad so the sub section starts at the same vertical position as when the pub
+		// table is present. pubH-1 = pubH lines expected minus the 1 hint line rendered.
+		s += strings.Repeat("\n", max2(m.pubH-1, 0))
 	} else {
 		// ColorizeTable colors columns: All/Insert/Update/Delete/Truncate/ViaRoot (cols 2–7) yes=green no=gray
 		pubRules := buildBoolColorRules(2, 7)
@@ -274,6 +285,8 @@ func (m PubSubModel) View() string {
 	s += subLabel + "\n"
 	if m.subCount == 0 {
 		s += HintStyle.Render("  No subscriptions defined on this server.") + "\n"
+		// Same padding logic: fill the height the sub table would have occupied.
+		s += strings.Repeat("\n", max2(m.subH-1, 0))
 	} else {
 		s += ColorizeTable(m.subTable.View(), m.subTable.Columns(), buildSubColorRules())
 	}
