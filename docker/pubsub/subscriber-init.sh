@@ -31,4 +31,8 @@ CREATE SUBSCRIPTION orders_sub
 CREATE SUBSCRIPTION inventory_sub
     CONNECTION 'host=publisher port=5432 user=postgres password=postgres dbname=sales'
     PUBLICATION inventory_pub;
+
+-- Also publish locally — models a cascading replication node that is both a
+-- subscriber (receiving from the publisher) and a publisher (forwarding downstream).
+CREATE PUBLICATION orders_mirror FOR TABLE orders;
 SQL

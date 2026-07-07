@@ -124,6 +124,60 @@ func TestCheckPubSub_ReturnsModel(t *testing.T) {
 	}
 }
 
+// TestCheckPubSub_BothPopulated verifies the screen model when the same instance has both
+// publications and subscriptions — a valid real-world setup for cascading replication nodes.
+// The subscription is created with connect=false / slot_name=NONE so no external publisher
+// is required; the record still appears in pg_subscription and exercises the full layout path.
+func TestCheckPubSub_BothPopulated(t *testing.T) {
+	if testing.Short() || skipIntegration {
+		t.Skip("skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	_, err := testDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pubsub_both_tbl (id serial PRIMARY KEY, val text)`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP TABLE IF EXISTS pubsub_both_tbl`)
+
+	_, err = testDB.ExecContext(ctx, `CREATE PUBLICATION pgdba_both_pub FOR TABLE pubsub_both_tbl`)
+	if err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP PUBLICATION IF EXISTS pgdba_both_pub`)
+
+	// connect=false + slot_name=NONE: inserts the pg_subscription row without
+	// dialling an external publisher or creating a replication slot.
+	_, err = testDB.ExecContext(ctx, `
+		CREATE SUBSCRIPTION pgdba_both_sub
+		    CONNECTION 'host=localhost port=5432 user=postgres dbname=postgres'
+		    PUBLICATION pgdba_both_pub
+		    WITH (connect = false, slot_name = NONE)`)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP SUBSCRIPTION IF EXISTS pgdba_both_sub`)
+
+	model := CheckPubSub(dummyInitialModel)
+	m, ok := model.(PubSubModel)
+	if !ok {
+		t.Fatalf("expected PubSubModel, got %T", model)
+	}
+	if m.pubCount == 0 {
+		t.Error("expected pubCount > 0")
+	}
+	if m.subCount == 0 {
+		t.Error("expected subCount > 0")
+	}
+
+	// View() must not panic and must produce non-empty output with both sections.
+	view := m.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+}
+
 func TestFetchPublications_TruncateFlag(t *testing.T) {
 	if testing.Short() || skipIntegration {
 		t.Skip("skipping integration test")
