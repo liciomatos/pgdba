@@ -1766,3 +1766,131 @@ func FetchSubscriptions(ctx context.Context, db *sql.DB) ([]Subscription, error)
 	}
 	return subscriptions, rows.Err()
 }
+
+// PublicationTable holds per-table details for a single publication,
+// joined with pg_stat_user_tables for live/dead row counts and vacuum history.
+type PublicationTable struct {
+	SchemaName string
+	TableName  string
+	Columns    string // "all columns" or "col1, col2, ..." (PG15+ column filters; older = always "all columns")
+	RowFilter  string // "" if none; expression string if row-level filter (PG15+)
+	LiveRows   int64
+	DeadRows   int64
+	SeqScans   int64
+	IdxScans   int64
+	LastVacuum string // "YYYY-MM-DD HH:MM" or "never"
+}
+
+// FetchPublicationTables returns per-table details for the named publication.
+// attnames and rowfilter were added to pg_publication_tables in PG15; on older
+// versions Columns is always "all columns" and RowFilter is always empty.
+func FetchPublicationTables(ctx context.Context, db *sql.DB, pubname string) ([]PublicationTable, error) {
+	// attnames (column filter list) and rowfilter added in PG15
+	attExpr := "'all columns'"
+	filterExpr := "''"
+	if pgMajorVersion() >= 15 {
+		attExpr = "COALESCE(array_to_string(pt.attnames, ', '), 'all columns')"
+		filterExpr = "COALESCE(pt.rowfilter::text, '')"
+	}
+
+	query := `
+		SELECT
+			pt.schemaname,
+			pt.tablename,
+			` + attExpr + ` AS columns,
+			` + filterExpr + ` AS row_filter,
+			COALESCE(s.n_live_tup, 0),
+			COALESCE(s.n_dead_tup, 0),
+			COALESCE(s.seq_scan, 0),
+			COALESCE(s.idx_scan, 0),
+			CASE
+				WHEN GREATEST(s.last_vacuum, s.last_autovacuum) IS NOT NULL
+				THEN to_char(GREATEST(s.last_vacuum, s.last_autovacuum), 'YYYY-MM-DD HH24:MI')
+				ELSE 'never'
+			END AS last_vacuum
+		FROM pg_publication_tables pt
+		LEFT JOIN pg_stat_user_tables s
+			ON s.schemaname = pt.schemaname AND s.relname = pt.tablename
+		WHERE pt.pubname = $1
+		ORDER BY pt.schemaname, pt.tablename`
+
+	rows, err := db.QueryContext(ctx, query, pubname)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []PublicationTable
+	for rows.Next() {
+		var t PublicationTable
+		if err := rows.Scan(
+			&t.SchemaName, &t.TableName, &t.Columns, &t.RowFilter,
+			&t.LiveRows, &t.DeadRows, &t.SeqScans, &t.IdxScans, &t.LastVacuum,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// SubscriptionTable holds per-table sync state and stats for a single subscription.
+type SubscriptionTable struct {
+	SchemaName string
+	TableName  string
+	SyncState  string // "ready", "synchronized", "copying", "finished", "initialize"
+	SyncLSN    string // "" if not yet set (initial copy in progress)
+	LiveRows   int64
+	InsRows    int64
+	UpdRows    int64
+	DelRows    int64
+}
+
+// FetchSubscriptionTables returns per-table sync state for the named subscription,
+// joined with pg_stat_user_tables for row-level insert/update/delete stats.
+// pg_subscription_rel is available since PG10 — no version gating needed.
+func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([]SubscriptionTable, error) {
+	query := `
+		SELECT
+			n.nspname AS schemaname,
+			c.relname AS tablename,
+			CASE sr.srsubstate
+				WHEN 'i' THEN 'initialize'
+				WHEN 'd' THEN 'copying'
+				WHEN 'f' THEN 'finished'
+				WHEN 's' THEN 'synchronized'
+				WHEN 'r' THEN 'ready'
+				ELSE sr.srsubstate::text
+			END AS sync_state,
+			COALESCE(sr.srsublsn::text, '') AS sync_lsn,
+			COALESCE(s.n_live_tup, 0),
+			COALESCE(s.n_tup_ins, 0),
+			COALESCE(s.n_tup_upd, 0),
+			COALESCE(s.n_tup_del, 0)
+		FROM pg_subscription_rel sr
+		JOIN pg_class c ON c.oid = sr.srrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_user_tables s
+			ON s.schemaname = n.nspname AND s.relname = c.relname
+		WHERE sr.srsubid = (SELECT oid FROM pg_subscription WHERE subname = $1)
+		ORDER BY n.nspname, c.relname`
+
+	rows, err := db.QueryContext(ctx, query, subname)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []SubscriptionTable
+	for rows.Next() {
+		var t SubscriptionTable
+		if err := rows.Scan(
+			&t.SchemaName, &t.TableName, &t.SyncState, &t.SyncLSN,
+			&t.LiveRows, &t.InsRows, &t.UpdRows, &t.DelRows,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}

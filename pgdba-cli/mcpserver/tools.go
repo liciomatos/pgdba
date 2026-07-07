@@ -1033,6 +1033,80 @@ type subscriptionResponse struct {
 	Failover        *bool   `json:"failover,omitempty"`
 }
 
+type publicationTableResponse struct {
+	SchemaName string `json:"schema_name"`
+	TableName  string `json:"table_name"`
+	Columns    string `json:"columns"`
+	RowFilter  string `json:"row_filter,omitempty"`
+	LiveRows   int64  `json:"live_rows"`
+	DeadRows   int64  `json:"dead_rows"`
+	SeqScans   int64  `json:"seq_scans"`
+	IdxScans   int64  `json:"idx_scans"`
+	LastVacuum string `json:"last_vacuum"`
+}
+
+func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pubname := strParam(req, "name", "")
+	if pubname == "" {
+		return mcp.NewToolResultError("name parameter is required"), nil
+	}
+	tables, err := util.FetchPublicationTables(ctx, config.Config.DB, pubname)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]publicationTableResponse, len(tables))
+	for i, t := range tables {
+		out[i] = publicationTableResponse{
+			SchemaName: t.SchemaName,
+			TableName:  t.TableName,
+			Columns:    t.Columns,
+			RowFilter:  t.RowFilter,
+			LiveRows:   t.LiveRows,
+			DeadRows:   t.DeadRows,
+			SeqScans:   t.SeqScans,
+			IdxScans:   t.IdxScans,
+			LastVacuum: t.LastVacuum,
+		}
+	}
+	return jsonResult(out)
+}
+
+type subscriptionTableResponse struct {
+	SchemaName string `json:"schema_name"`
+	TableName  string `json:"table_name"`
+	SyncState  string `json:"sync_state"`
+	SyncLSN    string `json:"sync_lsn,omitempty"`
+	LiveRows   int64  `json:"live_rows"`
+	InsRows    int64  `json:"ins_rows"`
+	UpdRows    int64  `json:"upd_rows"`
+	DelRows    int64  `json:"del_rows"`
+}
+
+func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	subname := strParam(req, "name", "")
+	if subname == "" {
+		return mcp.NewToolResultError("name parameter is required"), nil
+	}
+	tables, err := util.FetchSubscriptionTables(ctx, config.Config.DB, subname)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]subscriptionTableResponse, len(tables))
+	for i, t := range tables {
+		out[i] = subscriptionTableResponse{
+			SchemaName: t.SchemaName,
+			TableName:  t.TableName,
+			SyncState:  t.SyncState,
+			SyncLSN:    t.SyncLSN,
+			LiveRows:   t.LiveRows,
+			InsRows:    t.InsRows,
+			UpdRows:    t.UpdRows,
+			DelRows:    t.DelRows,
+		}
+	}
+	return jsonResult(out)
+}
+
 func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	subs, err := util.FetchSubscriptions(ctx, config.Config.DB)
 	if err != nil {

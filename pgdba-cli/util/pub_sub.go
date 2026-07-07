@@ -13,15 +13,16 @@ import (
 )
 
 type PubSubModel struct {
-	pubTable     table.Model
-	subTable     table.Model
-	pubCount     int
-	subCount     int
-	pubH         int // allocated height for the pub section (including table header lines)
-	subH         int // allocated height for the sub section (including table header lines)
-	width        int
-	height       int
-	initialModel func() tea.Model
+	pubTable      table.Model
+	subTable      table.Model
+	pubCount      int
+	subCount      int
+	pubH          int // allocated height for the pub section (including table header lines)
+	subH          int // allocated height for the sub section (including table header lines)
+	activeSection int // 0=publications, 1=subscriptions
+	width         int
+	height        int
+	initialModel  func() tea.Model
 }
 
 func pubColumns() []table.Column {
@@ -99,31 +100,49 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 	const tableHeaderLines = 2
 	initPubH := max2(len(pubRows), 1) + tableHeaderLines
 	initSubH := max2(len(subRows), 1) + tableHeaderLines
+
+	// Start on the subscriptions section if there are no publications.
+	activeSection := 0
+	if len(pubs) == 0 && len(subs) > 0 {
+		activeSection = 1
+	}
+
+	// Active section uses DefaultTableStyles (shows selection highlight for navigation).
+	// Inactive section uses InfoTableStyles (no highlight — plain list appearance).
+	pubStyles := InfoTableStyles()
+	subStyles := InfoTableStyles()
+	if activeSection == 0 && len(pubs) > 0 {
+		pubStyles = DefaultTableStyles()
+	} else if activeSection == 1 && len(subs) > 0 {
+		subStyles = DefaultTableStyles()
+	}
+
 	pubTbl := table.New(
 		table.WithColumns(pubColumns()),
 		table.WithRows(pubRows),
 		table.WithFocused(true),
 		table.WithHeight(initPubH),
-		table.WithStyles(InfoTableStyles()),
+		table.WithStyles(pubStyles),
 	)
 	subTbl := table.New(
 		table.WithColumns(subColumns()),
 		table.WithRows(subRows),
 		table.WithFocused(true),
 		table.WithHeight(initSubH),
-		table.WithStyles(InfoTableStyles()),
+		table.WithStyles(subStyles),
 	)
 
 	return PubSubModel{
-		pubTable:     pubTbl,
-		subTable:     subTbl,
-		pubCount:     len(pubs),
-		subCount:     len(subs),
-		pubH:         initPubH,
-		subH:         initSubH,
-		width:        120,
-		height:       40,
-		initialModel: initialModel,
+		pubTable:      pubTbl,
+		subTable:      subTbl,
+		pubCount:      len(pubs),
+		subCount:      len(subs),
+		pubH:          initPubH,
+		subH:          initSubH,
+		activeSection: activeSection,
+		width:         120,
+		height:        40,
+		initialModel:  initialModel,
 	}
 }
 
@@ -255,6 +274,49 @@ func (m PubSubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.initialModel(), nil
 		case "r":
 			return CheckPubSub(m.initialModel), nil
+
+		case "tab":
+			// Switch active section; only move if the target section has rows.
+			if m.activeSection == 0 && m.subCount > 0 {
+				m.activeSection = 1
+				m.pubTable.SetStyles(InfoTableStyles())
+				m.subTable.SetStyles(DefaultTableStyles())
+			} else if m.activeSection == 1 && m.pubCount > 0 {
+				m.activeSection = 0
+				m.subTable.SetStyles(InfoTableStyles())
+				m.pubTable.SetStyles(DefaultTableStyles())
+			}
+			return m, nil
+
+		case "up", "down", "k", "j", "pgup", "pgdown":
+			var cmd tea.Cmd
+			if m.activeSection == 0 && m.pubCount > 0 {
+				m.pubTable, cmd = m.pubTable.Update(msg)
+			} else if m.activeSection == 1 && m.subCount > 0 {
+				m.subTable, cmd = m.subTable.Update(msg)
+			}
+			return m, cmd
+
+		case "enter":
+			parentInitial := m.initialModel
+			if m.activeSection == 0 && m.pubCount > 0 {
+				row := m.pubTable.SelectedRow()
+				if len(row) > 0 {
+					pubName := row[0]
+					return CheckPubTableDetail(pubName, func() tea.Model {
+						return CheckPubSub(parentInitial)
+					}), nil
+				}
+			} else if m.activeSection == 1 && m.subCount > 0 {
+				row := m.subTable.SelectedRow()
+				if len(row) > 0 {
+					subName := row[0]
+					return CheckSubTableDetail(subName, func() tea.Model {
+						return CheckPubSub(parentInitial)
+					}), nil
+				}
+			}
+			return m, nil
 		}
 	}
 	return m, nil
@@ -262,11 +324,21 @@ func (m PubSubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m PubSubModel) View() string {
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
+	activeIndicator := lipgloss.NewStyle().Foreground(ColorBlue).Render("▶ ")
+	inactiveIndicator := "  "
+
+	pubPrefix := inactiveIndicator
+	subPrefix := inactiveIndicator
+	if m.activeSection == 0 {
+		pubPrefix = activeIndicator
+	} else {
+		subPrefix = activeIndicator
+	}
 
 	s := RenderHeader("Replication — Pub/Sub") + "\n"
 
 	// Publications section
-	pubLabel := sectionStyle.Render(fmt.Sprintf("Publications  (%d)", m.pubCount))
+	pubLabel := pubPrefix + sectionStyle.Render(fmt.Sprintf("Publications  (%d)", m.pubCount))
 	s += pubLabel + "\n"
 	if m.pubCount == 0 {
 		s += HintStyle.Render("  No publications defined on this server.") + "\n"
@@ -281,7 +353,7 @@ func (m PubSubModel) View() string {
 	s += "\n"
 
 	// Subscriptions section
-	subLabel := sectionStyle.Render(fmt.Sprintf("Subscriptions  (%d)", m.subCount))
+	subLabel := subPrefix + sectionStyle.Render(fmt.Sprintf("Subscriptions  (%d)", m.subCount))
 	s += subLabel + "\n"
 	if m.subCount == 0 {
 		s += HintStyle.Render("  No subscriptions defined on this server.") + "\n"
@@ -291,7 +363,7 @@ func (m PubSubModel) View() string {
 		s += ColorizeTable(m.subTable.View(), m.subTable.Columns(), buildSubColorRules())
 	}
 
-	s += "\n" + FooterStyle.Render("r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • tab switch section • enter detail • r refresh • q back")
 	return s
 }
 

@@ -230,6 +230,20 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSubscriptions)
 
+	s.AddTool(mcp.NewTool("check_publication_tables",
+		mcp.WithDescription("Tables and statistics (live/dead rows, seq/idx scans, last vacuum) for a specific publication. PG15+ also returns column filters and row filters."),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Publication name")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckPublicationTables)
+
+	s.AddTool(mcp.NewTool("check_subscription_tables",
+		mcp.WithDescription("Per-table sync state and row stats (live rows, INS/UPD/DEL) for a specific subscription."),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Subscription name")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSubscriptionTables)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))
