@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -81,7 +82,7 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 	for _, sub := range subs {
 		subRows = append(subRows, table.Row{
 			sub.SubName,
-			deriveSubStatus(sub),
+			subStatusText(sub),
 			sub.Publications,
 			formatPID(sub.WorkerPID),
 			sub.ReceivedLSN,
@@ -120,15 +121,16 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 	}
 }
 
-// deriveSubStatus returns a severity-colored status string based on enabled flag and PID.
-func deriveSubStatus(sub Subscription) string {
+// subStatusText returns a plain-text status derived from enabled flag and worker PID.
+// Color is applied post-render via buildSubColorRules — never embed ANSI in cell data.
+func subStatusText(sub Subscription) string {
 	switch {
 	case !sub.Enabled:
-		return SeverityColor("disabled", 3)
+		return "disabled"
 	case sub.WorkerPID != nil:
-		return SeverityColor("active", 0)
+		return "active"
 	default:
-		return SeverityColor("down", 2)
+		return "down"
 	}
 }
 
@@ -151,16 +153,50 @@ func formatReceiveTime(t *string) string {
 	return s
 }
 
+// formatErrors returns a plain-text error summary ("N/A", "0 / 0", "3 / 1", …).
+// Color is applied post-render via buildSubColorRules — never embed ANSI in cell data.
 func formatErrors(applyErr, syncErr *int64) string {
 	if applyErr == nil {
-		return SeverityColor("N/A", 3)
+		return "N/A"
 	}
-	total := *applyErr + *syncErr
-	errStr := fmt.Sprintf("%d / %d", *applyErr, *syncErr)
-	if total > 0 {
-		return SeverityColor(errStr, 2)
+	return fmt.Sprintf("%d / %d", *applyErr, *syncErr)
+}
+
+// buildSubColorRules returns ColorRules for the subscriptions table:
+// col 1 (Status): active=green, down=red, disabled=gray.
+// col 6 (Errors): N/A=gray, "0 / 0"=green, any errors=red.
+func buildSubColorRules() []ColorRule {
+	return []ColorRule{
+		{Column: 1, Colorize: func(v string) int {
+			switch strings.TrimSpace(v) {
+			case "active":
+				return 0
+			case "down":
+				return 2
+			case "disabled":
+				return 3
+			}
+			return -1
+		}},
+		{Column: 6, Colorize: func(v string) int {
+			v = strings.TrimSpace(v)
+			if v == "N/A" {
+				return 3
+			}
+			parts := strings.SplitN(v, " / ", 2)
+			if len(parts) == 2 {
+				a, errA := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+				b, errB := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+				if errA == nil && errB == nil {
+					if a+b > 0 {
+						return 2
+					}
+					return 0
+				}
+			}
+			return -1
+		}},
 	}
-	return SeverityColor(errStr, 0)
 }
 
 // max2 returns the larger of two ints (Go 1.21 adds max/min builtins; use helper for compat).
@@ -239,7 +275,7 @@ func (m PubSubModel) View() string {
 	if m.subCount == 0 {
 		s += HintStyle.Render("  No subscriptions defined on this server.") + "\n"
 	} else {
-		s += m.subTable.View()
+		s += ColorizeTable(m.subTable.View(), m.subTable.Columns(), buildSubColorRules())
 	}
 
 	s += "\n" + FooterStyle.Render("r refresh • q back")

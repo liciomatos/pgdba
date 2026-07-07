@@ -270,3 +270,33 @@ All model types use **value receivers** (`func (m MyModel) Method()`). Never use
 
 ### Bubbles table cell count constraint
 `renderRow` in Bubbles iterates over row cells and accesses `m.cols[i]` for each cell. The row cell count **must exactly equal** the column count. Extra cells cause a panic. Store out-of-band data (e.g., full query text) in a `map[string]string` keyed by a unique identifier from the row, never as extra hidden cells.
+
+### No ANSI codes in table cells — always use ColorizeTable
+
+Never call `SeverityColor`, `lipgloss.Render`, or any function that returns ANSI escape sequences as the value of a `table.Row` cell. Bubbles uses `runewidth.Truncate` internally, which counts ANSI bytes as visible characters and corrupts column alignment in narrow columns.
+
+**Rule**: store plain text in `table.Row` cells; apply color post-render via `ColorizeTable` with `[]ColorRule` definitions.
+
+```go
+// WRONG — SeverityColor embeds ANSI escape bytes in the cell
+row = table.Row{name, SeverityColor("active", 0), ...}
+
+// CORRECT — plain text in row, color rule applied at render time
+row = table.Row{name, "active", ...}
+// in View():
+s += ColorizeTable(m.table.View(), m.table.Columns(), []ColorRule{
+    {Column: 1, Colorize: func(v string) int {
+        switch strings.TrimSpace(v) {
+        case "active": return 0
+        case "down":   return 2
+        }
+        return -1
+    }},
+})
+```
+
+See `buildBoolColorRules` and `buildSubColorRules` in `util/pub_sub.go` for reusable rule patterns.
+
+### Screen footer convention
+
+Every `View()` must end with `"\n" + FooterStyle.Render("…hints…")`. The leading `"\n"` creates a single blank-line gap between the last table and the footer text. Do not add an extra `"\n"` after the table view — it would break the height budget and push the footer below the terminal bottom.
