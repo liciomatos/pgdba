@@ -178,6 +178,158 @@ func TestCheckPubSub_BothPopulated(t *testing.T) {
 	}
 }
 
+func TestFetchPublicationTables_WithPublication(t *testing.T) {
+	if testing.Short() || skipIntegration {
+		t.Skip("skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	_, err := testDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pubsub_detail_tbl (id serial PRIMARY KEY, val text, ts timestamptz)`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP TABLE IF EXISTS pubsub_detail_tbl`)
+
+	_, err = testDB.ExecContext(ctx, `CREATE PUBLICATION pgdba_detail_pub FOR TABLE pubsub_detail_tbl`)
+	if err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP PUBLICATION IF EXISTS pgdba_detail_pub`)
+
+	tables, err := FetchPublicationTables(ctx, testDB, "pgdba_detail_pub")
+	if err != nil {
+		t.Fatalf("FetchPublicationTables returned error: %v", err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(tables))
+	}
+	got := tables[0]
+	if got.TableName != "pubsub_detail_tbl" {
+		t.Errorf("expected table pubsub_detail_tbl, got %q", got.TableName)
+	}
+	if got.Columns == "" {
+		t.Error("Columns field should not be empty")
+	}
+	// LastVacuum is "never" for a freshly created table — just check it's non-empty.
+	if got.LastVacuum == "" {
+		t.Error("LastVacuum field should not be empty")
+	}
+}
+
+func TestCheckPubTableDetail_ReturnsModel(t *testing.T) {
+	if testing.Short() || skipIntegration {
+		t.Skip("skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	_, err := testDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pubsub_model_tbl (id serial PRIMARY KEY)`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP TABLE IF EXISTS pubsub_model_tbl`)
+
+	_, err = testDB.ExecContext(ctx, `CREATE PUBLICATION pgdba_model_pub FOR TABLE pubsub_model_tbl`)
+	if err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP PUBLICATION IF EXISTS pgdba_model_pub`)
+
+	model := CheckPubTableDetail("pgdba_model_pub", dummyInitialModel)
+	if _, ok := model.(ErrorModel); ok {
+		t.Errorf("expected PubTableDetailModel, got ErrorModel")
+	}
+	if m, ok := model.(PubTableDetailModel); ok {
+		view := m.View()
+		if view == "" {
+			t.Error("View() returned empty string")
+		}
+	} else {
+		t.Errorf("expected PubTableDetailModel, got %T", model)
+	}
+}
+
+func TestFetchSubscriptionTables_WithSubscription(t *testing.T) {
+	if testing.Short() || skipIntegration {
+		t.Skip("skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	_, err := testDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pubsub_sub_tbl (id serial PRIMARY KEY, val text)`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP TABLE IF EXISTS pubsub_sub_tbl`)
+
+	_, err = testDB.ExecContext(ctx, `CREATE PUBLICATION pgdba_sub_pub FOR TABLE pubsub_sub_tbl`)
+	if err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP PUBLICATION IF EXISTS pgdba_sub_pub`)
+
+	_, err = testDB.ExecContext(ctx, `
+		CREATE SUBSCRIPTION pgdba_sub_detail
+		    CONNECTION 'host=localhost port=5432 user=postgres dbname=postgres'
+		    PUBLICATION pgdba_sub_pub
+		    WITH (connect = false, slot_name = NONE)`)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP SUBSCRIPTION IF EXISTS pgdba_sub_detail`)
+
+	tables, err := FetchSubscriptionTables(ctx, testDB, "pgdba_sub_detail")
+	if err != nil {
+		t.Fatalf("FetchSubscriptionTables returned error: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Skip("no subscription_rel rows yet — worker not started (connect=false)")
+	}
+	for _, table := range tables {
+		if table.SyncState == "" {
+			t.Errorf("SyncState should not be empty for table %s.%s", table.SchemaName, table.TableName)
+		}
+	}
+}
+
+func TestCheckSubTableDetail_ReturnsModel(t *testing.T) {
+	if testing.Short() || skipIntegration {
+		t.Skip("skipping integration test")
+	}
+
+	ctx := context.Background()
+
+	_, err := testDB.ExecContext(ctx, `CREATE PUBLICATION pgdba_submodel_pub FOR ALL TABLES`)
+	if err != nil {
+		t.Fatalf("create publication: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP PUBLICATION IF EXISTS pgdba_submodel_pub`)
+
+	_, err = testDB.ExecContext(ctx, `
+		CREATE SUBSCRIPTION pgdba_submodel_sub
+		    CONNECTION 'host=localhost port=5432 user=postgres dbname=postgres'
+		    PUBLICATION pgdba_submodel_pub
+		    WITH (connect = false, slot_name = NONE)`)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	defer testDB.ExecContext(ctx, `DROP SUBSCRIPTION IF EXISTS pgdba_submodel_sub`)
+
+	model := CheckSubTableDetail("pgdba_submodel_sub", dummyInitialModel)
+	if _, ok := model.(ErrorModel); ok {
+		t.Errorf("expected SubTableDetailModel, got ErrorModel")
+	}
+	if m, ok := model.(SubTableDetailModel); ok {
+		view := m.View()
+		if view == "" {
+			t.Error("View() returned empty string")
+		}
+	} else {
+		t.Errorf("expected SubTableDetailModel, got %T", model)
+	}
+}
+
 func TestFetchPublications_TruncateFlag(t *testing.T) {
 	if testing.Short() || skipIntegration {
 		t.Skip("skipping integration test")
