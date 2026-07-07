@@ -979,3 +979,81 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		},
 	})
 }
+
+// --- publications ---
+
+type publicationResponse struct {
+	PubName    string `json:"pub_name"`
+	AllTables  bool   `json:"all_tables"`
+	Insert     bool   `json:"insert"`
+	Update     bool   `json:"update"`
+	Delete     bool   `json:"delete"`
+	Truncate   bool   `json:"truncate"`
+	ViaRoot    bool   `json:"via_root"`
+	GenCols    *bool  `json:"gen_cols,omitempty"`
+	TableCount int    `json:"table_count"`
+}
+
+func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pubs, err := util.FetchPublications(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]publicationResponse, len(pubs))
+	for i, pub := range pubs {
+		out[i] = publicationResponse{
+			PubName:    pub.PubName,
+			AllTables:  pub.AllTables,
+			Insert:     pub.Insert,
+			Update:     pub.Update,
+			Delete:     pub.Delete,
+			Truncate:   pub.Truncate,
+			ViaRoot:    pub.ViaRoot,
+			GenCols:    pub.GenCols,
+			TableCount: pub.TableCount,
+		}
+	}
+	return jsonResult(out)
+}
+
+// --- subscriptions ---
+
+type subscriptionResponse struct {
+	SubName         string  `json:"sub_name"`
+	Enabled         bool    `json:"enabled"`
+	SlotName        string  `json:"slot_name"`
+	Publications    string  `json:"publications"`
+	WorkerPID       *int    `json:"worker_pid,omitempty"`
+	ReceivedLSN     string  `json:"received_lsn"`
+	LastReceiveTime *string `json:"last_receive_time,omitempty"`
+	ApplyErrorCount *int64  `json:"apply_error_count,omitempty"`
+	SyncErrorCount  *int64  `json:"sync_error_count,omitempty"`
+	TwoPhaseState   *string `json:"two_phase_state,omitempty"`
+	DisableOnError  *bool   `json:"disable_on_error,omitempty"`
+	Failover        *bool   `json:"failover,omitempty"`
+}
+
+func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	subs, err := util.FetchSubscriptions(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]subscriptionResponse, len(subs))
+	for i, sub := range subs {
+		out[i] = subscriptionResponse{
+			SubName:         sub.SubName,
+			Enabled:         sub.Enabled,
+			SlotName:        sub.SlotName,
+			Publications:    sub.Publications,
+			WorkerPID:       sub.WorkerPID,
+			ReceivedLSN:     sub.ReceivedLSN,
+			LastReceiveTime: sub.LastReceiveTime,
+			ApplyErrorCount: sub.ApplyErrorCount,
+			SyncErrorCount:  sub.SyncErrorCount,
+			TwoPhaseState:   sub.TwoPhaseState,
+			DisableOnError:  sub.DisableOnError,
+			Failover:        sub.Failover,
+		}
+	}
+	return jsonResult(out)
+}

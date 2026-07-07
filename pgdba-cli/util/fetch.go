@@ -1584,3 +1584,182 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 
 	return stats, nil
 }
+
+// Publication represents a row from pg_publication with the table count from pg_publication_tables.
+type Publication struct {
+	PubName    string
+	AllTables  bool
+	Insert     bool
+	Update     bool
+	Delete     bool
+	Truncate   bool
+	ViaRoot    bool
+	GenCols    *bool // PG17+; nil on PG13–16 (generated columns included)
+	TableCount int
+}
+
+// Subscription represents a row from pg_subscription joined with pg_stat_subscription
+// (apply worker only) and, on PG15+, pg_stat_subscription_stats.
+// Version-specific columns are returned as nullable pointers; nil means the column
+// does not exist on this PostgreSQL version.
+type Subscription struct {
+	SubName         string
+	Enabled         bool
+	SlotName        string
+	Publications    string  // array_to_string(subpublications, ', ')
+	WorkerPID       *int    // nil when subscription worker is not running
+	ReceivedLSN     string
+	LastReceiveTime *string // formatted timestamp; nil when never received
+	ApplyErrorCount *int64  // PG15+; nil on PG13–14
+	SyncErrorCount  *int64  // PG15+; nil on PG13–14
+	TwoPhaseState   *string // PG15+: 'd'=disabled 'p'=pending 'e'=enabled
+	DisableOnError  *bool   // PG16+
+	Failover        *bool   // PG17+
+}
+
+// FetchPublications returns all publications defined on the connected server.
+// pubgencols (whether generated columns are included) was added in PG17; on
+// older versions GenCols is nil.
+func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
+	genColsExpr := "false AS pubgencols"
+	genColsGroup := "false"
+	if pgMajorVersion() >= 17 {
+		genColsExpr = "p.pubgencols"
+		genColsGroup = "p.pubgencols"
+	}
+
+	query := `
+		SELECT
+			p.pubname, p.puballtables, p.pubinsert, p.pubupdate,
+			p.pubdelete, p.pubtruncate, p.pubviaroot, ` + genColsExpr + `,
+			COUNT(pt.tablename) AS table_count
+		FROM pg_publication p
+		LEFT JOIN pg_publication_tables pt ON pt.pubname = p.pubname
+		GROUP BY p.pubname, p.puballtables, p.pubinsert, p.pubupdate,
+		         p.pubdelete, p.pubtruncate, p.pubviaroot, ` + genColsGroup + `
+		ORDER BY p.pubname`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var publications []Publication
+	for rows.Next() {
+		var pub Publication
+		var genCols sql.NullBool
+		if err := rows.Scan(
+			&pub.PubName, &pub.AllTables, &pub.Insert, &pub.Update,
+			&pub.Delete, &pub.Truncate, &pub.ViaRoot, &genCols, &pub.TableCount,
+		); err != nil {
+			return nil, err
+		}
+		if genCols.Valid {
+			pub.GenCols = &genCols.Bool
+		}
+		publications = append(publications, pub)
+	}
+	return publications, rows.Err()
+}
+
+// FetchSubscriptions returns all subscriptions on the connected server, joined
+// with pg_stat_subscription (apply worker) and, when PG15+, pg_stat_subscription_stats.
+// Version-specific columns are returned as nullable pointers; nil means the column
+// does not exist on this PostgreSQL version.
+func FetchSubscriptions(ctx context.Context, db *sql.DB) ([]Subscription, error) {
+	// subtwophasestate added in PG15
+	twophaseExpr := "NULL::text AS subtwophasestate"
+	if pgMajorVersion() >= 15 {
+		twophaseExpr = "s.subtwophasestate::text"
+	}
+
+	// subdisableonerr added in PG16
+	disableOnErrExpr := "NULL::boolean AS subdisableonerr"
+	if pgMajorVersion() >= 16 {
+		disableOnErrExpr = "s.subdisableonerr"
+	}
+
+	// subfailover added in PG17
+	failoverExpr := "NULL::boolean AS subfailover"
+	if pgMajorVersion() >= 17 {
+		failoverExpr = "s.subfailover"
+	}
+
+	// pg_stat_subscription_stats is a PG15+ view; guard the entire join
+	statsSelect := "NULL::bigint AS apply_error_count, NULL::bigint AS sync_error_count"
+	statsJoin := ""
+	if pgMajorVersion() >= 15 {
+		statsSelect = "COALESCE(stats.apply_error_count, 0), COALESCE(stats.sync_error_count, 0)"
+		statsJoin = "LEFT JOIN pg_stat_subscription_stats stats ON stats.subid = s.oid"
+	}
+
+	query := `
+		SELECT
+			s.subname,
+			s.subenabled,
+			s.subslotname,
+			array_to_string(s.subpublications, ', ') AS publications,
+			ss.pid,
+			COALESCE(ss.received_lsn::text, ''),
+			ss.last_msg_receipt_time::text,
+			` + statsSelect + `,
+			` + twophaseExpr + `,
+			` + disableOnErrExpr + `,
+			` + failoverExpr + `
+		FROM pg_subscription s
+		LEFT JOIN pg_stat_subscription ss ON ss.subid = s.oid AND ss.relid IS NULL
+		` + statsJoin + `
+		ORDER BY s.subname`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var subscriptions []Subscription
+	for rows.Next() {
+		var sub Subscription
+		var pid sql.NullInt64
+		var lastReceive sql.NullString
+		var applyErrors, syncErrors sql.NullInt64
+		var twophaseState sql.NullString
+		var disableOnErr, failover sql.NullBool
+
+		if err := rows.Scan(
+			&sub.SubName, &sub.Enabled, &sub.SlotName, &sub.Publications,
+			&pid, &sub.ReceivedLSN, &lastReceive,
+			&applyErrors, &syncErrors,
+			&twophaseState, &disableOnErr, &failover,
+		); err != nil {
+			return nil, err
+		}
+
+		if pid.Valid {
+			pidInt := int(pid.Int64)
+			sub.WorkerPID = &pidInt
+		}
+		if lastReceive.Valid {
+			sub.LastReceiveTime = &lastReceive.String
+		}
+		if applyErrors.Valid {
+			sub.ApplyErrorCount = &applyErrors.Int64
+		}
+		if syncErrors.Valid {
+			sub.SyncErrorCount = &syncErrors.Int64
+		}
+		if twophaseState.Valid {
+			sub.TwoPhaseState = &twophaseState.String
+		}
+		if disableOnErr.Valid {
+			sub.DisableOnError = &disableOnErr.Bool
+		}
+		if failover.Valid {
+			sub.Failover = &failover.Bool
+		}
+
+		subscriptions = append(subscriptions, sub)
+	}
+	return subscriptions, rows.Err()
+}

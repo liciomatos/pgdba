@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,9 +17,15 @@ type dashboardMetric struct {
 }
 
 type DashboardModel struct {
-	metrics []dashboardMetric
-	width   int
-	height  int
+	metrics    []dashboardMetric
+	connPct    float64
+	connUsed   int
+	connMax    int
+	connLevel  int
+	cacheHit   *float64 // nil when pg_stat_io has no data
+	cacheLevel int
+	width      int
+	height     int
 }
 
 func CheckDashboard() tea.Model {
@@ -34,19 +41,23 @@ func CheckDashboard() tea.Model {
 		}
 	}
 
-	var metrics []dashboardMetric
-
 	connLevel := 0
 	if data.ConnectionPct >= 90 {
 		connLevel = 2
 	} else if data.ConnectionPct >= 70 {
 		connLevel = 1
 	}
-	metrics = append(metrics, dashboardMetric{
-		"Connections",
-		fmt.Sprintf("%d / %d  (%.0f%%)", data.UsedConnections, data.MaxConnections, data.ConnectionPct),
-		connLevel,
-	})
+
+	cacheLevel := 0
+	if data.CacheHitRatio != nil {
+		if *data.CacheHitRatio < 70 {
+			cacheLevel = 2
+		} else if *data.CacheHitRatio < 90 {
+			cacheLevel = 1
+		}
+	}
+
+	var metrics []dashboardMetric
 
 	metrics = append(metrics, dashboardMetric{"Active queries", fmt.Sprintf("%d", data.ActiveQueries), 0})
 
@@ -67,18 +78,6 @@ func CheckDashboard() tea.Model {
 			slowLevel = 1
 		}
 		metrics = append(metrics, dashboardMetric{slowLabel, fmt.Sprintf("%d", data.SlowQueryCount), slowLevel})
-	}
-
-	if data.CacheHitRatio != nil {
-		cacheLevel := 0
-		if *data.CacheHitRatio < 70 {
-			cacheLevel = 2
-		} else if *data.CacheHitRatio < 90 {
-			cacheLevel = 1
-		}
-		metrics = append(metrics, dashboardMetric{"Cache hit ratio", fmt.Sprintf("%.1f%%", *data.CacheHitRatio), cacheLevel})
-	} else {
-		metrics = append(metrics, dashboardMetric{"Cache hit ratio", "N/A", 0})
 	}
 
 	deadLevel := 0
@@ -112,7 +111,17 @@ func CheckDashboard() tea.Model {
 		})
 	}
 
-	return DashboardModel{metrics: metrics, width: 80, height: 24}
+	return DashboardModel{
+		metrics:    metrics,
+		connPct:    data.ConnectionPct,
+		connUsed:   data.UsedConnections,
+		connMax:    data.MaxConnections,
+		connLevel:  connLevel,
+		cacheHit:   data.CacheHitRatio,
+		cacheLevel: cacheLevel,
+		width:      80,
+		height:     24,
+	}
 }
 
 func (m DashboardModel) Init() tea.Cmd { return nil }
@@ -134,6 +143,21 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// barWidth returns the number of block characters for the progress bar,
+// scaled to the terminal width so the bar fills the available space.
+func (m DashboardModel) barWidth() int {
+	// 2 indent + 28 label + 2 gap + 12 summary + 2 gap = 46 chars fixed left
+	// RenderBar appends " xx.x%" = 7 chars fixed right
+	w := m.width - 46 - 7
+	if w < 8 {
+		return 8
+	}
+	if w > 60 {
+		return 60
+	}
+	return w
+}
+
 func (m DashboardModel) View() string {
 	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
 	sep := lipgloss.NewStyle().Foreground(ColorGray).Render(" › ")
@@ -143,20 +167,49 @@ func (m DashboardModel) View() string {
 			config.Config.User, config.Config.Host, config.Config.Port,
 			config.Config.DBName, config.Config.Version),
 	)
-	s := fmt.Sprintf("%s%s%s\n%s\n\n", logo, sep, name, conn)
 
-	labelW := 28
-	labelStyle := lipgloss.NewStyle().Width(labelW).Foreground(ColorGray)
+	labelStyle := lipgloss.NewStyle().Width(28).Foreground(ColorGray)
 	colors := []lipgloss.Color{ColorGreen, ColorYellow, ColorRed}
+	bw := m.barWidth()
 
+	s := fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
+	s += "\n"
+
+	// Connection utilization bar
+	connSummary := fmt.Sprintf("%d / %d", m.connUsed, m.connMax)
+	connBar := SeverityColor(RenderBar(m.connPct, bw), m.connLevel)
+	s += fmt.Sprintf("  %-28s  %-12s  %s\n",
+		labelStyle.Render("Connections"), connSummary, connBar)
+
+	// Cache hit bar (blank placeholder when data unavailable)
+	if m.cacheHit != nil {
+		cacheBar := SeverityColor(RenderBar(*m.cacheHit, bw), m.cacheLevel)
+		s += fmt.Sprintf("  %-28s  %-12s  %s\n",
+			labelStyle.Render("Cache hit ratio"), "", cacheBar)
+	} else {
+		s += fmt.Sprintf("  %-28s  %s\n",
+			labelStyle.Render("Cache hit ratio"),
+			lipgloss.NewStyle().Foreground(ColorGray).Render("N/A"))
+	}
+	s += "\n"
+
+	// Remaining counters (no bar)
 	for _, metric := range m.metrics {
 		label := labelStyle.Render(metric.label)
 		value := lipgloss.NewStyle().Foreground(colors[metric.level]).Bold(metric.level > 0).Render(metric.value)
 		s += fmt.Sprintf("  %s  %s\n", label, value)
 	}
 
-	// Footer: each shortcut is rendered as a bold blue key + a gray label so the
-	// navigation hints are easy to scan without blending into surrounding text.
+	// Height-aware padding: push shortcuts to the bottom of the terminal.
+	// Content lines: 2 header + 1 blank + 2 bars + 1 blank + len(metrics) = 6 + len(metrics)
+	// Footer lines: 1 blank + 1 divider + 3 rows = 5
+	contentLines := 6 + len(m.metrics)
+	footerLines := 5
+	padding := m.height - contentLines - footerLines
+	if padding > 0 {
+		s += strings.Repeat("\n", padding)
+	}
+
 	renderKey   := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
 	renderLabel := lipgloss.NewStyle().Foreground(ColorGray).Render
 
@@ -181,6 +234,7 @@ func (m DashboardModel) View() string {
 	shortcutRow3 := renderKey("S") + " " + renderLabel("db-size") + "  " +
 		renderKey("t") + " " + renderLabel("temp-files") + "  " +
 		renderKey("m") + " " + renderLabel("memory") + "  " +
+		renderKey("R") + " " + renderLabel("pub/sub") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 

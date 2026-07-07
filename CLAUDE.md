@@ -152,7 +152,7 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
 
 ### Global key conflicts — implement `ConsumesKey`
 
-The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `1`–`0`, …)
+The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `R`, `1`–`0`, …)
 **before** forwarding the message to the child model. If a screen needs to use one of those
 keys for a screen-specific action, implement the `keyConsumer` interface:
 

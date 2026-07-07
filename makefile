@@ -69,6 +69,26 @@ replication-down:
 	@echo "Stopping replication test environment..."
 	$(COMPOSE) -f docker/replication/docker-compose.yml down -v
 
+# Start the logical replication pub/sub test environment (publisher port 5434, subscriber port 5435)
+pubsub-up:
+	@echo "Starting pub/sub test environment..."
+	$(COMPOSE) -f docker/pubsub/docker-compose.yml up -d
+
+# Stop and remove the pub/sub test environment
+pubsub-down:
+	@echo "Stopping pub/sub test environment..."
+	$(COMPOSE) -f docker/pubsub/docker-compose.yml down -v
+
+# Connect to the pub/sub publisher (port 5434, sales db)
+run-pub: build
+	@echo "Connecting to pub/sub publisher..."
+	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=sales --sslmode=disable --port=5434
+
+# Connect to the pub/sub subscriber (port 5435, sales db)
+run-sub: build
+	@echo "Connecting to pub/sub subscriber..."
+	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=sales --sslmode=disable --port=5435
+
 # Start the MCP server against the local dev database (requires docker-up first).
 # Runs in the foreground on MCP_PORT so it can be pointed at from Claude Code.
 mcp-up: build
@@ -109,7 +129,11 @@ help:
 	@echo "  replication-down    Stop and remove replication test environment"
 	@echo "  mcp-up              Start the MCP server against the local dev database (mydb)"
 	@echo "  mcp-up-repl         Start the MCP server against the replication test environment (testdb)"
+	@echo "  pubsub-up           Start logical replication pub/sub test environment"
+	@echo "  pubsub-down         Stop and remove pub/sub test environment"
+	@echo "  run-pub             Connect to pub/sub publisher (port 5434)"
+	@echo "  run-sub             Connect to pub/sub subscriber (port 5435)"
 	@echo "  test-pg-matrix      Run integration tests against every supported PostgreSQL version (13-18)"
 	@echo "  help                Show this help message"
 
-.PHONY: build run run-repl docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down mcp-up mcp-up-repl test-pg-matrix help
+.PHONY: build run run-repl run-pub run-sub docker-up docker-down clean seed scenario-locks scenario-longrunning scenario-slots scenarios-clean replication-up replication-down pubsub-up pubsub-down mcp-up mcp-up-repl test-pg-matrix help

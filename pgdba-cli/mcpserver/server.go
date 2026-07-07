@@ -218,6 +218,18 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckMemoryStats)
 
+	s.AddTool(mcp.NewTool("check_publications",
+		mcp.WithDescription("Logical replication publications defined on this server with per-operation flags and table count."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckPublications)
+
+	s.AddTool(mcp.NewTool("check_subscriptions",
+		mcp.WithDescription("Logical replication subscriptions with connection status, received LSN, and error counts (PG15+)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSubscriptions)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))
