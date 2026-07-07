@@ -1621,11 +1621,14 @@ type Subscription struct {
 // pubgencols (whether generated columns are included) was added in PG17; on
 // older versions GenCols is nil.
 func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
+	// pubgencols was added in PG17; emit a constant false for older versions.
+	// The constant must NOT appear in GROUP BY — PostgreSQL rejects non-integer
+	// constants there. On PG17+ the real column is included in GROUP BY.
 	genColsExpr := "false AS pubgencols"
-	genColsGroup := "false"
+	genColsGroup := ""
 	if pgMajorVersion() >= 17 {
 		genColsExpr = "p.pubgencols"
-		genColsGroup = "p.pubgencols"
+		genColsGroup = ", p.pubgencols"
 	}
 
 	query := `
@@ -1636,7 +1639,7 @@ func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
 		FROM pg_publication p
 		LEFT JOIN pg_publication_tables pt ON pt.pubname = p.pubname
 		GROUP BY p.pubname, p.puballtables, p.pubinsert, p.pubupdate,
-		         p.pubdelete, p.pubtruncate, p.pubviaroot, ` + genColsGroup + `
+		         p.pubdelete, p.pubtruncate, p.pubviaroot` + genColsGroup + `
 		ORDER BY p.pubname`
 
 	rows, err := db.QueryContext(ctx, query)
