@@ -1840,6 +1840,7 @@ type SubscriptionTable struct {
 	TableName  string
 	SyncState  string // "ready", "synchronized", "copying", "finished", "initialize"
 	SyncLSN    string // "" if not yet set (initial copy in progress)
+	Columns    string // comma-separated non-system column names from pg_attribute
 	LiveRows   int64
 	InsRows    int64
 	UpdRows    int64
@@ -1863,6 +1864,7 @@ func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([
 				ELSE sr.srsubstate::text
 			END AS sync_state,
 			COALESCE(sr.srsublsn::text, '') AS sync_lsn,
+			COALESCE(attrs.col_names, '') AS columns,
 			COALESCE(s.n_live_tup, 0),
 			COALESCE(s.n_tup_ins, 0),
 			COALESCE(s.n_tup_upd, 0),
@@ -1870,6 +1872,12 @@ func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([
 		FROM pg_subscription_rel sr
 		JOIN pg_class c ON c.oid = sr.srrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
+		-- List non-system, non-dropped columns so the subscriber can see what the table contains.
+		LEFT JOIN LATERAL (
+			SELECT string_agg(a.attname, ', ' ORDER BY a.attnum) AS col_names
+			FROM pg_attribute a
+			WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		) attrs ON true
 		LEFT JOIN pg_stat_user_tables s
 			ON s.schemaname = n.nspname AND s.relname = c.relname
 		WHERE sr.srsubid = (SELECT oid FROM pg_subscription WHERE subname = $1)
@@ -1885,7 +1893,7 @@ func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([
 	for rows.Next() {
 		var t SubscriptionTable
 		if err := rows.Scan(
-			&t.SchemaName, &t.TableName, &t.SyncState, &t.SyncLSN,
+			&t.SchemaName, &t.TableName, &t.SyncState, &t.SyncLSN, &t.Columns,
 			&t.LiveRows, &t.InsRows, &t.UpdRows, &t.DelRows,
 		); err != nil {
 			return nil, err

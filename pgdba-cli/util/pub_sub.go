@@ -323,22 +323,23 @@ func (m PubSubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m PubSubModel) View() string {
-	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
-	activeIndicator := lipgloss.NewStyle().Foreground(ColorBlue).Render("▶ ")
-	inactiveIndicator := "  "
+	// Active section: bold blue. Inactive: gray faint. No prefix added — both labels
+	// and the table below them start at column 0, keeping horizontal alignment intact.
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
+	inactiveStyle := lipgloss.NewStyle().Foreground(ColorGray).Faint(true)
 
-	pubPrefix := inactiveIndicator
-	subPrefix := inactiveIndicator
+	pubStyle := inactiveStyle
+	subStyle := inactiveStyle
 	if m.activeSection == 0 {
-		pubPrefix = activeIndicator
+		pubStyle = activeStyle
 	} else {
-		subPrefix = activeIndicator
+		subStyle = activeStyle
 	}
 
 	s := RenderHeader("Replication — Pub/Sub") + "\n"
 
 	// Publications section
-	pubLabel := pubPrefix + sectionStyle.Render(fmt.Sprintf("Publications  (%d)", m.pubCount))
+	pubLabel := pubStyle.Render(fmt.Sprintf("Publications  (%d)", m.pubCount))
 	s += pubLabel + "\n"
 	if m.pubCount == 0 {
 		s += HintStyle.Render("  No publications defined on this server.") + "\n"
@@ -353,7 +354,7 @@ func (m PubSubModel) View() string {
 	s += "\n"
 
 	// Subscriptions section
-	subLabel := subPrefix + sectionStyle.Render(fmt.Sprintf("Subscriptions  (%d)", m.subCount))
+	subLabel := subStyle.Render(fmt.Sprintf("Subscriptions  (%d)", m.subCount))
 	s += subLabel + "\n"
 	if m.subCount == 0 {
 		s += HintStyle.Render("  No subscriptions defined on this server.") + "\n"

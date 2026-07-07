@@ -1076,6 +1076,7 @@ type subscriptionTableResponse struct {
 	TableName  string `json:"table_name"`
 	SyncState  string `json:"sync_state"`
 	SyncLSN    string `json:"sync_lsn,omitempty"`
+	Columns    string `json:"columns,omitempty"`
 	LiveRows   int64  `json:"live_rows"`
 	InsRows    int64  `json:"ins_rows"`
 	UpdRows    int64  `json:"upd_rows"`
@@ -1098,6 +1099,7 @@ func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest)
 			TableName:  t.TableName,
 			SyncState:  t.SyncState,
 			SyncLSN:    t.SyncLSN,
+			Columns:    t.Columns,
 			LiveRows:   t.LiveRows,
 			InsRows:    t.InsRows,
 			UpdRows:    t.UpdRows,

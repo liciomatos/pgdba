@@ -25,7 +25,7 @@ func pubTableDetailColumns() []table.Column {
 	return []table.Column{
 		{Title: "Schema", Width: 10},
 		{Title: "Table", Width: 22},
-		{Title: "Columns", Width: 16},
+		{Title: "Columns", Width: 30}, // stretched in WindowSizeMsg — content varies from "all columns" to long lists
 		{Title: "Row Filter", Width: 15},
 		{Title: "Live Rows", Width: 10},
 		{Title: "Dead Rows", Width: 10},
@@ -78,7 +78,8 @@ func (m PubTableDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		// -1 for the "publication: <name>" sub-heading line below the header
 		m.tableModel.SetHeight(TableHeight(msg.Height) - 1)
-		cols := StretchColumn(m.tableModel.Columns(), 1, msg.Width)
+		// Stretch col 2 (Columns) — its content is the most variable
+		cols := StretchColumn(m.tableModel.Columns(), 2, msg.Width)
 		m.tableModel.SetColumns(cols)
 		return m, nil
 
@@ -120,13 +121,13 @@ type SubTableDetailModel struct {
 func subTableDetailColumns() []table.Column {
 	return []table.Column{
 		{Title: "Schema", Width: 10},
-		{Title: "Table", Width: 22},
+		{Title: "Table", Width: 20},
 		{Title: "Sync State", Width: 12},
+		{Title: "Columns", Width: 30}, // stretched in WindowSizeMsg — shows subscribed table's columns from pg_attribute
 		{Title: "Live Rows", Width: 10},
 		{Title: "INS", Width: 8},
 		{Title: "UPD", Width: 8},
 		{Title: "DEL", Width: 8},
-		{Title: "Sync LSN", Width: 16},
 	}
 }
 
@@ -142,11 +143,11 @@ func CheckSubTableDetail(subname string, initialModel func() tea.Model) tea.Mode
 			t.SchemaName,
 			t.TableName,
 			t.SyncState,
+			t.Columns,
 			fmt.Sprintf("%d", t.LiveRows),
 			fmt.Sprintf("%d", t.InsRows),
 			fmt.Sprintf("%d", t.UpdRows),
 			fmt.Sprintf("%d", t.DelRows),
-			t.SyncLSN,
 		})
 	}
 
@@ -176,7 +177,8 @@ func (m SubTableDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		// -1 for the "subscription: <name>" sub-heading line below the header
 		m.tableModel.SetHeight(TableHeight(msg.Height) - 1)
-		cols := StretchColumn(m.tableModel.Columns(), 1, msg.Width)
+		// Stretch col 3 (Columns) — column lists vary widely in length
+		cols := StretchColumn(m.tableModel.Columns(), 3, msg.Width)
 		m.tableModel.SetColumns(cols)
 		return m, nil
 
