@@ -1686,7 +1686,7 @@ func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
 	}
 	defer rows.Close()
 
-	var publications []Publication
+	publications := []Publication{}
 	for rows.Next() {
 		var pub Publication
 		var genCols sql.NullBool
@@ -1739,7 +1739,7 @@ func FetchSubscriptions(ctx context.Context, db *sql.DB) ([]Subscription, error)
 		SELECT
 			s.subname,
 			s.subenabled,
-			s.subslotname,
+			COALESCE(s.subslotname, '') AS subslotname,
 			array_to_string(s.subpublications, ', ') AS publications,
 			ss.pid,
 			COALESCE(ss.received_lsn::text, ''),
@@ -1759,7 +1759,7 @@ func FetchSubscriptions(ctx context.Context, db *sql.DB) ([]Subscription, error)
 	}
 	defer rows.Close()
 
-	var subscriptions []Subscription
+	subscriptions := []Subscription{}
 	for rows.Next() {
 		var sub Subscription
 		var pid sql.NullInt64
