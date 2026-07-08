@@ -34,6 +34,12 @@ type RecordLocksModel struct {
 
 func (m RecordLocksModel) IsInputMode() bool { return m.filterMode }
 
+// ConsumesKey prevents the navigator from routing 't' to Temp Files —
+// the lock screen uses 't' to trigger backend termination.
+func (m RecordLocksModel) ConsumesKey(key string) bool {
+	return key == "t"
+}
+
 func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 	blocked, err := FetchBlockedQueries(context.Background(), config.Config.DB)
 	if err != nil {

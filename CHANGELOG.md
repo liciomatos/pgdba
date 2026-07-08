@@ -5,6 +5,44 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-08
+
+### Added
+- **Dashboard sections**: reorganized into three labeled panels — Activity (active queries,
+  blocked, wait events, long-running >60 s, slow queries, commit rate), Storage (dead tuples,
+  temp files, invalid indexes, DB size), and Server (replication slots, uptime) — with a
+  two-column layout and htop-style section dividers.
+- **Six new dashboard metrics**: long-running query count, wait-event count, temp-files bytes
+  for the current database, DB size (`pg_size_pretty`), commit ratio, and server uptime
+  (formatted as `Xd Xh Xm`). All fetched as lightweight aggregates on existing round-trips.
+- **Unified dev environment** (`make dev-up`): single command starts pg-main (primary +
+  publications), pg-replica (physical streaming standby), and pg-sub (logical subscriber) in
+  one docker-compose stack. Replaces the previous separate replication/pubsub targets.
+- `make run-sub` target to connect pgdba-cli to the logical subscriber (port 5434).
+- **Pub/Sub layout improvements**: adaptive height allocation gives the populated section
+  most of the terminal; both Publications and Subscriptions sections now stretch the Name
+  column (col 0) for visual consistency.
+- Unit tests for `PubSubModel` keyboard navigation: Tab section switching, Tab no-op when
+  target section is empty, Enter drill-down, Q to menu.
+
+### Fixed
+- `t` key in Blocked Queries screen was intercepted by the navigator and routed to Temp
+  Files instead of triggering backend termination — added `ConsumesKey("t")` to
+  `RecordLocksModel`.
+- `pg_stat_replication` LSN columns (`sent_lsn`, `write_lsn`, `flush_lsn`, `replay_lsn`)
+  can be NULL while a standby is in the `startup` state, causing a scan error — wrapped in
+  `COALESCE(..., '')`.
+- `pg_publication.pubgencols` changed type from `bool` to `char` (`'n'`/`'a'`) in PG18,
+  causing a driver scan error — added a PG18 gate that casts the column to bool via
+  `(pubgencols != 'n')`.
+- `make dev-up` hanging at slot creation: `pg_create_logical_replication_slot` blocked while
+  subscription workers held open transactions during initial table sync — moved `test_slot`
+  creation to init time (before any subscriptions exist).
+- Self-subscription deadlock (`CREATE SUBSCRIPTION` competing with its own internal
+  `CREATE_REPLICATION_SLOT` on the same server) — subscriptions are now created on the
+  dedicated pg-sub container, eliminating the feedback loop that also caused continuous dead
+  tuples on the orders and inventory tables.
+
 ## [0.3.0] - 2026-07-01
 
 ### Added
@@ -43,7 +81,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/liciomatos/pgdba/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/liciomatos/pgdba/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/liciomatos/pgdba/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/liciomatos/pgdba/releases/tag/v0.1.0

@@ -250,6 +250,8 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckTempFiles(dashboard)), nil
 			case "m":
 				return n.wrapChild(util.CheckMemoryStats(dashboard)), nil
+			case "R":
+				return n.wrapChild(util.CheckPubSub(dashboard)), nil
 			}
 		}
 	}

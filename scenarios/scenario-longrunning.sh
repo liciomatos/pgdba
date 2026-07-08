@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-CONTAINER=postgres_pgdba
+CONTAINER=pgdba_main
 
 echo "==> Iniciando query de longa duracao (300s)..."
 

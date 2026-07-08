@@ -82,7 +82,8 @@ All SQL lives in `util/fetch.go`. Every diagnostic screen has a corresponding `F
 pgdba-cli targets PostgreSQL 13 or later, adding new majors to the compatibility matrix as
 they're released (see `## Requirements` in README.md). Some catalog columns/views differ
 across supported versions (e.g. `pg_replication_slots.two_phase` requires PG15+,
-`pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+). Gate these
+`pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+,
+`pg_publication.pubgencols` was added in PG18 as `char` ('n'=none/'a'=all) — does not exist on PG13–17). Gate these
 with a bare `pgMajorVersion()` comparison and a one-line comment naming the exact version and
 reason — see `FetchReplicationSlots`/`FetchMemoryStats` for the pattern. Represent
 fields that genuinely don't exist on older/newer versions as nullable pointers (`*int64`,
@@ -152,7 +153,7 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
 
 ### Global key conflicts — implement `ConsumesKey`
 
-The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `1`–`0`, …)
+The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `R`, `1`–`0`, …)
 **before** forwarding the message to the child model. If a screen needs to use one of those
 keys for a screen-specific action, implement the `keyConsumer` interface:
 
@@ -170,6 +171,7 @@ instead of the global one. Known conflicts:
 | Replication Slots | `p` | PgConfig | Replication Config |
 | Replication Slots | `S` | Database Sizes | Streaming Standbys |
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
+| Record Locks   | `t`               | Temp Files          | Terminate backend |
 
 ### Terminal size — no per-screen bookkeeping required
 
@@ -270,3 +272,33 @@ All model types use **value receivers** (`func (m MyModel) Method()`). Never use
 
 ### Bubbles table cell count constraint
 `renderRow` in Bubbles iterates over row cells and accesses `m.cols[i]` for each cell. The row cell count **must exactly equal** the column count. Extra cells cause a panic. Store out-of-band data (e.g., full query text) in a `map[string]string` keyed by a unique identifier from the row, never as extra hidden cells.
+
+### No ANSI codes in table cells — always use ColorizeTable
+
+Never call `SeverityColor`, `lipgloss.Render`, or any function that returns ANSI escape sequences as the value of a `table.Row` cell. Bubbles uses `runewidth.Truncate` internally, which counts ANSI bytes as visible characters and corrupts column alignment in narrow columns.
+
+**Rule**: store plain text in `table.Row` cells; apply color post-render via `ColorizeTable` with `[]ColorRule` definitions.
+
+```go
+// WRONG — SeverityColor embeds ANSI escape bytes in the cell
+row = table.Row{name, SeverityColor("active", 0), ...}
+
+// CORRECT — plain text in row, color rule applied at render time
+row = table.Row{name, "active", ...}
+// in View():
+s += ColorizeTable(m.table.View(), m.table.Columns(), []ColorRule{
+    {Column: 1, Colorize: func(v string) int {
+        switch strings.TrimSpace(v) {
+        case "active": return 0
+        case "down":   return 2
+        }
+        return -1
+    }},
+})
+```
+
+See `buildBoolColorRules` and `buildSubColorRules` in `util/pub_sub.go` for reusable rule patterns.
+
+### Screen footer convention
+
+Every `View()` must end with `"\n" + FooterStyle.Render("…hints…")`. The leading `"\n"` creates a single blank-line gap between the last table and the footer text. Do not add an extra `"\n"` after the table view — it would break the height budget and push the footer below the terminal bottom.

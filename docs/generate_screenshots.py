@@ -93,20 +93,31 @@ def gen_dashboard():
     c.print(header("Dashboard", "postgres@localhost:5432/mydb  (v15.3)"))
 
     lw = 28
-    label_s  = lambda t: f"[{C_GRAY}]{t:<{lw}}[/]"
-    metric   = lambda lbl, v, lvl=0: c.print(
+    label_s = lambda t: f"[{C_GRAY}]{t:<{lw}}[/]"
+    metric  = lambda lbl, v, lvl=0: c.print(
         f"  {label_s(lbl)}  {[ok, warn, crit][lvl](v)}"
     )
 
-    metric("Connections",           "87 / 200  (44%)")
-    metric("Active queries",        "3")
-    metric("Blocked queries",       "0")
-    metric("Slow queries (>1000ms)","12",          1)
-    metric("Cache hit ratio",       "98.7%")
-    metric("Dead tuples",           "4,230")
-    metric("Invalid indexes",       "0")
-    metric("Replication slots",     "2")
-    metric("Freeze status",         "oldest: mydb  189M txns (9.0%)")
+    def bar(pct, bar_width=40, lvl=0):
+        filled = int(pct / 100.0 * bar_width)
+        filled = max(0, min(filled, bar_width))
+        b = "█" * filled + "░" * (bar_width - filled) + f" {pct:5.1f}%"
+        return [ok, warn, crit][lvl](b)
+
+    c.print()
+    # Connection utilization bar
+    c.print(f"  {label_s('Connections')}  {'87 / 200':<12}  {bar(44.0)}")
+    # Cache hit ratio bar
+    c.print(f"  {label_s('Cache hit ratio')}  {'':12}  {bar(98.7)}")
+    c.print()
+
+    metric("Active queries",         "3")
+    metric("Blocked queries",        "0")
+    metric("Slow queries (>1000ms)", "12",          1)
+    metric("Dead tuples",            "4,230")
+    metric("Invalid indexes",        "0")
+    metric("Replication slots",      "2")
+    metric("Freeze status",          "oldest: mydb  189M txns (9.0%)")
 
     c.print()
     divider = f"[{C_GRAY}]{'─' * 65}[/]"
@@ -121,8 +132,8 @@ def gen_dashboard():
             f"{key('L')} {label('load')}  {key('w')} {label('waits')}  "
             f"{key('f')} {label('freeze')}")
     row3 = (f"{key('S')} {label('db-size')}  {key('t')} {label('temp-files')}  "
-            f"{key('m')} {label('memory')}  {key('r')} {label('refresh')}  "
-            f"{key('q')} {label('quit')}")
+            f"{key('m')} {label('memory')}  {key('R')} {label('pub/sub')}  "
+            f"{key('r')} {label('refresh')}  {key('q')} {label('quit')}")
     c.print(row1)
     c.print(row2)
     c.print(row3)
@@ -223,21 +234,24 @@ def gen_freeze():
     c = make_console()
     c.print(header("Freeze Monitor"))
 
-    c.print(f"[bold {C_BLUE}]DATABASE XID STATUS[/]")
-    c.print(f"  [{C_GRAY}]{'Database':<22}  {'XID Age':<16}  {'% Shutdown':<12}  Status[/]")
-    dbs = [
-        ("mydb",       189_400_000, 9.02, 1),
-        ("analytics",   98_100_000, 4.67, 0),
-        ("staging",     41_200_000, 1.96, 0),
-        ("template1",    3_500_000, 0.17, 0),
-    ]
-    for db, age, pct, lvl in dbs:
-        status = [ok("OK"), warn("Warning"), crit("Critical")][lvl]
-        pct_s  = [ok, warn, crit][lvl](f"{pct:.2f}%")
-        c.print(f"  {db:<22}  {age:<16,}  {pct_s:<12}  {status}")
+    def bar(pct, bar_width=40, lvl=0):
+        filled = int(pct / 100.0 * bar_width)
+        filled = max(0, min(filled, bar_width))
+        b = "█" * filled + "░" * (bar_width - filled) + f" {pct:5.1f}%"
+        return [ok, warn, crit][lvl](b)
+
+    lbl = lambda t: f"[{C_GRAY}]{t}[/]"
+
+    # Current DB summary line
+    c.print(f"  {lbl('Database:')} {warn('mydb')}   "
+            f"{lbl('XID Age:')} {warn('189,400,000')}   "
+            f"{lbl('% Shutdown:')} {warn('9.02%')}   "
+            f"{lbl('Status:')} {warn('Warning')}")
+    # XID Shutdown bar
+    c.print(f"  {lbl('XID Shutdown:')}  {bar(9.02, 40, 1)}")
+    c.print(f"[dim]  XIDs wrap at ~2.1B — PostgreSQL refuses writes at the limit. VACUUM FREEZE resets the counter.[/]")
     c.print()
 
-    c.print(f"[bold {C_BLUE}]TOP TABLES BY XID AGE[/]")
     cols = [("Schema", 12), ("Table", 25), ("XID Age", 12), ("MXI Age", 12),
             ("% Freeze", 10), ("Size", 10), ("Last Autovacuum", 18)]
 
@@ -259,8 +273,43 @@ def gen_freeze():
     ]
     col_styles = [None, None, None, None, pct_style, None, None]
     c.print(make_table(cols, rows, col_styles))
-    c.print(footer("f vacuum freeze selected table • r refresh • q back"))
+    c.print(f"[dim]↑↓ navigate • f vacuum freeze • D switch database • r refresh • q back[/]")
     save("freeze", c)
+
+
+# ── Pub/Sub ─────────────────────────────────────────────────────────────────────
+
+def gen_pub_sub():
+    c = make_console()
+    c.print(header("Replication — Pub/Sub"))
+
+    section = lambda t: f"[bold {C_BLUE}]{t}[/]"
+
+    c.print(section("Publications  (2)"))
+    pub_cols = [("Name", 22), ("Tables", 7), ("All", 5), ("Insert", 7),
+                ("Update", 7), ("Delete", 7), ("Truncate", 9), ("Via Root", 9)]
+
+    def yn(v):
+        return ok(v) if v == "yes" else dim(v)
+
+    pub_rows = [
+        ("orders_pub",   "1", "no",  "yes", "yes", "yes", "yes", "no"),
+        ("inventory_pub","1", "no",  "yes", "yes", "no",  "no",  "no"),
+    ]
+    pub_col_styles = [None, None, yn, yn, yn, yn, yn, yn]
+    c.print(make_table(pub_cols, pub_rows, pub_col_styles))
+    c.print()
+
+    c.print(section("Subscriptions  (2)"))
+    sub_cols = [("Name", 20), ("Status", 10), ("Publications", 28),
+                ("PID", 7), ("Received LSN", 14), ("Last Receive", 18), ("Errors", 11)]
+    sub_rows = [
+        ("orders_sub",    ok("active"),   "orders_pub",    "8124", "0/1A2B3C4D", "2026-07-07 10:05", ok("0 / 0")),
+        ("inventory_sub", ok("active"),   "inventory_pub", "8125", "0/1A2B3C50", "2026-07-07 10:05", ok("0 / 0")),
+    ]
+    c.print(make_table(sub_cols, sub_rows))
+    c.print(f"[dim]r refresh • q back[/]")
+    save("pub_sub", c)
 
 
 # ── Replication Slots (enriched) ───────────────────────────────────────────────
@@ -443,6 +492,7 @@ if __name__ == "__main__":
     gen_autovacuum()
     gen_autovacuum_detail()
     gen_freeze()
+    gen_pub_sub()
     gen_replication_slots()
     gen_replication_standbys()
     gen_replication_config()

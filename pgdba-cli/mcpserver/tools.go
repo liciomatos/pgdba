@@ -979,3 +979,157 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		},
 	})
 }
+
+// --- publications ---
+
+type publicationResponse struct {
+	PubName    string `json:"pub_name"`
+	AllTables  bool   `json:"all_tables"`
+	Insert     bool   `json:"insert"`
+	Update     bool   `json:"update"`
+	Delete     bool   `json:"delete"`
+	Truncate   bool   `json:"truncate"`
+	ViaRoot    bool   `json:"via_root"`
+	GenCols    *bool  `json:"gen_cols,omitempty"`
+	TableCount int    `json:"table_count"`
+}
+
+func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pubs, err := util.FetchPublications(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]publicationResponse, len(pubs))
+	for i, pub := range pubs {
+		out[i] = publicationResponse{
+			PubName:    pub.PubName,
+			AllTables:  pub.AllTables,
+			Insert:     pub.Insert,
+			Update:     pub.Update,
+			Delete:     pub.Delete,
+			Truncate:   pub.Truncate,
+			ViaRoot:    pub.ViaRoot,
+			GenCols:    pub.GenCols,
+			TableCount: pub.TableCount,
+		}
+	}
+	return jsonResult(out)
+}
+
+// --- subscriptions ---
+
+type subscriptionResponse struct {
+	SubName         string  `json:"sub_name"`
+	Enabled         bool    `json:"enabled"`
+	SlotName        string  `json:"slot_name"`
+	Publications    string  `json:"publications"`
+	WorkerPID       *int    `json:"worker_pid,omitempty"`
+	ReceivedLSN     string  `json:"received_lsn"`
+	LastReceiveTime *string `json:"last_receive_time,omitempty"`
+	ApplyErrorCount *int64  `json:"apply_error_count,omitempty"`
+	SyncErrorCount  *int64  `json:"sync_error_count,omitempty"`
+	TwoPhaseState   *string `json:"two_phase_state,omitempty"`
+	DisableOnError  *bool   `json:"disable_on_error,omitempty"`
+	Failover        *bool   `json:"failover,omitempty"`
+}
+
+type publicationTableResponse struct {
+	SchemaName string `json:"schema_name"`
+	TableName  string `json:"table_name"`
+	Columns    string `json:"columns"`
+	RowFilter  string `json:"row_filter,omitempty"`
+	LiveRows   int64  `json:"live_rows"`
+	DeadRows   int64  `json:"dead_rows"`
+	SeqScans   int64  `json:"seq_scans"`
+	IdxScans   int64  `json:"idx_scans"`
+	LastVacuum string `json:"last_vacuum"`
+}
+
+func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pubname := strParam(req, "name", "")
+	if pubname == "" {
+		return mcp.NewToolResultError("name parameter is required"), nil
+	}
+	tables, err := util.FetchPublicationTables(ctx, config.Config.DB, pubname)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]publicationTableResponse, len(tables))
+	for i, t := range tables {
+		out[i] = publicationTableResponse{
+			SchemaName: t.SchemaName,
+			TableName:  t.TableName,
+			Columns:    t.Columns,
+			RowFilter:  t.RowFilter,
+			LiveRows:   t.LiveRows,
+			DeadRows:   t.DeadRows,
+			SeqScans:   t.SeqScans,
+			IdxScans:   t.IdxScans,
+			LastVacuum: t.LastVacuum,
+		}
+	}
+	return jsonResult(out)
+}
+
+type subscriptionTableResponse struct {
+	SchemaName string `json:"schema_name"`
+	TableName  string `json:"table_name"`
+	SyncState  string `json:"sync_state"`
+	SyncLSN    string `json:"sync_lsn,omitempty"`
+	Columns    string `json:"columns,omitempty"`
+	LiveRows   int64  `json:"live_rows"`
+	InsRows    int64  `json:"ins_rows"`
+	UpdRows    int64  `json:"upd_rows"`
+	DelRows    int64  `json:"del_rows"`
+}
+
+func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	subname := strParam(req, "name", "")
+	if subname == "" {
+		return mcp.NewToolResultError("name parameter is required"), nil
+	}
+	tables, err := util.FetchSubscriptionTables(ctx, config.Config.DB, subname)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]subscriptionTableResponse, len(tables))
+	for i, t := range tables {
+		out[i] = subscriptionTableResponse{
+			SchemaName: t.SchemaName,
+			TableName:  t.TableName,
+			SyncState:  t.SyncState,
+			SyncLSN:    t.SyncLSN,
+			Columns:    t.Columns,
+			LiveRows:   t.LiveRows,
+			InsRows:    t.InsRows,
+			UpdRows:    t.UpdRows,
+			DelRows:    t.DelRows,
+		}
+	}
+	return jsonResult(out)
+}
+
+func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	subs, err := util.FetchSubscriptions(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]subscriptionResponse, len(subs))
+	for i, sub := range subs {
+		out[i] = subscriptionResponse{
+			SubName:         sub.SubName,
+			Enabled:         sub.Enabled,
+			SlotName:        sub.SlotName,
+			Publications:    sub.Publications,
+			WorkerPID:       sub.WorkerPID,
+			ReceivedLSN:     sub.ReceivedLSN,
+			LastReceiveTime: sub.LastReceiveTime,
+			ApplyErrorCount: sub.ApplyErrorCount,
+			SyncErrorCount:  sub.SyncErrorCount,
+			TwoPhaseState:   sub.TwoPhaseState,
+			DisableOnError:  sub.DisableOnError,
+			Failover:        sub.Failover,
+		}
+	}
+	return jsonResult(out)
+}

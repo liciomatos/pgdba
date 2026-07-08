@@ -20,6 +20,7 @@ type FreezeModel struct {
 	schemaName    string
 	tableName     string
 	width         int
+	height        int
 }
 
 func tableXIDColumns() []table.Column {
@@ -99,7 +100,8 @@ func (m FreezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		m.tableModel.SetHeight(TableHeight(msg.Height))
+		m.height = msg.Height
+		m.tableModel.SetHeight(TableHeight(msg.Height) - 1) // -1 for the XID Shutdown bar line
 		cols := StretchColumn(m.tableModel.Columns(), 1, msg.Width)
 		m.tableModel.SetColumns(cols)
 		return m, nil
@@ -185,8 +187,18 @@ func (m FreezeModel) View() string {
 		renderKey("Status:"), SeverityColor(statusLabel, level),
 	)
 
+	barW := m.width - 22 // 2 indent + 16 label + 4 gap
+	if barW > 60 {
+		barW = 60
+	}
+	if barW < 8 {
+		barW = 8
+	}
+	shutdownBar := SeverityColor(RenderBar(db.PctTowardShutdown, barW), level)
+
 	s := RenderHeader("Freeze Monitor") + "\n"
 	s += summaryLine + "\n"
+	s += fmt.Sprintf("  %s  %s\n", renderKey("XID Shutdown:"), shutdownBar)
 	s += HintStyle.Render("  XIDs wrap at ~2.1B — PostgreSQL refuses writes at the limit. VACUUM FREEZE resets the counter.") + "\n\n"
 	s += ColorizeTable(m.tableModel.View(), m.tableModel.Columns(), tableRules)
 

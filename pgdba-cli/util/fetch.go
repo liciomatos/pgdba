@@ -39,6 +39,12 @@ type DashboardResult struct {
 	FreezeOldestDB      string
 	FreezeOldestDBAge   int64
 	FreezePctToward     float64
+	LongRunningCount int      // queries running > 60 seconds
+	WaitEventCount   int      // non-idle queries with an active wait event
+	TempFilesBytes   int64    // temp_bytes from pg_stat_database for current db
+	DBSizePretty     string   // pg_size_pretty(pg_database_size(current_database()))
+	CommitPct        *float64 // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
+	UptimeSeconds    int64    // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
 }
 
 func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (DashboardResult, error) {
@@ -63,9 +69,15 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 	if err := db.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'),
-			count(*) FILTER (WHERE wait_event_type = 'Lock')
+			count(*) FILTER (WHERE wait_event_type = 'Lock'),
+			count(*) FILTER (WHERE state = 'active'
+			                 AND query_start < NOW() - INTERVAL '60 seconds'
+			                 AND pid <> pg_backend_pid()),
+			count(*) FILTER (WHERE wait_event_type IS NOT NULL
+			                 AND state != 'idle'
+			                 AND pid <> pg_backend_pid())
 		FROM pg_stat_activity`,
-	).Scan(&result.ActiveQueries, &result.BlockedQueries); err != nil {
+	).Scan(&result.ActiveQueries, &result.BlockedQueries, &result.LongRunningCount, &result.WaitEventCount); err != nil {
 		return result, err
 	}
 	var slowCount int
@@ -102,6 +114,29 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 		ORDER BY age(datfrozenxid) DESC
 		LIMIT 1
 	`).Scan(&result.FreezeOldestDB, &result.FreezeOldestDBAge, &result.FreezePctToward)
+
+	// Non-fatal supplemental metrics — errors leave fields at zero/empty.
+	_ = db.QueryRowContext(ctx,
+		`SELECT COALESCE(temp_bytes, 0) FROM pg_stat_database WHERE datname = current_database()`,
+	).Scan(&result.TempFilesBytes)
+
+	_ = db.QueryRowContext(ctx,
+		`SELECT pg_size_pretty(pg_database_size(current_database()))`,
+	).Scan(&result.DBSizePretty)
+
+	var commitPct sql.NullFloat64
+	_ = db.QueryRowContext(ctx, `
+		SELECT ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1)
+		FROM pg_stat_database WHERE datname = current_database()`,
+	).Scan(&commitPct)
+	if commitPct.Valid {
+		result.CommitPct = &commitPct.Float64
+	}
+
+	_ = db.QueryRowContext(ctx,
+		`SELECT EXTRACT(EPOCH FROM (NOW() - pg_postmaster_start_time()))::bigint`,
+	).Scan(&result.UptimeSeconds)
+
 	return result, nil
 }
 
@@ -1171,10 +1206,10 @@ func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby
 			COALESCE(client_addr::text, ''),
 			state,
 			sync_state,
-			sent_lsn::text,
-			write_lsn::text,
-			flush_lsn::text,
-			replay_lsn::text,
+			COALESCE(sent_lsn::text, ''),
+			COALESCE(write_lsn::text, ''),
+			COALESCE(flush_lsn::text, ''),
+			COALESCE(replay_lsn::text, ''),
 			COALESCE(write_lag::text, ''),
 			COALESCE(flush_lag::text, ''),
 			COALESCE(replay_lag::text, ''),
@@ -1583,4 +1618,321 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 	}
 
 	return stats, nil
+}
+
+// Publication represents a row from pg_publication with the table count from pg_publication_tables.
+type Publication struct {
+	PubName    string
+	AllTables  bool
+	Insert     bool
+	Update     bool
+	Delete     bool
+	Truncate   bool
+	ViaRoot    bool
+	GenCols    *bool // PG18+; nil on PG13–17 (column added in PG18 as char 'n'/'a')
+	TableCount int
+}
+
+// Subscription represents a row from pg_subscription joined with pg_stat_subscription
+// (apply worker only) and, on PG15+, pg_stat_subscription_stats.
+// Version-specific columns are returned as nullable pointers; nil means the column
+// does not exist on this PostgreSQL version.
+type Subscription struct {
+	SubName         string
+	Enabled         bool
+	SlotName        string
+	Publications    string  // array_to_string(subpublications, ', ')
+	WorkerPID       *int    // nil when subscription worker is not running
+	ReceivedLSN     string
+	LastReceiveTime *string // formatted timestamp; nil when never received
+	ApplyErrorCount *int64  // PG15+; nil on PG13–14
+	SyncErrorCount  *int64  // PG15+; nil on PG13–14
+	TwoPhaseState   *string // PG15+: 'd'=disabled 'p'=pending 'e'=enabled
+	DisableOnError  *bool   // PG16+
+	Failover        *bool   // PG17+
+}
+
+// FetchPublications returns all publications defined on the connected server.
+// pubgencols was added in PG18 as char ('n'=none, 'a'=all); GenCols is nil on PG13–17.
+func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
+	// The constant must NOT appear in GROUP BY — PostgreSQL rejects non-integer
+	// constants there. On PG18+ the real column is included in GROUP BY.
+	genColsExpr := "false AS pubgencols"
+	genColsGroup := ""
+	if pgMajorVersion() >= 18 {
+		// PG18 added pubgencols as char ('n'=none, 'a'=all); cast to bool for uniform scanning.
+		genColsExpr = "(p.pubgencols != 'n') AS pubgencols"
+		genColsGroup = ", p.pubgencols"
+	}
+
+	query := `
+		SELECT
+			p.pubname, p.puballtables, p.pubinsert, p.pubupdate,
+			p.pubdelete, p.pubtruncate, p.pubviaroot, ` + genColsExpr + `,
+			COUNT(pt.tablename) AS table_count
+		FROM pg_publication p
+		LEFT JOIN pg_publication_tables pt ON pt.pubname = p.pubname
+		GROUP BY p.pubname, p.puballtables, p.pubinsert, p.pubupdate,
+		         p.pubdelete, p.pubtruncate, p.pubviaroot` + genColsGroup + `
+		ORDER BY p.pubname`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	publications := []Publication{}
+	for rows.Next() {
+		var pub Publication
+		var genCols sql.NullBool
+		if err := rows.Scan(
+			&pub.PubName, &pub.AllTables, &pub.Insert, &pub.Update,
+			&pub.Delete, &pub.Truncate, &pub.ViaRoot, &genCols, &pub.TableCount,
+		); err != nil {
+			return nil, err
+		}
+		if genCols.Valid {
+			pub.GenCols = &genCols.Bool
+		}
+		publications = append(publications, pub)
+	}
+	return publications, rows.Err()
+}
+
+// FetchSubscriptions returns all subscriptions on the connected server, joined
+// with pg_stat_subscription (apply worker) and, when PG15+, pg_stat_subscription_stats.
+// Version-specific columns are returned as nullable pointers; nil means the column
+// does not exist on this PostgreSQL version.
+func FetchSubscriptions(ctx context.Context, db *sql.DB) ([]Subscription, error) {
+	// subtwophasestate added in PG15
+	twophaseExpr := "NULL::text AS subtwophasestate"
+	if pgMajorVersion() >= 15 {
+		twophaseExpr = "s.subtwophasestate::text"
+	}
+
+	// subdisableonerr added in PG16
+	disableOnErrExpr := "NULL::boolean AS subdisableonerr"
+	if pgMajorVersion() >= 16 {
+		disableOnErrExpr = "s.subdisableonerr"
+	}
+
+	// subfailover added in PG17
+	failoverExpr := "NULL::boolean AS subfailover"
+	if pgMajorVersion() >= 17 {
+		failoverExpr = "s.subfailover"
+	}
+
+	// pg_stat_subscription_stats is a PG15+ view; guard the entire join
+	statsSelect := "NULL::bigint AS apply_error_count, NULL::bigint AS sync_error_count"
+	statsJoin := ""
+	if pgMajorVersion() >= 15 {
+		statsSelect = "COALESCE(stats.apply_error_count, 0), COALESCE(stats.sync_error_count, 0)"
+		statsJoin = "LEFT JOIN pg_stat_subscription_stats stats ON stats.subid = s.oid"
+	}
+
+	query := `
+		SELECT
+			s.subname,
+			s.subenabled,
+			COALESCE(s.subslotname, '') AS subslotname,
+			array_to_string(s.subpublications, ', ') AS publications,
+			ss.pid,
+			COALESCE(ss.received_lsn::text, ''),
+			ss.last_msg_receipt_time::text,
+			` + statsSelect + `,
+			` + twophaseExpr + `,
+			` + disableOnErrExpr + `,
+			` + failoverExpr + `
+		FROM pg_subscription s
+		LEFT JOIN pg_stat_subscription ss ON ss.subid = s.oid AND ss.relid IS NULL
+		` + statsJoin + `
+		ORDER BY s.subname`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	subscriptions := []Subscription{}
+	for rows.Next() {
+		var sub Subscription
+		var pid sql.NullInt64
+		var lastReceive sql.NullString
+		var applyErrors, syncErrors sql.NullInt64
+		var twophaseState sql.NullString
+		var disableOnErr, failover sql.NullBool
+
+		if err := rows.Scan(
+			&sub.SubName, &sub.Enabled, &sub.SlotName, &sub.Publications,
+			&pid, &sub.ReceivedLSN, &lastReceive,
+			&applyErrors, &syncErrors,
+			&twophaseState, &disableOnErr, &failover,
+		); err != nil {
+			return nil, err
+		}
+
+		if pid.Valid {
+			pidInt := int(pid.Int64)
+			sub.WorkerPID = &pidInt
+		}
+		if lastReceive.Valid {
+			sub.LastReceiveTime = &lastReceive.String
+		}
+		if applyErrors.Valid {
+			sub.ApplyErrorCount = &applyErrors.Int64
+		}
+		if syncErrors.Valid {
+			sub.SyncErrorCount = &syncErrors.Int64
+		}
+		if twophaseState.Valid {
+			sub.TwoPhaseState = &twophaseState.String
+		}
+		if disableOnErr.Valid {
+			sub.DisableOnError = &disableOnErr.Bool
+		}
+		if failover.Valid {
+			sub.Failover = &failover.Bool
+		}
+
+		subscriptions = append(subscriptions, sub)
+	}
+	return subscriptions, rows.Err()
+}
+
+// PublicationTable holds per-table details for a single publication,
+// joined with pg_stat_user_tables for live/dead row counts and vacuum history.
+type PublicationTable struct {
+	SchemaName string
+	TableName  string
+	Columns    string // "all columns" or "col1, col2, ..." (PG15+ column filters; older = always "all columns")
+	RowFilter  string // "" if none; expression string if row-level filter (PG15+)
+	LiveRows   int64
+	DeadRows   int64
+	SeqScans   int64
+	IdxScans   int64
+	LastVacuum string // "YYYY-MM-DD HH:MM" or "never"
+}
+
+// FetchPublicationTables returns per-table details for the named publication.
+// attnames and rowfilter were added to pg_publication_tables in PG15; on older
+// versions Columns is always "all columns" and RowFilter is always empty.
+func FetchPublicationTables(ctx context.Context, db *sql.DB, pubname string) ([]PublicationTable, error) {
+	// attnames (column filter list) and rowfilter added in PG15
+	attExpr := "'all columns'"
+	filterExpr := "''"
+	if pgMajorVersion() >= 15 {
+		attExpr = "COALESCE(array_to_string(pt.attnames, ', '), 'all columns')"
+		filterExpr = "COALESCE(pt.rowfilter::text, '')"
+	}
+
+	query := `
+		SELECT
+			pt.schemaname,
+			pt.tablename,
+			` + attExpr + ` AS columns,
+			` + filterExpr + ` AS row_filter,
+			COALESCE(s.n_live_tup, 0),
+			COALESCE(s.n_dead_tup, 0),
+			COALESCE(s.seq_scan, 0),
+			COALESCE(s.idx_scan, 0),
+			CASE
+				WHEN GREATEST(s.last_vacuum, s.last_autovacuum) IS NOT NULL
+				THEN to_char(GREATEST(s.last_vacuum, s.last_autovacuum), 'YYYY-MM-DD HH24:MI')
+				ELSE 'never'
+			END AS last_vacuum
+		FROM pg_publication_tables pt
+		LEFT JOIN pg_stat_user_tables s
+			ON s.schemaname = pt.schemaname AND s.relname = pt.tablename
+		WHERE pt.pubname = $1
+		ORDER BY pt.schemaname, pt.tablename`
+
+	rows, err := db.QueryContext(ctx, query, pubname)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []PublicationTable
+	for rows.Next() {
+		var t PublicationTable
+		if err := rows.Scan(
+			&t.SchemaName, &t.TableName, &t.Columns, &t.RowFilter,
+			&t.LiveRows, &t.DeadRows, &t.SeqScans, &t.IdxScans, &t.LastVacuum,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// SubscriptionTable holds per-table sync state and stats for a single subscription.
+type SubscriptionTable struct {
+	SchemaName string
+	TableName  string
+	SyncState  string // "ready", "synchronized", "copying", "finished", "initialize"
+	SyncLSN    string // "" if not yet set (initial copy in progress)
+	Columns    string // comma-separated non-system column names from pg_attribute
+	LiveRows   int64
+	InsRows    int64
+	UpdRows    int64
+	DelRows    int64
+}
+
+// FetchSubscriptionTables returns per-table sync state for the named subscription,
+// joined with pg_stat_user_tables for row-level insert/update/delete stats.
+// pg_subscription_rel is available since PG10 — no version gating needed.
+func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([]SubscriptionTable, error) {
+	query := `
+		SELECT
+			n.nspname AS schemaname,
+			c.relname AS tablename,
+			CASE sr.srsubstate
+				WHEN 'i' THEN 'initialize'
+				WHEN 'd' THEN 'copying'
+				WHEN 'f' THEN 'finished'
+				WHEN 's' THEN 'synchronized'
+				WHEN 'r' THEN 'ready'
+				ELSE sr.srsubstate::text
+			END AS sync_state,
+			COALESCE(sr.srsublsn::text, '') AS sync_lsn,
+			COALESCE(attrs.col_names, '') AS columns,
+			COALESCE(s.n_live_tup, 0),
+			COALESCE(s.n_tup_ins, 0),
+			COALESCE(s.n_tup_upd, 0),
+			COALESCE(s.n_tup_del, 0)
+		FROM pg_subscription_rel sr
+		JOIN pg_class c ON c.oid = sr.srrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		-- List non-system, non-dropped columns so the subscriber can see what the table contains.
+		LEFT JOIN LATERAL (
+			SELECT string_agg(a.attname, ', ' ORDER BY a.attnum) AS col_names
+			FROM pg_attribute a
+			WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		) attrs ON true
+		LEFT JOIN pg_stat_user_tables s
+			ON s.schemaname = n.nspname AND s.relname = c.relname
+		WHERE sr.srsubid = (SELECT oid FROM pg_subscription WHERE subname = $1)
+		ORDER BY n.nspname, c.relname`
+
+	rows, err := db.QueryContext(ctx, query, subname)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []SubscriptionTable
+	for rows.Next() {
+		var t SubscriptionTable
+		if err := rows.Scan(
+			&t.SchemaName, &t.TableName, &t.SyncState, &t.SyncLSN, &t.Columns,
+			&t.LiveRows, &t.InsRows, &t.UpdRows, &t.DelRows,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
 }
