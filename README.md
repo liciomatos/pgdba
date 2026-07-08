@@ -88,9 +88,8 @@ pgdba-cli --mcp --url "postgres://user:pass@host/db"
 # Or via environment variables (no credentials on the command line)
 PGHOST=host PGUSER=user PGPASSWORD=pass PGDATABASE=db pgdba-cli --mcp
 
-# Or via the Makefile, against the local dev/replication test environments
-make mcp-up        # local dev database (mydb), requires `make docker-up` first
-make mcp-up-repl   # replication test environment (testdb), requires `make replication-up` first
+# Or via the Makefile, against the local dev environment
+make mcp-up        # local dev database (mydb), requires `make dev-up` first
 ```
 
 On startup, the server prints the `claude mcp add` command and the equivalent `.mcp.json`
@@ -108,11 +107,11 @@ Configure Claude Code (`.mcp.json` in your project — credentials never go here
 }
 ```
 
-The server exposes 24 tools covering every TUI screen — slow queries, connections,
+The server exposes tools covering every TUI screen — slow queries, connections,
 autovacuum, replication slots, freeze status, streaming standbys, replication config,
-database sizes, temp file usage, memory & checkpoint stats, and more. Every tool only
-runs `SELECT` queries and is annotated `readOnlyHint`/non-destructive, so MCP clients
-don't need to treat calls as risky.
+database sizes, temp file usage, memory & checkpoint stats, pub/sub monitoring, and more.
+Every tool only runs `SELECT` queries and is annotated `readOnlyHint`/non-destructive,
+so MCP clients don't need to treat calls as risky.
 
 ## Screenshots
 
@@ -163,6 +162,10 @@ don't need to treat calls as risky.
 ### Memory & Checkpoint Stats
 
 ![Memory & Checkpoint Stats](docs/screenshots/memory_stats.svg)
+
+### Pub/Sub Monitoring
+
+![Pub/Sub](docs/screenshots/pub_sub.svg)
 
 ### Config Parameters
 
@@ -231,6 +234,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `S` | **Database Sizes** | On-disk size of every database and tablespace, plus cluster total | — |
 | `t` | **Temp Files** | Temp file spill activity per database (`pg_stat_database`) | — |
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
+| `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 
 All list screens support live filtering via `/`.
 
@@ -243,6 +247,15 @@ Press `enter` on any row in the Autovacuum screen to open the detail view for th
 - **Freeze Status** — `relfrozenxid` age with a visual progress bar
 - **Custom Parameters** — per-table autovacuum settings vs. global defaults
 - **Precise Bloat** — press `b` to run `pgstattuple` for an exact bloat measurement (full table scan)
+
+### Pub/Sub Monitoring
+
+Press `R` from the main dashboard to open the Pub/Sub screen:
+
+- **Publications** — name, table count, and operation flags (Insert/Update/Delete/Truncate/Via Root)
+- **Subscriptions** — name, status (active/down/disabled), subscribed publications, worker PID, received LSN, and error counts
+- Press `enter` on any row to open a detail view with per-table sync state, row counts, and DML stats
+- Press `tab` to switch between the Publications and Subscriptions sections
 
 ### Streaming Standbys
 
@@ -299,11 +312,16 @@ CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 ## Development
 
 ```bash
-# Start local PostgreSQL via Docker
-make docker-up
+# Start the full local environment (primary + replica + logical subscriber)
+make dev-up
 
-# Build and connect to the local database
-make run
+# Connect to each node
+make run          # pg-main (port 5432) — primary, publications, scenarios
+make run-replica  # pg-replica (port 5433) — physical streaming standby
+make run-sub      # pg-sub (port 5434) — logical subscriber
+
+# Tear down all containers and volumes
+make dev-down
 
 # Unit tests only (no Docker required)
 cd pgdba-cli && go test ./... -short
@@ -312,24 +330,14 @@ cd pgdba-cli && go test ./... -short
 cd pgdba-cli && go test ./... -timeout 120s
 ```
 
-### Replication test environment
+`make dev-up` starts three containers in a single docker-compose stack and seeds all
+diagnostic scenarios automatically:
 
-A dedicated Docker Compose setup provides a PostgreSQL 15 primary + streaming replica with
-pre-seeded test data (replication slots, dead tuples, logical replication):
-
-```bash
-# Start primary (port 5432) + replica (port 5433)
-make replication-up
-
-# Connect to primary
-pgdba-cli --url "postgres://postgres:postgres@localhost:5432/testdb?sslmode=disable"
-
-# Stop and remove volumes
-make replication-down
-```
-
-See [`docker/replication/README.md`](docker/replication/README.md) for test scenarios covering
-each new screen.
+| Container | Port | Role |
+|---|---|---|
+| `pg-main` | 5432 | Primary — publications, slow queries, lock scenarios |
+| `pg-replica` | 5433 | Physical streaming standby from pg-main |
+| `pg-sub` | 5434 | Logical subscriber to pg-main's publications |
 
 ### Compatibility testing across PostgreSQL versions
 
