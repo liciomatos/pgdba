@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-CONTAINER=postgres_pgdba
+CONTAINER=pgdba_main
 
 echo "==> Removendo cenarios dinamicos..."
 

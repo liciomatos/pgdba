@@ -40,9 +40,9 @@ func pubColumns() []table.Column {
 
 func subColumns() []table.Column {
 	return []table.Column{
-		{Title: "Name", Width: 20},
+		{Title: "Name", Width: 20},         // stretch col 0 — same as pub, Name is primary identifier
 		{Title: "Status", Width: 10},
-		{Title: "Publications", Width: 28},
+		{Title: "Publications", Width: 30}, // fixed; "orders_pub, inventory_pub" = 26 chars
 		{Title: "PID", Width: 7},
 		{Title: "Received LSN", Width: 14},
 		{Title: "Last Receive", Width: 18},
@@ -241,30 +241,40 @@ func (m PubSubModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		// overhead = RenderHeader(3) + pub-label(1) + gap(1) + sub-label(1) + gap(1) + footer(1) = 8
-		// available is split between both tables; each table height includes 2 header lines.
 		const tableHeaderLines = 2
-		overhead := 8
-		available := m.height - overhead
+		const minSectionH = tableHeaderLines + 1
+		available := m.height - 8
 
-		// Publications: at most 1/3 of available, but not more rows than we have data.
-		pubDataRows := max2(m.pubCount, 1)
-		maxPubDataRows := max2((available/3)-tableHeaderLines, 1)
-		if pubDataRows > maxPubDataRows {
-			pubDataRows = maxPubDataRows
+		var pubH, subH int
+		switch {
+		case m.pubCount == 0:
+			// Only subscriptions (or both empty): give sub all the space.
+			pubH = minSectionH
+			subH = max2(available-pubH, minSectionH)
+		case m.subCount == 0:
+			// Only publications: give pub all the space.
+			subH = minSectionH
+			pubH = max2(available-subH, minSectionH)
+		default:
+			// Both populated: pub gets at most 1/3 (flag columns are compact).
+			pubDataRows := max2(m.pubCount, 1)
+			maxPubDataRows := max2((available/3)-tableHeaderLines, 1)
+			if pubDataRows > maxPubDataRows {
+				pubDataRows = maxPubDataRows
+			}
+			pubH = pubDataRows + tableHeaderLines
+			subH = max2(available-pubH, tableHeaderLines+1)
 		}
-		pubH := pubDataRows + tableHeaderLines
-
-		// Subscriptions get the rest; ensure at least 1 data row visible.
-		subH := max2(available-pubH, tableHeaderLines+1)
 
 		m.pubH = pubH
 		m.subH = subH
 		m.pubTable.SetHeight(pubH)
 		m.subTable.SetHeight(subH)
 
+		// Both sections stretch col 0 (Name) for visual consistency.
 		pubCols := StretchColumn(m.pubTable.Columns(), 0, msg.Width)
 		m.pubTable.SetColumns(pubCols)
-		subCols := StretchColumn(m.subTable.Columns(), 2, msg.Width)
+		subCols := StretchColumn(m.subTable.Columns(), 0, msg.Width)
 		m.subTable.SetColumns(subCols)
 		return m, nil
 

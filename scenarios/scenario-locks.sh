@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-CONTAINER=postgres_pgdba
+CONTAINER=pgdba_main
 
 echo "==> Iniciando cenario de bloqueio de sessao..."
 

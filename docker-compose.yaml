@@ -1,30 +1,72 @@
 version: '3.8'
 
+# Unified dev environment:
+#   pg-main    (5432) — primary: publications, slow queries, lock scenarios
+#   pg-replica (5433) — physical streaming standby from pg-main
+#   pg-sub     (5434) — logical subscriber to pg-main's publications
+#
+# Start everything:    make dev-up
+# Connect to main:     make run
+# Connect to replica:  make run-replica
+# Connect to sub:      make run-sub
+# Tear down:           make dev-down
+
 services:
-  postgres:
+  pg-main:
     image: docker.io/library/postgres:18
-    container_name: postgres_pgdba
+    container_name: pgdba_main
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: mydb
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pg_main_data:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
-    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "wal_level=logical"]
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_wal_senders=10
+        -c max_replication_slots=10
+        -c hot_standby=on
+        -c wal_log_hints=on
+        -c shared_preload_libraries=pg_stat_statements
+        -c wal_keep_size=256
 
-  pgadmin:
-    image: docker.io/dpage/pgadmin4
-    container_name: pgadmin_pgdba
+  pg-replica:
+    image: docker.io/library/postgres:18
+    container_name: pgdba_replica
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      POSTGRES_PASSWORD: postgres
+      PGPASSWORD: postgres
     ports:
-      - "8080:80"
-    depends_on:
-      - postgres
+      - "5433:5432"
+    volumes:
+      - pg_replica_data:/var/lib/postgresql/data
+      - ./docker/replica-setup.sh:/replica-setup.sh
+    entrypoint: ["/bin/bash", "/replica-setup.sh"]
+
+  pg-sub:
+    image: docker.io/library/postgres:18
+    container_name: pgdba_sub
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mydb
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    volumes:
+      - pg_sub_data:/var/lib/postgresql/data
+      - ./docker/subscriber-init.sql:/docker-entrypoint-initdb.d/01_tables.sql
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_stat_statements
+
 
 volumes:
-  postgres_data:
+  pg_main_data:
+  pg_replica_data:
+  pg_sub_data:

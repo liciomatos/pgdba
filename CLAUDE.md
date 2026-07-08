@@ -82,7 +82,8 @@ All SQL lives in `util/fetch.go`. Every diagnostic screen has a corresponding `F
 pgdba-cli targets PostgreSQL 13 or later, adding new majors to the compatibility matrix as
 they're released (see `## Requirements` in README.md). Some catalog columns/views differ
 across supported versions (e.g. `pg_replication_slots.two_phase` requires PG15+,
-`pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+). Gate these
+`pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+,
+`pg_publication.pubgencols` changed from `bool` to `char` ('n'/'a') in PG18). Gate these
 with a bare `pgMajorVersion()` comparison and a one-line comment naming the exact version and
 reason — see `FetchReplicationSlots`/`FetchMemoryStats` for the pattern. Represent
 fields that genuinely don't exist on older/newer versions as nullable pointers (`*int64`,
@@ -170,6 +171,7 @@ instead of the global one. Known conflicts:
 | Replication Slots | `p` | PgConfig | Replication Config |
 | Replication Slots | `S` | Database Sizes | Streaming Standbys |
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
+| Record Locks   | `t`               | Temp Files          | Terminate backend |
 
 ### Terminal size — no per-screen bookkeeping required
 

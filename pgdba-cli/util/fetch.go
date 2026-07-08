@@ -39,6 +39,12 @@ type DashboardResult struct {
 	FreezeOldestDB      string
 	FreezeOldestDBAge   int64
 	FreezePctToward     float64
+	LongRunningCount int      // queries running > 60 seconds
+	WaitEventCount   int      // non-idle queries with an active wait event
+	TempFilesBytes   int64    // temp_bytes from pg_stat_database for current db
+	DBSizePretty     string   // pg_size_pretty(pg_database_size(current_database()))
+	CommitPct        *float64 // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
+	UptimeSeconds    int64    // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
 }
 
 func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (DashboardResult, error) {
@@ -63,9 +69,15 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 	if err := db.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'),
-			count(*) FILTER (WHERE wait_event_type = 'Lock')
+			count(*) FILTER (WHERE wait_event_type = 'Lock'),
+			count(*) FILTER (WHERE state = 'active'
+			                 AND query_start < NOW() - INTERVAL '60 seconds'
+			                 AND pid <> pg_backend_pid()),
+			count(*) FILTER (WHERE wait_event_type IS NOT NULL
+			                 AND state != 'idle'
+			                 AND pid <> pg_backend_pid())
 		FROM pg_stat_activity`,
-	).Scan(&result.ActiveQueries, &result.BlockedQueries); err != nil {
+	).Scan(&result.ActiveQueries, &result.BlockedQueries, &result.LongRunningCount, &result.WaitEventCount); err != nil {
 		return result, err
 	}
 	var slowCount int
@@ -102,6 +114,29 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 		ORDER BY age(datfrozenxid) DESC
 		LIMIT 1
 	`).Scan(&result.FreezeOldestDB, &result.FreezeOldestDBAge, &result.FreezePctToward)
+
+	// Non-fatal supplemental metrics — errors leave fields at zero/empty.
+	_ = db.QueryRowContext(ctx,
+		`SELECT COALESCE(temp_bytes, 0) FROM pg_stat_database WHERE datname = current_database()`,
+	).Scan(&result.TempFilesBytes)
+
+	_ = db.QueryRowContext(ctx,
+		`SELECT pg_size_pretty(pg_database_size(current_database()))`,
+	).Scan(&result.DBSizePretty)
+
+	var commitPct sql.NullFloat64
+	_ = db.QueryRowContext(ctx, `
+		SELECT ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1)
+		FROM pg_stat_database WHERE datname = current_database()`,
+	).Scan(&commitPct)
+	if commitPct.Valid {
+		result.CommitPct = &commitPct.Float64
+	}
+
+	_ = db.QueryRowContext(ctx,
+		`SELECT EXTRACT(EPOCH FROM (NOW() - pg_postmaster_start_time()))::bigint`,
+	).Scan(&result.UptimeSeconds)
+
 	return result, nil
 }
 
@@ -1171,10 +1206,10 @@ func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby
 			COALESCE(client_addr::text, ''),
 			state,
 			sync_state,
-			sent_lsn::text,
-			write_lsn::text,
-			flush_lsn::text,
-			replay_lsn::text,
+			COALESCE(sent_lsn::text, ''),
+			COALESCE(write_lsn::text, ''),
+			COALESCE(flush_lsn::text, ''),
+			COALESCE(replay_lsn::text, ''),
 			COALESCE(write_lag::text, ''),
 			COALESCE(flush_lag::text, ''),
 			COALESCE(replay_lag::text, ''),
@@ -1618,15 +1653,18 @@ type Subscription struct {
 }
 
 // FetchPublications returns all publications defined on the connected server.
-// pubgencols (whether generated columns are included) was added in PG17; on
-// older versions GenCols is nil.
+// pubgencols was added in PG17 as bool; PG18 changed it to char ('n'=none, 'a'=all).
+// GenCols is nil on PG13–16.
 func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
-	// pubgencols was added in PG17; emit a constant false for older versions.
 	// The constant must NOT appear in GROUP BY — PostgreSQL rejects non-integer
 	// constants there. On PG17+ the real column is included in GROUP BY.
 	genColsExpr := "false AS pubgencols"
 	genColsGroup := ""
-	if pgMajorVersion() >= 17 {
+	if pgMajorVersion() >= 18 {
+		// PG18 changed pubgencols from bool to char; cast to bool for uniform scanning.
+		genColsExpr = "(p.pubgencols != 'n') AS pubgencols"
+		genColsGroup = ", p.pubgencols"
+	} else if pgMajorVersion() == 17 {
 		genColsExpr = "p.pubgencols"
 		genColsGroup = ", p.pubgencols"
 	}
