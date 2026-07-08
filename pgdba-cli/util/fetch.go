@@ -1629,7 +1629,7 @@ type Publication struct {
 	Delete     bool
 	Truncate   bool
 	ViaRoot    bool
-	GenCols    *bool // PG17+; nil on PG13–16 (generated columns included)
+	GenCols    *bool // PG18+; nil on PG13–17 (column added in PG18 as char 'n'/'a')
 	TableCount int
 }
 
@@ -1653,19 +1653,15 @@ type Subscription struct {
 }
 
 // FetchPublications returns all publications defined on the connected server.
-// pubgencols was added in PG17 as bool; PG18 changed it to char ('n'=none, 'a'=all).
-// GenCols is nil on PG13–16.
+// pubgencols was added in PG18 as char ('n'=none, 'a'=all); GenCols is nil on PG13–17.
 func FetchPublications(ctx context.Context, db *sql.DB) ([]Publication, error) {
 	// The constant must NOT appear in GROUP BY — PostgreSQL rejects non-integer
-	// constants there. On PG17+ the real column is included in GROUP BY.
+	// constants there. On PG18+ the real column is included in GROUP BY.
 	genColsExpr := "false AS pubgencols"
 	genColsGroup := ""
 	if pgMajorVersion() >= 18 {
-		// PG18 changed pubgencols from bool to char; cast to bool for uniform scanning.
+		// PG18 added pubgencols as char ('n'=none, 'a'=all); cast to bool for uniform scanning.
 		genColsExpr = "(p.pubgencols != 'n') AS pubgencols"
-		genColsGroup = ", p.pubgencols"
-	} else if pgMajorVersion() == 17 {
-		genColsExpr = "p.pubgencols"
 		genColsGroup = ", p.pubgencols"
 	}
 

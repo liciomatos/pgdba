@@ -83,7 +83,7 @@ pgdba-cli targets PostgreSQL 13 or later, adding new majors to the compatibility
 they're released (see `## Requirements` in README.md). Some catalog columns/views differ
 across supported versions (e.g. `pg_replication_slots.two_phase` requires PG15+,
 `pg_stat_bgwriter`'s checkpoint counters moved to `pg_stat_checkpointer` in PG17+,
-`pg_publication.pubgencols` changed from `bool` to `char` ('n'/'a') in PG18). Gate these
+`pg_publication.pubgencols` was added in PG18 as `char` ('n'=none/'a'=all) — does not exist on PG13–17). Gate these
 with a bare `pgMajorVersion()` comparison and a one-line comment naming the exact version and
 reason — see `FetchReplicationSlots`/`FetchMemoryStats` for the pattern. Represent
 fields that genuinely don't exist on older/newer versions as nullable pointers (`*int64`,
