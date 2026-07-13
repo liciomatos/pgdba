@@ -377,6 +377,75 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 	return results, rows.Err()
 }
 
+// ToastTable holds TOAST-related stats for a user table that has actual TOAST data on disk.
+type ToastTable struct {
+	SchemaName      string
+	TableName       string
+	ToastRelname    string     // e.g. "pg_toast_16384" — used for VACUUM, not displayed
+	ToastSizeBytes  int64
+	ToastSizePretty string
+	ToastPct        float64    // 100 * toast_size / total_size; 0 if total == 0
+	ToastDeadTuples int64
+	BlksRead        int64
+	BlksHit         int64
+	CacheHitPct     *float64   // nil when no I/O has occurred yet
+	LastAutovacuum  *time.Time
+}
+
+func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			n.nspname,
+			c.relname,
+			t.relname AS toast_relname,
+			pg_relation_size(t.oid),
+			pg_size_pretty(pg_relation_size(t.oid)),
+			CASE WHEN pg_total_relation_size(c.oid) > 0
+			     THEN ROUND(100.0 * pg_relation_size(t.oid) / pg_total_relation_size(c.oid), 1)
+			     ELSE 0 END,
+			COALESCE(s.n_dead_tup, 0),
+			COALESCE(io.toast_blks_read, 0),
+			COALESCE(io.toast_blks_hit, 0),
+			CASE WHEN COALESCE(io.toast_blks_hit, 0) + COALESCE(io.toast_blks_read, 0) > 0
+			     THEN ROUND(100.0 * io.toast_blks_hit /
+			               (io.toast_blks_hit + io.toast_blks_read), 1)
+			     ELSE NULL END,
+			s.last_autovacuum
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_class t ON t.oid = c.reltoastrelid
+		LEFT JOIN pg_stat_all_tables s ON s.relid = t.oid
+		LEFT JOIN pg_statio_user_tables io ON io.relid = c.oid
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+		  AND c.relkind = 'r'
+		  AND pg_relation_size(t.oid) > 0
+		ORDER BY pg_relation_size(t.oid) DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []ToastTable{}
+	for rows.Next() {
+		var tt ToastTable
+		var cacheHit sql.NullFloat64
+		if err := rows.Scan(
+			&tt.SchemaName, &tt.TableName, &tt.ToastRelname,
+			&tt.ToastSizeBytes, &tt.ToastSizePretty, &tt.ToastPct,
+			&tt.ToastDeadTuples,
+			&tt.BlksRead, &tt.BlksHit, &cacheHit,
+			&tt.LastAutovacuum,
+		); err != nil {
+			return nil, err
+		}
+		if cacheHit.Valid {
+			tt.CacheHitPct = &cacheHit.Float64
+		}
+		results = append(results, tt)
+	}
+	return results, rows.Err()
+}
+
 // IndexUsage holds per-index usage statistics from pg_stat_user_indexes.
 type IndexUsage struct {
 	SchemaName   string

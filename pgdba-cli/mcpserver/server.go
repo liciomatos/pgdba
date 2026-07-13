@@ -244,6 +244,12 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSubscriptionTables)
 
+	s.AddTool(mcp.NewTool("check_toast_tables",
+		mcp.WithDescription("List user tables with TOAST data — size, toast %, dead tuples, cache hit ratio, and last autovacuum on the TOAST heap."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckToastTables)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))

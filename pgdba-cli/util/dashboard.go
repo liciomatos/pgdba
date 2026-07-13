@@ -401,6 +401,7 @@ func (m DashboardModel) View() string {
 		renderKey("t") + " " + renderLabel("temp-files") + "  " +
 		renderKey("m") + " " + renderLabel("memory") + "  " +
 		renderKey("R") + " " + renderLabel("pub/sub") + "  " +
+		renderKey("T") + " " + renderLabel("toast") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 

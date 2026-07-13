@@ -1109,6 +1109,46 @@ func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest)
 	return jsonResult(out)
 }
 
+func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	type toastTableResponse struct {
+		SchemaName      string   `json:"schema_name"`
+		TableName       string   `json:"table_name"`
+		ToastRelname    string   `json:"toast_relname"`
+		ToastSizePretty string   `json:"toast_size"`
+		ToastPct        float64  `json:"toast_pct"`
+		ToastDeadTuples int64    `json:"toast_dead_tuples"`
+		BlksRead        int64    `json:"blks_read"`
+		BlksHit         int64    `json:"blks_hit"`
+		CacheHitPct     *float64 `json:"cache_hit_pct"`
+		LastAutovacuum  *string  `json:"last_autovacuum"`
+	}
+	tables, err := util.FetchToastTables(ctx, config.Config.DB, 50)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out := make([]toastTableResponse, len(tables))
+	for i, tt := range tables {
+		var lastAV *string
+		if tt.LastAutovacuum != nil {
+			formatted := tt.LastAutovacuum.Format("2006-01-02 15:04:05")
+			lastAV = &formatted
+		}
+		out[i] = toastTableResponse{
+			SchemaName:      tt.SchemaName,
+			TableName:       tt.TableName,
+			ToastRelname:    tt.ToastRelname,
+			ToastSizePretty: tt.ToastSizePretty,
+			ToastPct:        tt.ToastPct,
+			ToastDeadTuples: tt.ToastDeadTuples,
+			BlksRead:        tt.BlksRead,
+			BlksHit:         tt.BlksHit,
+			CacheHitPct:     tt.CacheHitPct,
+			LastAutovacuum:  lastAV,
+		}
+	}
+	return jsonResult(out)
+}
+
 func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	subs, err := util.FetchSubscriptions(ctx, config.Config.DB)
 	if err != nil {
