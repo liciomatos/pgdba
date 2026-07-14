@@ -6,43 +6,43 @@ CONTAINER=pgdba_main
 echo "==> Creating TOAST scenario..."
 
 podman exec -i "$CONTAINER" psql -U postgres -d mydb <<'SQL'
--- Table with a large text column — values >8 KB are stored out-of-line in the TOAST heap.
-CREATE TABLE IF NOT EXISTS toast_demo (
+DROP TABLE IF EXISTS toast_demo;
+
+-- STORAGE EXTERNAL disables compression, so values > ~2 KB go directly to the TOAST heap.
+-- Without this, repeated strings compress to a few hundred bytes and stay inline.
+CREATE TABLE toast_demo (
     id       serial PRIMARY KEY,
     title    text NOT NULL,
-    payload  text NOT NULL,   -- ~16 KB per row → definitely stored in TOAST
+    payload  text NOT NULL,
     metadata jsonb
 );
 
--- Insert 120 rows; each payload is ~16 KB, guaranteeing TOAST storage.
+ALTER TABLE toast_demo ALTER COLUMN payload SET STORAGE EXTERNAL;
+
+-- md5(i::text) produces 32 chars of hex that differ per row → not compressible.
+-- 300 repetitions × 32 chars = ~9.6 KB per row, guaranteed to land in TOAST.
 INSERT INTO toast_demo (title, payload, metadata)
 SELECT
     'Record ' || i,
-    repeat('Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor. ', 200),
-    jsonb_build_object(
-        'index', i,
-        'tags', '["test","toast","demo"]'::jsonb,
-        'description', repeat('x', 800)
-    )
-FROM generate_series(1, 120) AS i
-ON CONFLICT DO NOTHING;
+    repeat(md5(i::text), 300),
+    jsonb_build_object('index', i, 'tags', '["test","toast","demo"]'::jsonb)
+FROM generate_series(1, 120) AS i;
 
--- First round of updates — creates dead tuples in the TOAST heap for 1/3 of rows.
+-- Two UPDATE passes create dead tuples in the TOAST heap on different row subsets.
 UPDATE toast_demo
-SET payload = repeat('First update — overwriting the original payload content. ', 200)
-WHERE id % 3 = 0;
+    SET payload = repeat(md5((id + 1000)::text), 300)
+    WHERE id % 3 = 0;
 
--- Second round — creates more TOAST dead tuples on a different subset.
 UPDATE toast_demo
-SET payload = repeat('Second update — another generation of dead TOAST tuples. ', 220)
-WHERE id % 5 = 0;
+    SET payload = repeat(md5((id + 2000)::text), 300)
+    WHERE id % 5 = 0;
 
--- Read the table to generate I/O stats in pg_statio_user_tables.toast_blks_*.
+-- Read to populate pg_statio_user_tables.toast_blks_* (Cache Hit % column).
 SELECT count(*), sum(length(payload)) FROM toast_demo;
 SQL
 
 echo ""
-echo "TOAST scenario ready — 120 rows with ~16 KB payloads each."
+echo "TOAST scenario ready — 120 rows with ~9.6 KB non-compressible payloads."
 echo "Two UPDATE passes created dead tuples in the TOAST heap."
 echo "Open pgdba and press T to view TOAST Tables."
 echo ""
