@@ -35,12 +35,13 @@ func (m ToastTablesModel) IsInputMode() bool { return m.filterMode }
 func toastTableColumns() []table.Column {
 	return []table.Column{
 		{Title: "Schema", Width: 12},
-		{Title: "Table", Width: 25},
+		{Title: "Table", Width: 22},
 		{Title: "Toast Size", Width: 12},
 		{Title: "Toast %", Width: 9},
 		{Title: "Dead Tuples", Width: 12},
 		{Title: "Cache Hit %", Width: 12},
 		{Title: "Last Autovacuum", Width: 18},
+		{Title: "Toast Columns", Width: 24}, // stretch col — column names benefit more from width
 	}
 }
 
@@ -72,6 +73,7 @@ func CheckToastTables(initialModel func() tea.Model) tea.Model {
 			fmt.Sprintf("%d", tt.ToastDeadTuples),
 			cacheHitStr,
 			formatTime(tt.LastAutovacuum),
+			tt.ToastColumns,
 		})
 		toastRelnames[tt.SchemaName+"."+tt.TableName] = tt.ToastRelname
 	}
@@ -101,7 +103,7 @@ func (m ToastTablesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		cols := StretchColumn(m.table.Columns(), 0, msg.Width)
+		cols := StretchColumn(m.table.Columns(), 7, msg.Width)
 		m.table.SetColumns(cols)
 		m.table.SetHeight(TableHeight(msg.Height))
 		return m, nil

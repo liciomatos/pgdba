@@ -1121,6 +1121,7 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		BlksHit         int64    `json:"blks_hit"`
 		CacheHitPct     *float64 `json:"cache_hit_pct"`
 		LastAutovacuum  *string  `json:"last_autovacuum"`
+		ToastColumns    string   `json:"toast_columns"`
 	}
 	tables, err := util.FetchToastTables(ctx, config.Config.DB, 50)
 	if err != nil {
@@ -1144,6 +1145,7 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			BlksHit:         tt.BlksHit,
 			CacheHitPct:     tt.CacheHitPct,
 			LastAutovacuum:  lastAV,
+			ToastColumns:    tt.ToastColumns,
 		}
 	}
 	return jsonResult(out)

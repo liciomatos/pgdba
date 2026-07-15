@@ -390,6 +390,7 @@ type ToastTable struct {
 	BlksHit         int64
 	CacheHitPct     *float64   // nil when no I/O has occurred yet
 	LastAutovacuum  *time.Time
+	ToastColumns    string     // comma-separated columns with TOAST-eligible storage (EXTENDED/EXTERNAL/MAIN)
 }
 
 func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable, error) {
@@ -410,7 +411,19 @@ func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable,
 			     THEN ROUND(100.0 * io.toast_blks_hit /
 			               (io.toast_blks_hit + io.toast_blks_read), 1)
 			     ELSE NULL END,
-			s.last_autovacuum
+			s.last_autovacuum,
+			-- Columns whose storage strategy can produce TOAST data:
+			-- e=EXTENDED (compress then out-of-line), x=EXTERNAL (out-of-line only), m=MAIN (compress in-line first).
+			-- p=PLAIN (fixed-width types like int) never goes to TOAST and is excluded.
+			COALESCE((
+				SELECT string_agg(a.attname, ', ' ORDER BY a.attnum)
+				FROM pg_attribute a
+				WHERE a.attrelid = c.oid
+				  AND a.attlen = -1
+				  AND a.attstorage IN ('e', 'x', 'm')
+				  AND a.attnum > 0
+				  AND NOT a.attisdropped
+			), '')
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_class t ON t.oid = c.reltoastrelid
@@ -435,6 +448,7 @@ func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable,
 			&tt.ToastDeadTuples,
 			&tt.BlksRead, &tt.BlksHit, &cacheHit,
 			&tt.LastAutovacuum,
+			&tt.ToastColumns,
 		); err != nil {
 			return nil, err
 		}
