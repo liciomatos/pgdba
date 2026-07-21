@@ -235,6 +235,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `t` | **Temp Files** | Temp file spill activity per database (`pg_stat_database`) | — |
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
+| `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
 
 All list screens support live filtering via `/`.
 
@@ -256,6 +257,18 @@ Press `R` from the main dashboard to open the Pub/Sub screen:
 - **Subscriptions** — name, status (active/down/disabled), subscribed publications, worker PID, received LSN, and error counts
 - Press `enter` on any row to open a detail view with per-table sync state, row counts, and DML stats
 - Press `tab` to switch between the Publications and Subscriptions sections
+
+### TOAST Tables
+
+Press `T` from the main dashboard to see which tables have data stored in their TOAST heap:
+
+- **Toast Size** — on-disk size of the TOAST relation (`pg_relation_size` on the TOAST table itself)
+- **Toast %** — TOAST size as a percentage of the table's total size (main + TOAST + indexes)
+- **Dead Tuples** — dead tuples in the TOAST heap, which accumulate independently of the parent table when large columns are updated
+- **Cache Hit %** — buffer cache hit ratio for TOAST I/O (`toast_blks_hit / (toast_blks_hit + toast_blks_read)` from `pg_statio_user_tables`)
+- **Toast Columns** — comma-separated list of columns whose storage strategy can produce TOAST data (EXTENDED/EXTERNAL/MAIN — PLAIN columns like `int` are excluded)
+- Press `v` to `VACUUM` the TOAST heap directly (`VACUUM pg_toast.<toast_table>`) with a confirmation prompt — useful when dead tuples accumulate after heavy updates on large columns
+- Press `enter` to open the Autovacuum Detail screen for the parent table
 
 ### Streaming Standbys
 

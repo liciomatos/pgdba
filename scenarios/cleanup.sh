@@ -21,6 +21,9 @@ BEGIN
     END IF;
 END
 \$\$;
+
+-- Remove TOAST demo table if it exists
+DROP TABLE IF EXISTS toast_demo;
 "
 
 echo "Cenarios dinamicos removidos."

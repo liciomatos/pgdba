@@ -70,9 +70,10 @@ clean:
 
 # Apply all dynamic scenarios at once (requires dev-up or docker-up + seed first)
 scenario-all:
-	@chmod +x scenarios/scenario-locks.sh scenarios/scenario-longrunning.sh
+	@chmod +x scenarios/scenario-locks.sh scenarios/scenario-longrunning.sh scenarios/scenario-toast.sh
 	@./scenarios/scenario-locks.sh
 	@./scenarios/scenario-longrunning.sh
+	@./scenarios/scenario-toast.sh
 
 # Simulate a blocked query scenario (shows in Blocked Queries screen)
 scenario-locks:
@@ -85,6 +86,10 @@ scenario-longrunning:
 # Create a test replication slot (shows in Replication Slots screen)
 scenario-slots:
 	@chmod +x scenarios/scenario-slots.sh && ./scenarios/scenario-slots.sh
+
+# Populate toast_demo with large text payloads (shows in TOAST Tables screen)
+scenario-toast:
+	@chmod +x scenarios/scenario-toast.sh && ./scenarios/scenario-toast.sh
 
 # Remove all dynamic scenarios (keeps seed data)
 scenarios-clean:
@@ -121,9 +126,10 @@ help:
 	@echo "  scenario-locks      Simulate a blocked session"
 	@echo "  scenario-longrunning Simulate a long-running query"
 	@echo "  scenario-slots      Create a test replication slot"
+	@echo "  scenario-toast      Populate toast_demo with large payloads (TOAST Tables screen)"
 	@echo "  scenarios-clean     Remove dynamic scenarios"
 	@echo "  mcp-up              Start the MCP server against the local dev database (mydb)"
 	@echo "  test-pg-matrix      Run integration tests against every supported PostgreSQL version (13-18)"
 	@echo "  help                Show this help message"
 
-.PHONY: build run run-replica run-sub docker-up docker-down dev-up dev-down clean seed scenario-all scenario-locks scenario-longrunning scenario-slots scenarios-clean mcp-up test-pg-matrix help
+.PHONY: build run run-replica run-sub docker-up docker-down dev-up dev-down clean seed scenario-all scenario-locks scenario-longrunning scenario-slots scenario-toast scenarios-clean mcp-up test-pg-matrix help

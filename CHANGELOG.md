@@ -5,6 +5,24 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-15
+
+### Added
+- **TOAST Tables screen** (`T`): lists user tables that have actual TOAST data on disk,
+  sorted by TOAST heap size. Columns: Toast Size, Toast % of total, Dead Tuples (in the
+  TOAST heap), Cache Hit %, Last Autovacuum, and Toast Columns (comma-separated column
+  names whose storage strategy is EXTENDED/EXTERNAL/MAIN — i.e. the columns that can
+  produce TOAST data). Color rules: Toast % >50% red / >20% yellow; Dead Tuples >100K
+  red / >10K yellow; Cache Hit % <80% red / <95% yellow.
+- **VACUUM on TOAST heap** (`v`): press `v` on any row to run
+  `VACUUM pg_toast.<toast_relname>` with a `y/n` confirmation dialog. Pressing `enter`
+  opens the Autovacuum Detail screen for the parent table.
+- `scenario-toast` (`make scenario-toast`): creates `toast_demo` table with 120 rows of
+  ~9.6 KB non-compressible payloads (`STORAGE EXTERNAL` + `md5` content) and two UPDATE
+  passes to generate dead tuples in the TOAST heap. Added to `scenario-all` / cleaned
+  up by `make scenarios-clean`.
+- MCP tool `check_toast_tables` exposes the same data as the TUI screen (read-only).
+
 ## [0.4.0] - 2026-07-08
 
 ### Added
@@ -81,7 +99,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/liciomatos/pgdba/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/liciomatos/pgdba/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/liciomatos/pgdba/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/liciomatos/pgdba/compare/v0.1.0...v0.2.0

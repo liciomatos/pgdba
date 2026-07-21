@@ -151,6 +151,22 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
 5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in
    `mcpserver/server.go`, including the read-only annotations described above.
 
+### TOAST table queries
+
+When querying TOAST stats, use `pg_stat_all_tables` (not `pg_stat_user_tables`) to join
+against the TOAST table's OID — TOAST tables live in `pg_toast` schema and are invisible
+to the `_user_` views. The parent table's TOAST I/O stats (`toast_blks_read`,
+`toast_blks_hit`) come from `pg_statio_user_tables` on the parent OID, not the TOAST OID.
+
+To identify which columns can produce TOAST data, filter `pg_attribute` on
+`attlen = -1 AND attstorage IN ('e', 'x', 'm')` — these are EXTENDED (compress then
+out-of-line), EXTERNAL (out-of-line without compression), and MAIN (compress in-line
+first). PLAIN (`'p'`) columns like `int`/`bool` never go to TOAST and must be excluded.
+
+`repeat('text', N)` is highly compressible and stays inline even at large N — test
+scenarios that need actual TOAST storage must use `STORAGE EXTERNAL` on the column plus
+non-compressible content (e.g. `repeat(md5(i::text), 300)`).
+
 ### Global key conflicts — implement `ConsumesKey`
 
 The navigator in `main.go` intercepts a set of global shortcuts (`p`, `s`, `f`, `R`, `1`–`0`, …)
