@@ -5,6 +5,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-18
+
 ### Added
 - **Autovacuum Monitor (`6`) now shows live activity**: a new Status column
   cross-references `pg_stat_progress_vacuum` (joined with `pg_stat_activity`) against
@@ -15,6 +17,12 @@ All notable changes to pgdba-cli are documented here. Format follows
   "Autovacuum Activity" screen (`A`); it was folded into `6` instead since the two
   screens overlapped almost entirely (same base query, same columns) — one screen now
   covers both "which tables need vacuuming" and "what's vacuuming right now".
+
+### Fixed
+- `make test-pg-matrix` was silently reusing the first PostgreSQL version's cached test
+  result for every other version in the loop, since `go test`'s result cache doesn't
+  invalidate on `PGDBA_TEST_PG_VERSION` changes read via `os.Getenv`. Added `-count=1` so
+  each version genuinely runs against its own container.
 
 ## [0.5.0] - 2026-07-15
 
@@ -110,7 +118,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/liciomatos/pgdba/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/liciomatos/pgdba/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/liciomatos/pgdba/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/liciomatos/pgdba/compare/v0.2.0...v0.3.0
