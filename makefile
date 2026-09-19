@@ -106,7 +106,7 @@ mcp-up: build
 test-pg-matrix:
 	@for v in 13 14 15 16 17 18; do \
 		echo "=== PostgreSQL $$v ==="; \
-		(cd pgdba-cli && PGDBA_TEST_PG_VERSION=$$v-alpine go test ./... -v -timeout 180s) || exit 1; \
+		(cd pgdba-cli && PGDBA_TEST_PG_VERSION=$$v-alpine go test ./... -v -timeout 180s -count=1) || exit 1; \
 	done
 
 # Help
