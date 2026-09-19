@@ -1155,6 +1155,79 @@ func FetchAutovacuumBloat(ctx context.Context, db *sql.DB, schema, table string)
 	return &d, nil
 }
 
+// --- Autovacuum Activity ---
+
+// AutovacuumWorkerSaturation compares configured autovacuum workers against how
+// many are currently running, to surface worker starvation.
+type AutovacuumWorkerSaturation struct {
+	MaxWorkers     int
+	RunningWorkers int
+}
+
+func FetchAutovacuumWorkerSaturation(ctx context.Context, db *sql.DB) (AutovacuumWorkerSaturation, error) {
+	var s AutovacuumWorkerSaturation
+	if err := db.QueryRowContext(ctx,
+		`SELECT setting::int FROM pg_settings WHERE name = 'autovacuum_max_workers'`,
+	).Scan(&s.MaxWorkers); err != nil {
+		return s, err
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'autovacuum worker'`,
+	).Scan(&s.RunningWorkers); err != nil {
+		return s, err
+	}
+	return s, nil
+}
+
+// AutovacuumWorkerActivity is one currently-running (auto)vacuum, from pg_stat_progress_vacuum.
+type AutovacuumWorkerActivity struct {
+	PID             int
+	IsAutovacuum    bool
+	SchemaName      string
+	TableName       string
+	Phase           string
+	HeapBlksTotal   int64
+	HeapBlksScanned int64
+	DurationSeconds *int64
+}
+
+func FetchAutovacuumActivity(ctx context.Context, db *sql.DB) ([]AutovacuumWorkerActivity, error) {
+	// LEFT JOIN pg_stat_activity: a progress row can briefly outlive its activity row
+	// (e.g. worker exiting), and we'd rather show it as "unknown type" than drop it.
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			p.pid,
+			COALESCE(a.backend_type, '') = 'autovacuum worker' AS is_autovacuum,
+			n.nspname,
+			c.relname,
+			p.phase,
+			p.heap_blks_total,
+			p.heap_blks_scanned,
+			CASE WHEN a.query_start IS NULL THEN NULL
+			     ELSE EXTRACT(EPOCH FROM (now() - a.query_start))::bigint END AS duration_seconds
+		FROM pg_stat_progress_vacuum p
+		JOIN pg_class c ON c.oid = p.relid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_activity a ON a.pid = p.pid
+		ORDER BY duration_seconds DESC NULLS LAST`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []AutovacuumWorkerActivity
+	for rows.Next() {
+		var w AutovacuumWorkerActivity
+		if err := rows.Scan(
+			&w.PID, &w.IsAutovacuum, &w.SchemaName, &w.TableName, &w.Phase,
+			&w.HeapBlksTotal, &w.HeapBlksScanned, &w.DurationSeconds,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, w)
+	}
+	return results, rows.Err()
+}
+
 // --- Freeze Monitor ---
 
 // FreezeDatabaseStatus is the XID freeze status for one database.

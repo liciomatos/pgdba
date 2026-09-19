@@ -236,6 +236,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
+| `A` | **Autovacuum Activity** | Currently-running vacuum/autovacuum workers with live phase and progress, plus worker saturation vs. `autovacuum_max_workers` | `enter` table detail |
 
 All list screens support live filtering via `/`.
 

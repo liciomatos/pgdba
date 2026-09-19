@@ -5,6 +5,16 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Autovacuum Activity screen** (`A`): a live-activity view complementing the existing
+  Autovacuum Monitor (`6`, ranked by dead tuples) and Freeze Monitor (`f`, XID
+  wraparound) point-in-time snapshots. Lists currently-running vacuum/autovacuum
+  workers from `pg_stat_progress_vacuum`, joined with `pg_stat_activity` for phase,
+  progress %, and duration, and distinguishes autovacuum workers from manually-run
+  VACUUMs. A summary bar shows worker saturation (`RunningWorkers /
+  autovacuum_max_workers`), colored red when all workers are busy. `enter` on a row
+  opens the existing Autovacuum Detail screen for that table. Read-only — no MCP tool.
+
 ## [0.5.0] - 2026-07-15
 
 ### Added

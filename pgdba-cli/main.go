@@ -254,6 +254,8 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckPubSub(dashboard)), nil
 			case "T":
 				return n.wrapChild(util.CheckToastTables(dashboard)), nil
+			case "A":
+				return n.wrapChild(util.CheckAutovacuumActivity(dashboard)), nil
 			}
 		}
 	}
