@@ -219,7 +219,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `3` | **Replication Slots** | Slots, plugin, WAL lag, and safe WAL size | `d` drop slot, `s` streaming standbys, `p` replication config |
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
 | `5` | **Connections** | Connections by state with % of limit used | — |
-| `6` | **Autovacuum** | Tables with most dead tuples and bloat estimate | `enter` detail view, `v` VACUUM ANALYZE |
+| `6` | **Autovacuum** | Tables ranked by dead tuples, with a Status column flagging what's vacuuming right now and a worker-saturation bar vs. `autovacuum_max_workers` | `enter` detail view, `v` VACUUM ANALYZE |
 | `7` | **Index Usage** | Indexes sorted by scan count | `enter` index detail |
 | `8` | **Cache Hit Ratio** | Buffer cache hit ratio per table | — |
 | `9` | **Users** | Login roles and their privileges | — |
@@ -236,7 +236,6 @@ From the main dashboard, open each screen with its shortcut key:
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
-| `A` | **Autovacuum Activity** | Currently-running vacuum/autovacuum workers with live phase and progress, plus worker saturation vs. `autovacuum_max_workers` | `enter` table detail |
 
 All list screens support live filtering via `/`.
 

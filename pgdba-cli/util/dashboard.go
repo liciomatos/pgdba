@@ -402,7 +402,6 @@ func (m DashboardModel) View() string {
 		renderKey("m") + " " + renderLabel("memory") + "  " +
 		renderKey("R") + " " + renderLabel("pub/sub") + "  " +
 		renderKey("T") + " " + renderLabel("toast") + "  " +
-		renderKey("A") + " " + renderLabel("av-activity") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 
