@@ -5,6 +5,17 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Autovacuum Monitor (`6`) now shows live activity**: a new Status column
+  cross-references `pg_stat_progress_vacuum` (joined with `pg_stat_activity`) against
+  the dead-tuple ranking, flagging a table as "auto vacuum", "manual vacuum", or "idle"
+  depending on whether something is vacuuming it right now. A summary bar above the
+  table shows autovacuum worker saturation (`RunningWorkers / autovacuum_max_workers`),
+  colored red when all workers are busy. An earlier draft shipped this as a separate
+  "Autovacuum Activity" screen (`A`); it was folded into `6` instead since the two
+  screens overlapped almost entirely (same base query, same columns) — one screen now
+  covers both "which tables need vacuuming" and "what's vacuuming right now".
+
 ## [0.5.0] - 2026-07-15
 
 ### Added

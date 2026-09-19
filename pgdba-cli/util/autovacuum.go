@@ -23,20 +23,47 @@ type AutovacuumModel struct {
 	confirmVacuum bool
 	schemaName    string
 	tableName     string
+	saturation    AutovacuumWorkerSaturation
 	height        int
 }
 
 func (m AutovacuumModel) IsInputMode() bool { return m.filterMode }
+
+// vacuumStatusText returns the Status column value for a table, cross-referencing
+// live pg_stat_progress_vacuum activity against the dead-tuple snapshot below —
+// "idle" doesn't mean unattended, just that nothing is running on it right now.
+func vacuumStatusText(isAutovacuum bool, active bool) string {
+	if !active {
+		return "idle"
+	}
+	if isAutovacuum {
+		return "auto vacuum"
+	}
+	return "manual vacuum"
+}
 
 func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 	tables, err := FetchAutovacuum(context.Background(), config.Config.DB, 20)
 	if err != nil {
 		return NewErrorModel(err, "Loading autovacuum monitor", initialModel)
 	}
+	saturation, err := FetchAutovacuumWorkerSaturation(context.Background(), config.Config.DB)
+	if err != nil {
+		return NewErrorModel(err, "Loading autovacuum worker saturation", initialModel)
+	}
+	activity, err := FetchAutovacuumActivity(context.Background(), config.Config.DB)
+	if err != nil {
+		return NewErrorModel(err, "Loading autovacuum activity", initialModel)
+	}
+	activeIsAutovacuum := make(map[string]bool, len(activity))
+	for _, w := range activity {
+		activeIsAutovacuum[w.SchemaName+"."+w.TableName] = w.IsAutovacuum
+	}
 
 	columns := []table.Column{
 		{Title: "Schema", Width: 12},
 		{Title: "Table", Width: 25},
+		{Title: "Status", Width: 14},
 		{Title: "Dead Tuples", Width: 12},
 		{Title: "Dead %", Width: 8},
 		{Title: "Size", Width: 10},
@@ -57,9 +84,11 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		if av.DeadPct != nil {
 			deadPctStr = fmt.Sprintf("%.1f%%", *av.DeadPct)
 		}
+		isAutovacuum, active := activeIsAutovacuum[av.SchemaName+"."+av.TableName]
 		rowsData = append(rowsData, table.Row{
 			av.SchemaName,
 			av.TableName,
+			vacuumStatusText(isAutovacuum, active),
 			fmt.Sprintf("%d", av.DeadTuples),
 			deadPctStr,
 			av.TotalSize,
@@ -76,7 +105,13 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return AutovacuumModel{table: t, allRows: rowsData, initialModel: initialModel, height: 30}
+	return AutovacuumModel{
+		table:        t,
+		allRows:      rowsData,
+		initialModel: initialModel,
+		saturation:   saturation,
+		height:       30,
+	}
 }
 
 func (m AutovacuumModel) Init() tea.Cmd { return nil }
@@ -85,7 +120,8 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
-		m.table.SetHeight(TableHeight(msg.Height))
+		// -3 for the worker-saturation line, hint line, and blank line above the table.
+		m.table.SetHeight(TableHeight(msg.Height) - 3)
 		return m, nil
 	case tea.KeyMsg:
 		if m.filterMode {
@@ -174,7 +210,13 @@ func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m AutovacuumModel) View() string {
 	rules := []ColorRule{
-		{Column: 3, Colorize: func(v string) int {
+		{Column: 2, Colorize: func(v string) int {
+			if v == "idle" {
+				return 3
+			}
+			return 0
+		}},
+		{Column: 4, Colorize: func(v string) int {
 			// Values are "N/A" or "30.1%"; strip % and parse.
 			f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
 			if err != nil {
@@ -190,7 +232,22 @@ func (m AutovacuumModel) View() string {
 			}
 		}},
 	}
+
+	level := 0
+	switch {
+	case m.saturation.MaxWorkers > 0 && m.saturation.RunningWorkers >= m.saturation.MaxWorkers:
+		level = 2
+	case m.saturation.MaxWorkers > 0 && m.saturation.RunningWorkers >= m.saturation.MaxWorkers/2:
+		level = 1
+	}
+	saturationLine := fmt.Sprintf("  %s %s",
+		HintStyle.Render("Autovacuum Workers:"),
+		SeverityColor(fmt.Sprintf("%d / %d running", m.saturation.RunningWorkers, m.saturation.MaxWorkers), level),
+	)
+
 	s := RenderHeader("Autovacuum Monitor") + "\n"
+	s += saturationLine + "\n"
+	s += HintStyle.Render("  Status shows what's vacuuming right now; the list below is ranked by dead tuples.") + "\n\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
