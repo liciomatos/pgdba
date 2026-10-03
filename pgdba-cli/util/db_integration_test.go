@@ -29,10 +29,19 @@ func testPostgresImage() string {
 }
 
 func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+// runTests owns the container lifecycle and returns the exit code instead of calling
+// os.Exit itself: os.Exit skips deferred calls, so the container was never terminated
+// and every `go test` run leaked a PostgreSQL container (Ryuk, testcontainers' reaper,
+// normally hides this, but it's disabled on Podman setups). Returning lets the
+// deferred Terminate run before TestMain exits.
+func runTests(m *testing.M) int {
 	flag.Parse()
 	if testing.Short() {
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
 
 	ctx := context.Background()
@@ -55,28 +64,32 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		os.Stderr.WriteString("WARNING: skipping integration tests (Docker unavailable): " + err.Error() + "\n")
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
-	defer pgContainer.Terminate(ctx)
+	defer func() {
+		if err := pgContainer.Terminate(ctx); err != nil {
+			os.Stderr.WriteString("WARNING: failed to terminate PostgreSQL test container: " + err.Error() + "\n")
+		}
+	}()
 
 	connStr, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		os.Stderr.WriteString("WARNING: skipping integration tests (connection string): " + err.Error() + "\n")
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
 
 	testDB, err = sql.Open("postgres", connStr)
 	if err != nil {
 		os.Stderr.WriteString("WARNING: skipping integration tests (sql.Open): " + err.Error() + "\n")
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
 
 	if _, err := testDB.Exec("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"); err != nil {
 		os.Stderr.WriteString("WARNING: skipping integration tests (pg_stat_statements): " + err.Error() + "\n")
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
 
 	config.Config.DB = testDB
@@ -90,8 +103,8 @@ func TestMain(m *testing.M) {
 	if err := testDB.QueryRow("SHOW server_version;").Scan(&config.Config.Version); err != nil {
 		os.Stderr.WriteString("WARNING: skipping integration tests (reading server_version): " + err.Error() + "\n")
 		skipIntegration = true
-		os.Exit(m.Run())
+		return m.Run()
 	}
 
-	os.Exit(m.Run())
+	return m.Run()
 }

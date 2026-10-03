@@ -276,6 +276,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
+| `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 
 All list screens show every row (no top-N cut-off) and scroll with `↑↓`/`pgup`/`pgdn` when the list is taller than the terminal. All list screens support live filtering via `/`.
 
@@ -311,6 +312,33 @@ Press `R` from the main dashboard to open the Pub/Sub screen:
 - **Subscriptions** — name, status (active/down/disabled), subscribed publications, worker PID, received LSN, and error counts
 - Press `enter` on any row to open a detail view with per-table sync state, row counts, and DML stats
 - Press `tab` to switch between the Publications and Subscriptions sections
+
+### Replica Identity
+
+Press `I` from the main dashboard to find tables that would break logical replication.
+UPDATE/DELETE can only be replicated for tables with a usable replica identity:
+
+| Replication | Usable identity | Without one |
+|---|---|---|
+| Native publications | PK (`DEFAULT`), `USING INDEX`, or `FULL` | UPDATE/DELETE fail **on the publisher**: `cannot update table … because it does not have a replica identity` |
+| pglogical replication sets | PK (`DEFAULT`) or `USING INDEX` — **`FULL` is not supported** | `replication_set_add_table` refuses the table, but a PK dropped (or identity changed to `FULL`/`NOTHING`) *after* it was added breaks replication; tables in `default_insert_only` silently don't replicate UPDATE/DELETE |
+
+- Lists permanent user tables whose identity is unusable: `REPLICA IDENTITY DEFAULT` without a
+  primary key, `NOTHING`, `USING INDEX` whose index was dropped, or `FULL` on a table in a
+  pglogical set. Unlogged/temp tables are never replicated and are skipped
+- **critical** — a publication or pglogical set already replicates UPDATE/DELETE for the
+  table (publications count directly, via `FOR ALL TABLES` / `FOR TABLES IN SCHEMA`, or
+  through a partitioned parent with `publish_via_partition_root`; pglogical counts the
+  local node's sets); **warning** — not replicated yet, or INSERT-only
+- The **Replicated by** column shows publication names and `pglogical:<set>`; pglogical is
+  detected automatically when its catalog exists
+- Press `p` to show only replicated tables (e.g. "replicated tables without PK and not
+  `REPLICA IDENTITY FULL`"); combines with `/`
+- The selected row shows the suggested fix above the footer, cheapest first:
+  `REPLICA IDENTITY DEFAULT` when a PK exists, `USING INDEX` when a unique, non-partial index
+  on `NOT NULL` columns exists, `FULL` otherwise — or "add a primary key" for pglogical
+  tables, since FULL isn't an option there. The screen is read-only — it never runs the DDL
+- The Pub/Sub screen (`R`) shows an alert with the critical count, pointing to `I`
 
 ### TOAST Tables
 
@@ -386,6 +414,7 @@ make dev-up
 make run          # pg-main (port 5432) — primary, publications, scenarios
 make run-replica  # pg-replica (port 5433) — physical streaming standby
 make run-sub      # pg-sub (port 5434) — logical subscriber
+make run-pglogical # pg-pglogical (port 5435) — pglogical provider node
 
 # Tear down all containers and volumes
 make dev-down
@@ -397,7 +426,7 @@ cd pgdba-cli && go test ./... -short
 cd pgdba-cli && go test ./... -timeout 120s
 ```
 
-`make dev-up` starts three containers in a single docker-compose stack and seeds all
+`make dev-up` starts four containers in a single docker-compose stack and seeds all
 diagnostic scenarios automatically:
 
 | Container | Port | Role |
@@ -405,6 +434,29 @@ diagnostic scenarios automatically:
 | `pg-main` | 5432 | Primary — publications, slow queries, lock scenarios |
 | `pg-replica` | 5433 | Physical streaming standby from pg-main |
 | `pg-sub` | 5434 | Logical subscriber to pg-main's publications |
+| `pg-pglogical` | 5435 | pglogical provider node (`postgresql-18-pglogical`) |
+
+The Replica Identity screen (`I`) has ready-made cases on both servers, baked into the
+images (`init-db/04_replica_identity.sql`, `docker/pglogical-init.sql`), so there's nothing
+to set up by hand:
+
+| Server | Table | Expected |
+|---|---|---|
+| pg-main, schema `ri_demo` | `events_no_pk` | critical — no PK, in `ri_demo_pub` → `REPLICA IDENTITY FULL` |
+| | `customer_codes` | critical — no PK, unique NOT NULL index → `USING INDEX` |
+| | `settings_nothing` | critical — PK but `NOTHING` → `REPLICA IDENTITY DEFAULT` |
+| | `sessions_index_dropped` | critical — `USING INDEX` whose index was dropped |
+| | `metrics_2026` | critical — partition published through its parent (`publish_via_partition_root`) |
+| | `audit_insert_only` | warning — INSERT-only publication |
+| | `staging_unpublished` | warning — not published |
+| | `logs_full`, `products_ok` | not listed — `FULL` / PK are fine natively |
+| pg-pglogical, schema `plg_demo` | `orders_pk_dropped` | critical — PK dropped after joining set `default` → add a PK |
+| | `invoices_full` | critical — switched to `FULL` (unsupported by pglogical) → `REPLICA IDENTITY DEFAULT` |
+| | `payments_full` | critical — switched to `FULL`, unique index still there → `USING INDEX` |
+| | `clickstream_insert_only` | warning — set `default_insert_only` |
+| | `customers_ok`, `scratch_full` | not listed |
+
+Init scripts only run on empty volumes: after editing one, `make dev-down && make dev-up`.
 
 ### Compatibility testing across PostgreSQL versions
 

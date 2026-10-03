@@ -44,6 +44,15 @@ go test ./util/ -run TestReplicationSlotsModel_PressD_ActivatesConfirm -v
 
 Integration tests use `testcontainers-go` to spin up a real PostgreSQL container. The shared setup lives in `util/db_integration_test.go` (`TestMain`), which injects a live `*sql.DB` into `config.Config.DB` before any test runs, and reads the real server version via `SHOW server_version;` so `pgMajorVersion()`-gated code in `Fetch*` functions is exercised correctly for whichever version `PGDBA_TEST_PG_VERSION` selects.
 
+With Podman (e.g. Podman Desktop on WSL, where the engine is remote), point
+testcontainers at the engine and disable Ryuk, its reaper container, which doesn't run
+there: `DOCKER_HOST=$CONTAINER_HOST TESTCONTAINERS_RYUK_DISABLED=true go test ./...`.
+Without Ryuk nothing else cleans up, so `TestMain` must terminate the container itself —
+it delegates to `runTests`, which *returns* the exit code so the deferred `Terminate`
+runs (`os.Exit` skips defers; calling it inside the setup leaked one container per run).
+A test that panics or a Ctrl+C still skips cleanup; remove leftovers with
+`podman rm -f $(podman ps -aq --filter label=org.testcontainers=true)`.
+
 ## Release Process
 
 Pushing a `vX.Y.Z` git tag is the only trigger needed — it fires two independent workflows:
@@ -188,6 +197,7 @@ instead of the global one. Known conflicts:
 | Replication Slots | `S` | Database Sizes | Streaming Standbys |
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
 | Record Locks   | `t`               | Temp Files          | Terminate backend |
+| Replica Identity | `p`             | PgConfig            | Replicated-only toggle |
 
 ### Terminal size — no per-screen bookkeeping required
 

@@ -65,6 +65,7 @@ func TestScreens_FitTerminalHeight(t *testing.T) {
 		"MemoryStats":         func() tea.Model { return CheckMemoryStats(dummyInitialModel) },
 		"PubSub":              func() tea.Model { return CheckPubSub(dummyInitialModel) },
 		"ToastTables":         func() tea.Model { return CheckToastTables(dummyInitialModel) },
+		"ReplicaIdentity":     func() tea.Model { return CheckReplicaIdentity(dummyInitialModel) },
 		"ReplicationConfig":   func() tea.Model { return CheckReplicationConfig(dummyInitialModel) },
 		"ReplicationStandbys": func() tea.Model { return CheckReplicationStandbys(dummyInitialModel) },
 	}

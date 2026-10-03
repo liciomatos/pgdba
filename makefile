@@ -25,6 +25,11 @@ run-sub: build
 	@echo "Connecting to pg-sub..."
 	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=mydb --sslmode=disable --port=5434
 
+# Run the Go project against pg-pglogical (pglogical provider, port 5435)
+run-pglogical: build
+	@echo "Connecting to pg-pglogical..."
+	./pgdba-cli/$(BINARY_NAME) --host=localhost --user=postgres --password=postgres --dbname=mydb --sslmode=disable --port=5435
+
 # Full local dev setup: start all containers, seed data, and apply all scenarios.
 # pg-replica starts automatically via pg_basebackup once pg-main is healthy.
 dev-up:
@@ -34,6 +39,10 @@ dev-up:
 	@until podman exec $(CONTAINER_NAME) pg_isready -U postgres -q 2>/dev/null; do sleep 2; done
 	@echo "Waiting for pg-sub to be ready..."
 	@until podman exec pgdba_sub pg_isready -U postgres -q 2>/dev/null; do sleep 2; done
+	@echo "Waiting for pg-pglogical to be ready..."
+	@# -h 127.0.0.1: the entrypoint's init-time server only listens on the socket, so TCP
+	@# readiness means the init scripts (pglogical scenarios) have finished.
+	@until podman exec pgdba_pglogical pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do sleep 2; done
 	$(MAKE) seed
 	$(MAKE) scenario-all
 	@echo "Dev environment ready. Run 'make run' to connect."
@@ -117,6 +126,7 @@ help:
 	@echo "  run                 Connect to pg-main (port 5432)"
 	@echo "  run-replica         Connect to pg-replica / physical standby (port 5433)"
 	@echo "  run-sub             Connect to pg-sub / logical subscriber (port 5434)"
+	@echo "  run-pglogical       Connect to pg-pglogical / pglogical provider (port 5435)"
 	@echo "  build               Build the Go project"
 	@echo "  docker-up           Start containers only (no seed/scenarios)"
 	@echo "  docker-down         Stop containers"
@@ -132,4 +142,4 @@ help:
 	@echo "  test-pg-matrix      Run integration tests against every supported PostgreSQL version (13-18)"
 	@echo "  help                Show this help message"
 
-.PHONY: build run run-replica run-sub docker-up docker-down dev-up dev-down clean seed scenario-all scenario-locks scenario-longrunning scenario-slots scenario-toast scenarios-clean mcp-up test-pg-matrix help
+.PHONY: build run run-replica run-sub run-pglogical docker-up docker-down dev-up dev-down clean seed scenario-all scenario-locks scenario-longrunning scenario-slots scenario-toast scenarios-clean mcp-up test-pg-matrix help

@@ -172,6 +172,12 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckAutovacuumDetail)
 
+	s.AddTool(mcp.NewTool("check_replica_identity",
+		mcp.WithDescription("Tables without a usable replica identity for logical replication: no primary key with REPLICA IDENTITY DEFAULT, REPLICA IDENTITY NOTHING, a dropped identity index, or REPLICA IDENTITY FULL on a table in a pglogical replication set (pglogical needs a PK or USING INDEX and does not support FULL). Covers native publications and, when the pglogical extension is installed, the local node's replication sets. Status \"critical\" means a publication/set already replicates UPDATE/DELETE for the table; \"warning\" means it would break once replicated (or only INSERTs are replicated). Includes a suggested fix (REPLICA IDENTITY DEFAULT / USING INDEX / FULL, or adding a primary key for pglogical). Read-only: never runs the fix."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckReplicaIdentity)
+
 	s.AddTool(mcp.NewTool("check_freeze_by_database",
 		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),
 		mcp.WithReadOnlyHintAnnotation(true),

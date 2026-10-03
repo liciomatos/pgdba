@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -2552,4 +2553,205 @@ func FetchWALReplicationStatus(ctx context.Context, db *sql.DB) (WALReplicationS
 		}
 	}
 	return status, nil
+}
+
+// --- Replica identity (logical replication readiness) ---
+
+// ReplicaIdentityIssue is a table without a replica identity usable by the logical
+// replication that includes (or could include) it. Native publications need a PK,
+// USING INDEX or FULL — without one, UPDATE/DELETE fail on the publisher with "cannot
+// update table ... because it does not have a replica identity". pglogical is
+// stricter: it needs a PK or USING INDEX, and does not support REPLICA IDENTITY FULL.
+type ReplicaIdentityIssue struct {
+	SchemaName    string
+	TableName     string
+	HasPrimaryKey bool
+	// ReplicaIdentity is pg_class.relreplident spelled out: "default" (uses the PK),
+	// "nothing", "index" (USING INDEX whose index was dropped) or "full" (only an issue
+	// for tables in a pglogical replication set).
+	ReplicaIdentity string
+	// Publications lists every publication that includes the table, directly, through
+	// FOR ALL TABLES / FOR TABLES IN SCHEMA, or through a partitioned ancestor.
+	Publications          []string
+	PublishesUpdateDelete bool
+	// PglogicalSets lists the local node's pglogical replication sets containing the
+	// table; empty when pglogical isn't installed.
+	PglogicalSets         []string
+	PglogicalUpdateDelete bool
+	// CandidateIndex is a unique, valid, non-partial, non-deferrable index on NOT NULL
+	// columns that REPLICA IDENTITY USING INDEX would accept; nil when there is none.
+	CandidateIndex *string
+	TotalSize      string
+}
+
+// IsCritical reports whether UPDATE/DELETE on the table can't be replicated today:
+// it's in a publication or pglogical replication set that replicates them.
+func (issue ReplicaIdentityIssue) IsCritical() bool {
+	return issue.PublishesUpdateDelete || issue.PglogicalUpdateDelete
+}
+
+// IsReplicated reports whether the table is in any publication or pglogical set.
+func (issue ReplicaIdentityIssue) IsReplicated() bool {
+	return len(issue.Publications) > 0 || len(issue.PglogicalSets) > 0
+}
+
+// SuggestedFix returns the statement that gives the table a usable identity, cheapest
+// first: back to DEFAULT when a PK exists, USING INDEX when a suitable unique index
+// exists, FULL otherwise — except for pglogical tables, which can't use FULL and need
+// a primary key (no single statement can be suggested for that).
+func (issue ReplicaIdentityIssue) SuggestedFix() string {
+	table := pq.QuoteIdentifier(issue.SchemaName) + "." + pq.QuoteIdentifier(issue.TableName)
+	switch {
+	case issue.HasPrimaryKey:
+		return fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY DEFAULT;", table)
+	case issue.CandidateIndex != nil:
+		return fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY USING INDEX %s;", table, pq.QuoteIdentifier(*issue.CandidateIndex))
+	case len(issue.PglogicalSets) > 0:
+		return fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (...);  -- pglogical does not support REPLICA IDENTITY FULL", table)
+	}
+	return fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", table)
+}
+
+// pglogicalInstalled checks for pglogical's catalog rather than pg_extension so a
+// partially configured node (extension present, no local node yet) still works.
+func pglogicalInstalled(ctx context.Context, db *sql.DB) (bool, error) {
+	var installed bool
+	err := db.QueryRowContext(ctx,
+		`SELECT to_regclass('pglogical.replication_set_table') IS NOT NULL
+		    AND to_regclass('pglogical.local_node') IS NOT NULL`).Scan(&installed)
+	return installed, err
+}
+
+// FetchReplicaIdentityIssues lists permanent user tables whose replica identity is
+// unusable: DEFAULT without a primary key, NOTHING, USING INDEX whose index no longer
+// exists, or FULL when the table is in a pglogical replication set. Tables whose
+// UPDATE/DELETE can't be replicated today come first.
+func FetchReplicaIdentityIssues(ctx context.Context, db *sql.DB) ([]ReplicaIdentityIssue, error) {
+	withPglogical, err := pglogicalInstalled(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	// pglogical's schema only exists when the extension is installed, so its part of
+	// the query is added conditionally (referencing it otherwise fails at parse time).
+	// Only the local node's sets matter: those are the ones this server provides.
+	pglogicalSets := ""
+	if withPglogical {
+		pglogicalSets = `
+			UNION ALL
+			SELECT
+				rs.set_name::text,
+				rs.replicate_update OR rs.replicate_delete,
+				rst.set_reloid::oid,
+				true
+			FROM pglogical.replication_set_table rst
+			JOIN pglogical.replication_set rs ON rs.set_id = rst.set_id
+			JOIN pglogical.local_node ln ON ln.node_id = rs.set_nodeid`
+	}
+	// pg_partition_ancestors() returns no rows for a regular table, so the table itself
+	// is matched separately; ancestors matter when a publication lists the partition root
+	// (publish_via_partition_root) — the leaf partitions still need their own identity.
+	rows, err := db.QueryContext(ctx, `
+		WITH replicated AS (
+			SELECT
+				p.pubname::text                                                                   AS name,
+				p.pubupdate OR p.pubdelete                                                        AS replicates_update_delete,
+				(quote_ident(pt.schemaname) || '.' || quote_ident(pt.tablename))::regclass::oid AS relid,
+				false                                                                             AS is_pglogical
+			FROM pg_publication_tables pt
+			JOIN pg_publication p ON p.pubname = pt.pubname`+pglogicalSets+`
+		),
+		user_tables AS (
+			SELECT
+				c.oid,
+				n.nspname,
+				c.relname,
+				c.relreplident,
+				EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)   AS has_pk,
+				EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident) AS has_identity_index
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind = 'r'
+			  AND c.relpersistence = 'p' -- temp and unlogged tables are never replicated
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pglogical')
+			  AND n.nspname NOT LIKE 'pg_toast%'
+		),
+		classified AS (
+			SELECT
+				t.*,
+				COALESCE(pubs.names, '{}')                     AS publications,
+				COALESCE(pubs.replicates_update_delete, false) AS publishes_update_delete,
+				COALESCE(sets.names, '{}')                     AS pglogical_sets,
+				COALESCE(sets.replicates_update_delete, false) AS pglogical_update_delete
+			FROM user_tables t
+			LEFT JOIN LATERAL (
+				SELECT array_agg(DISTINCT r.name ORDER BY r.name) AS names,
+				       bool_or(r.replicates_update_delete)       AS replicates_update_delete
+				FROM replicated r
+				WHERE NOT r.is_pglogical
+				  AND (r.relid = t.oid OR r.relid IN (SELECT relid FROM pg_partition_ancestors(t.oid)))
+			) pubs ON true
+			LEFT JOIN LATERAL (
+				SELECT array_agg(DISTINCT r.name ORDER BY r.name) AS names,
+				       bool_or(r.replicates_update_delete)       AS replicates_update_delete
+				FROM replicated r
+				WHERE r.is_pglogical AND r.relid = t.oid
+			) sets ON true
+		)
+		SELECT
+			t.nspname,
+			t.relname,
+			t.has_pk,
+			t.relreplident::text,
+			t.publications,
+			t.publishes_update_delete,
+			t.pglogical_sets,
+			t.pglogical_update_delete,
+			(
+				SELECT ic.relname
+				FROM pg_index i
+				JOIN pg_class ic ON ic.oid = i.indexrelid
+				WHERE i.indrelid = t.oid
+				  AND i.indisunique AND i.indisvalid AND i.indimmediate
+				  AND i.indpred IS NULL
+				  AND NOT (0 = ANY (i.indkey::int2[])) -- expression columns aren't allowed
+				  AND NOT EXISTS (
+					SELECT 1 FROM pg_attribute a
+					WHERE a.attrelid = t.oid AND a.attnum = ANY (i.indkey::int2[]) AND NOT a.attnotnull
+				  )
+				ORDER BY i.indnatts, ic.relname
+				LIMIT 1
+			),
+			pg_size_pretty(pg_total_relation_size(t.oid))
+		FROM classified t
+		WHERE t.relreplident = 'n'
+		   OR (t.relreplident = 'd' AND NOT t.has_pk)
+		   OR (t.relreplident = 'i' AND NOT t.has_identity_index)
+		   -- pglogical needs an identity *index*; FULL has none
+		   OR (t.relreplident = 'f' AND cardinality(t.pglogical_sets) > 0)
+		ORDER BY t.publishes_update_delete OR t.pglogical_update_delete DESC,
+		         cardinality(t.publications) + cardinality(t.pglogical_sets) DESC,
+		         t.nspname, t.relname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	identityNames := map[string]string{"d": "default", "n": "nothing", "i": "index", "f": "full"}
+	results := []ReplicaIdentityIssue{}
+	for rows.Next() {
+		var issue ReplicaIdentityIssue
+		var relreplident string
+		var publications, pglogicalSets pq.StringArray
+		if err := rows.Scan(
+			&issue.SchemaName, &issue.TableName, &issue.HasPrimaryKey, &relreplident,
+			&publications, &issue.PublishesUpdateDelete, &pglogicalSets, &issue.PglogicalUpdateDelete,
+			&issue.CandidateIndex, &issue.TotalSize,
+		); err != nil {
+			return nil, err
+		}
+		issue.ReplicaIdentity = identityNames[relreplident]
+		issue.Publications = []string(publications)
+		issue.PglogicalSets = []string(pglogicalSets)
+		results = append(results, issue)
+	}
+	return results, rows.Err()
 }
