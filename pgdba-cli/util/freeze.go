@@ -206,7 +206,7 @@ func (m FreezeModel) View() string {
 		s += fmt.Sprintf("\nVACUUM (FREEZE, ANALYZE) %s.%s? (y/n) — this can be slow on large tables\n",
 			m.schemaName, m.tableName)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • f vacuum freeze • D switch database • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • f vacuum freeze • D switch database • r refresh • ? help • q back")
 	}
 	return s
 }

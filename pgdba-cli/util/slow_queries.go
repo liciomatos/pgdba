@@ -177,6 +177,6 @@ func (m SlowQueriesModel) View() string {
 	}
 	s := RenderHeader("Slow Queries") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
 	return s
 }

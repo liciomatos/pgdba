@@ -13,6 +13,12 @@ All notable changes to pgdba-cli are documented here. Format follows
   and this server's subscription errors (PG15+) and conflicts (PG18+). Works on standbys.
   The dashboard now measures its height and compacts on short terminals; uptime moved to
   the connection line and the slot count into the new section.
+- **`?` help on every screen**: a scrollable, man-page style page per screen — purpose,
+  what each column/metric means, screen keys plus the common ones, how to read the values
+  (including the exact thresholds behind each color) and the catalog views it reads.
+  `q`/`esc`/`?` return to the same screen with its state intact; global shortcuts are
+  disabled while reading. Every footer and the dashboard show `? help`, and a test fails if
+  a screen is added without a help page.
 - **Replica Identity screen (`I`)**: lists tables without a usable replica identity for
   logical replication — no PK with `REPLICA IDENTITY DEFAULT`, `NOTHING`, a dropped identity
   index, or `FULL` on a table in a pglogical replication set (pglogical needs a PK or

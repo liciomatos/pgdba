@@ -122,6 +122,6 @@ func (m ConnectionsModel) View() string {
 
 	summary := SeverityColor(fmt.Sprintf("%d / %d connections used (%.1f%%)", m.usedConns, m.maxConns, pct), level)
 	s += "\n" + summary
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

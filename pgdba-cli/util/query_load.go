@@ -184,6 +184,6 @@ func (m QueryLoadModel) View() string {
 	s := RenderHeader("Query Load") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + legend
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
 	return s
 }

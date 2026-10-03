@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/liciomatos/pgdba-cli/config"
+	"github.com/liciomatos/pgdba-cli/util"
 )
 
 func TestGetEnv_WithValue(t *testing.T) {
@@ -136,5 +138,50 @@ func TestBuildConnStr_PasswordOverrideReplacesFlagPassword(t *testing.T) {
 	}
 	if !strings.Contains(connStr, `password='it\'s secret'`) {
 		t.Fatalf("prompted password not used/quoted: %s", connStr)
+	}
+}
+
+type helpTestChild struct {
+	inputMode bool
+	keys      []string
+}
+
+func (c helpTestChild) Init() tea.Cmd { return nil }
+func (c helpTestChild) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		c.keys = append(c.keys, key.String())
+	}
+	return c, nil
+}
+func (c helpTestChild) View() string      { return "child" }
+func (c helpTestChild) HelpTopic() string { return "index_usage" }
+func (c helpTestChild) IsInputMode() bool { return c.inputMode }
+
+func TestNavigator_QuestionMarkOpensHelpAndReturns(t *testing.T) {
+	nav := navigator{child: helpTestChild{}, width: 100, height: 30}
+	updated, _ := nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	nav = updated.(navigator)
+	if _, isHelp := nav.child.(util.HelpModel); !isHelp {
+		t.Fatalf("? should open the help page, child is %T", nav.child)
+	}
+	// Global shortcuts are swallowed while help is open.
+	updated, _ = nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	nav = updated.(navigator)
+	if _, isHelp := nav.child.(util.HelpModel); !isHelp {
+		t.Fatalf("1 must not navigate away from help, child is %T", nav.child)
+	}
+	updated, _ = nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	nav = updated.(navigator)
+	if _, back := nav.child.(helpTestChild); !back {
+		t.Fatalf("q should return to the original screen, child is %T", nav.child)
+	}
+}
+
+func TestNavigator_QuestionMarkIsTextWhileFiltering(t *testing.T) {
+	nav := navigator{child: helpTestChild{inputMode: true}, width: 100, height: 30}
+	updated, _ := nav.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	child, ok := updated.(navigator).child.(helpTestChild)
+	if !ok || len(child.keys) != 1 || child.keys[0] != "?" {
+		t.Fatalf("while filtering, ? must reach the screen as text; child=%T keys=%v", updated.(navigator).child, child.keys)
 	}
 }

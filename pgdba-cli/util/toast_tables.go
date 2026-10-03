@@ -248,7 +248,7 @@ func (m ToastTablesModel) View() string {
 		s += fmt.Sprintf("\nVACUUM pg_toast.%s? (y/n)\n", m.toastRelname)
 	} else {
 		s += "\n" + FilterFooter(m.filterMode, m.filterText,
-			"enter parent detail • v vacuum toast • r refresh • q back")
+			"enter parent detail • v vacuum toast • r refresh • ? help • q back")
 	}
 	return s
 }

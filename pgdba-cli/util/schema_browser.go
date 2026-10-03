@@ -219,10 +219,10 @@ func (m SchemaBrowserModel) View() string {
 	var hints string
 	if m.mode == "columns" {
 		title = fmt.Sprintf("Schema Browser — %s.%s", m.selectedSchema, m.selectedTable)
-		hints = "↑↓ navigate • esc/r back to tables • q back"
+		hints = "↑↓ navigate • esc/r back to tables • ? help • q back"
 	} else {
 		title = "Schema Browser"
-		hints = "↑↓ navigate • enter describe • r refresh • q back"
+		hints = "↑↓ navigate • enter describe • r refresh • ? help • q back"
 	}
 	s := RenderHeader(title) + "\n"
 	s += m.table.View()

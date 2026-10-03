@@ -406,6 +406,7 @@ func (m DashboardModel) View() string {
 		renderKey("T") + " " + renderLabel("toast") + "  " +
 		renderKey("I") + " " + renderLabel("replica-id") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
+		renderKey("?") + " " + renderLabel("help") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 
 	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3
