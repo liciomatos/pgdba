@@ -205,7 +205,7 @@ func (m LongRunningQueriesModel) View() string {
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • k kill • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • k kill • r refresh • ? help • q back")
 	}
 	return s
 }

@@ -167,6 +167,6 @@ func (m IndexUsageModel) View() string {
 		tip = lipgloss.NewStyle().MaxWidth(m.width).Render(tip)
 	}
 	s += "\n" + HintStyle.Render(tip)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
 	return s
 }

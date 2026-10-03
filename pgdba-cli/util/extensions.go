@@ -100,6 +100,6 @@ func (m ExtensionsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m ExtensionsModel) View() string {
 	s := RenderHeader("Extensions") + "\n"
 	s += m.table.View()
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

@@ -110,6 +110,6 @@ func (m DatabaseSizeModel) View() string {
 		}
 	}
 
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

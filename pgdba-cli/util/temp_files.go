@@ -102,6 +102,6 @@ func (m TempFilesModel) View() string {
 		s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	}
 
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

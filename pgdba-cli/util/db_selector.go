@@ -139,7 +139,7 @@ func (m DatabaseSelectorModel) View() string {
 	}
 	s := RenderHeader("Switch Database") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter connect • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter connect • r refresh • ? help • q back")
 	return s
 }
 

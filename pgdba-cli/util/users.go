@@ -147,6 +147,6 @@ func (m UsersModel) View() string {
 	}
 	s := RenderHeader("Users & Permissions") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

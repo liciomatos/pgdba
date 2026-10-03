@@ -40,6 +40,6 @@ func (m VersionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m VersionModel) View() string {
 	s := RenderHeader("Check Version") + "\n"
 	s += fmt.Sprintf("Server version: %s\n", m.version)
-	s += "\n" + FooterStyle.Render("r refresh • q back")
+	s += "\n" + FooterStyle.Render("r refresh • ? help • q back")
 	return s
 }

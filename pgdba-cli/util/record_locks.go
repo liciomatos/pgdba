@@ -242,7 +242,7 @@ func (m RecordLocksModel) View() string {
 			s += "\nTerminate all blocking sessions? (y/n)\n"
 		}
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a all • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • t terminate • a all • r refresh • ? help • q back")
 	}
 	return s
 }

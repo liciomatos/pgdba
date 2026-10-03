@@ -258,6 +258,13 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if kc, ok := n.child.(keyConsumer); ok {
 			childConsumes = kc.ConsumesKey(key.String())
 		}
+		// "?" opens the help page of whatever screen is showing; HelpModel returns to
+		// that same screen (state intact) when closed.
+		if key.String() == "?" && !inInputMode && !childConsumes {
+			if provider, ok := n.child.(util.HelpTopicProvider); ok {
+				return n.wrapChild(util.NewHelpModel(provider.HelpTopic(), n.child)), nil
+			}
+		}
 		if !inInputMode && !childConsumes {
 			switch key.String() {
 			case "1":

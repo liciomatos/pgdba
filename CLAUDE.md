@@ -159,6 +159,13 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
    global `S` for Database Sizes silently broke Replication Slots' own local `S` shortcut).
 5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in
    `mcpserver/server.go`, including the read-only annotations described above.
+6. Write its `?` help page: add a `ScreenHelp` entry to `screenHelp` in `util/help.go`
+   (purpose, columns, screen-specific keys, how to read the values — the real thresholds
+   behind the colors — and the catalog views it reads), a `HelpTopic()` method for the
+   model there, and the model to `screenModels` in `util/help_test.go`. End the footer
+   hints with `? help • q back`. `TestEveryScreenHasHelp` parses the package and fails for
+   any model with a `View` method that has no help topic. The navigator opens `HelpModel`
+   on `?` (skipped while a screen is in filter/input mode, so `?` can still be typed).
 
 ### TOAST table queries
 
@@ -198,6 +205,7 @@ instead of the global one. Known conflicts:
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
 | Record Locks   | `t`               | Temp Files          | Terminate backend |
 | Replica Identity | `p`             | PgConfig            | Replicated-only toggle |
+| Help page (`?`) | every key       | all globals         | Help is read-only: `HelpModel.ConsumesKey` claims every key; q/esc/? close it |
 
 ### Terminal size — no per-screen bookkeeping required
 

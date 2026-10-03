@@ -192,6 +192,6 @@ func (m IndexDetailModel) View() string {
 		}},
 	}
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q/esc back to index list")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q/esc back to index list")
 	return s
 }

@@ -174,7 +174,7 @@ func (m ReplicationSlotsModel) View() string {
 	if m.confirmDelete {
 		s += fmt.Sprintf("\nDrop replication slot '%s'? (y/n)\n", m.slotToDelete)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • S all standbys • p repl config • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • d drop • S all standbys • p repl config • r refresh • ? help • q back")
 	}
 	return s
 }

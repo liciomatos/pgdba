@@ -101,6 +101,6 @@ func (m WaitEventsModel) View() string {
 	s := RenderHeader("Wait Events") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + legend
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }
