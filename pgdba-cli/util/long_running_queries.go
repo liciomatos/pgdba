@@ -30,7 +30,7 @@ type LongRunningQueriesModel struct {
 func (m LongRunningQueriesModel) IsInputMode() bool { return m.filterMode }
 
 func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
-	queries, err := FetchLongRunningQueries(context.Background(), config.Config.DB, 5, 100)
+	queries, err := FetchLongRunningQueries(context.Background(), config.Config.DB, 5, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading long running queries", initialModel)
 	}
@@ -205,7 +205,7 @@ func (m LongRunningQueriesModel) View() string {
 	if m.confirmKill {
 		s += fmt.Sprintf("\nKill query with PID %d? (y/n)\n", m.pidToKill)
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • k kill • / filter • r refresh • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • k kill • r refresh • q back")
 	}
 	return s
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type IndexUsageModel struct {
@@ -20,10 +21,27 @@ type IndexUsageModel struct {
 	height       int
 }
 
+// indexUsageNameColumns are sized to their content: Schema, Table, Index, Columns.
+var indexUsageNameColumns = []int{0, 1, 2, 3}
+
+// indexUsageValueColumns (Valid, Scans, Tup Read, Tup Fetch, Size) take exactly the width
+// of their longest value — never truncated, and no wasted space taken from the names.
+var indexUsageValueColumns = []int{4, 5, 6, 7, 8}
+
+// selectedIndexTip returns the full, untruncated identity of the selected index, shown
+// above the footer because narrow terminals still have to cut long names with "…".
+func (m IndexUsageModel) selectedIndexTip() string {
+	row := m.table.SelectedRow()
+	if len(row) < 4 {
+		return ""
+	}
+	return fmt.Sprintf("  %s.%s on %s.%s (%s)", row[0], row[2], row[0], row[1], row[3])
+}
+
 func (m IndexUsageModel) IsInputMode() bool { return m.filterMode }
 
 func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
-	indexes, err := FetchIndexUsage(context.Background(), config.Config.DB, 20)
+	indexes, err := FetchIndexUsage(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading index usage", initialModel)
 	}
@@ -74,7 +92,9 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.table.SetHeight(TableHeight(msg.Height))
+		cols := SizeColumnsToContent(m.table.Columns(), m.allRows, indexUsageValueColumns)
+		m.table.SetColumns(FitColumnsToContent(cols, m.allRows, indexUsageNameColumns, msg.Width))
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 	case tea.KeyMsg:
 		if m.filterMode {
@@ -141,6 +161,12 @@ func (m IndexUsageModel) View() string {
 	}
 	s := RenderHeader("Index Usage") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
+	// Always reserve the tip line and truncate it, so the frame height never changes.
+	tip := m.selectedIndexTip()
+	if tip != "" && m.width > 0 {
+		tip = lipgloss.NewStyle().MaxWidth(m.width).Render(tip)
+	}
+	s += "\n" + HintStyle.Render(tip)
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
 	return s
 }

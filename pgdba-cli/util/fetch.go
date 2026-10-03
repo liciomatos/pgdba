@@ -7,8 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/liciomatos/pgdba-cli/config"
 )
+
+// NoRowLimit passed as the limit argument of a Fetch* function returns every row
+// (LIMIT NULLIF(0, 0) = LIMIT NULL = LIMIT ALL). TUI screens use it so the table
+// scrolls through the full list; MCP handlers keep a finite default limit.
+const NoRowLimit = 0
 
 // pgMajorVersion returns the major version number of the connected PostgreSQL server.
 func pgMajorVersion() int {
@@ -157,7 +163,7 @@ func FetchSlowQueries(ctx context.Context, db *sql.DB, thresholdMS, limit int) (
 		FROM pg_stat_statements
 		WHERE mean_exec_time > $1
 		ORDER BY mean_exec_time DESC
-		LIMIT $2`, thresholdMS, limit)
+		LIMIT NULLIF($2::int, 0)`, thresholdMS, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +203,7 @@ func FetchLongRunningQueries(ctx context.Context, db *sql.DB, minDurationSeconds
 		  AND query_start IS NOT NULL
 		  AND now() - query_start > ($1 * interval '1 second')
 		ORDER BY duration_seconds DESC
-		LIMIT $2`, minDurationSeconds, limit)
+		LIMIT NULLIF($2::int, 0)`, minDurationSeconds, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +358,7 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 		FROM pg_stat_user_tables s
 		JOIN pg_class c ON c.oid = s.relid
 		ORDER BY s.n_dead_tup DESC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +439,7 @@ func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable,
 		  AND c.relkind = 'r'
 		  AND pg_relation_size(t.oid) > 0
 		ORDER BY pg_relation_size(t.oid) DESC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +500,7 @@ func FetchIndexUsage(ctx context.Context, db *sql.DB, limit int) ([]IndexUsage, 
 		FROM pg_stat_user_indexes s
 		JOIN pg_index i ON i.indexrelid = s.indexrelid
 		ORDER BY s.idx_scan ASC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -541,7 +547,7 @@ func FetchCacheHit(ctx context.Context, db *sql.DB, limit int) ([]CacheHitTable,
 			END AS idx_cache_hit_ratio
 		FROM pg_statio_user_tables
 		ORDER BY heap_blks_read DESC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +631,7 @@ func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, er
 			) AS load_pct
 		FROM pg_stat_statements
 		ORDER BY total_exec_time DESC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1038,79 +1044,391 @@ type AutovacuumParam struct {
 	Unit        string
 }
 
-var autovacuumParamNames = []string{
-	"autovacuum_vacuum_scale_factor",
-	"autovacuum_vacuum_threshold",
-	"autovacuum_analyze_scale_factor",
-	"autovacuum_analyze_threshold",
-	"autovacuum_vacuum_cost_delay",
-	"autovacuum_vacuum_cost_limit",
-	"autovacuum_freeze_min_age",
-	"autovacuum_freeze_max_age",
-	"autovacuum_freeze_table_age",
+// autovacuumParamSpec pairs a table reloption with the GUC that supplies its value
+// when the table doesn't override it. The names differ for the freeze ages:
+// reloption autovacuum_freeze_min_age falls back to GUC vacuum_freeze_min_age.
+type autovacuumParamSpec struct {
+	Reloption    string
+	GlobalName   string
+	MinPGVersion int
 }
 
-func FetchAutovacuumParams(ctx context.Context, db *sql.DB, schema, table string) ([]AutovacuumParam, error) {
-	// Read table's reloptions as a comma-separated string.
-	var relopts string
-	_ = db.QueryRowContext(ctx, `
-		SELECT COALESCE(array_to_string(c.reloptions, ','), '')
+var autovacuumParamSpecs = []autovacuumParamSpec{
+	{"autovacuum_enabled", "autovacuum", 0},
+	{"autovacuum_vacuum_threshold", "autovacuum_vacuum_threshold", 0},
+	{"autovacuum_vacuum_scale_factor", "autovacuum_vacuum_scale_factor", 0},
+	// autovacuum_vacuum_max_threshold caps the dead-tuple threshold; added in PG18.
+	{"autovacuum_vacuum_max_threshold", "autovacuum_vacuum_max_threshold", 18},
+	{"autovacuum_vacuum_insert_threshold", "autovacuum_vacuum_insert_threshold", 0},
+	{"autovacuum_vacuum_insert_scale_factor", "autovacuum_vacuum_insert_scale_factor", 0},
+	{"autovacuum_analyze_threshold", "autovacuum_analyze_threshold", 0},
+	{"autovacuum_analyze_scale_factor", "autovacuum_analyze_scale_factor", 0},
+	{"autovacuum_vacuum_cost_delay", "autovacuum_vacuum_cost_delay", 0},
+	{"autovacuum_vacuum_cost_limit", "autovacuum_vacuum_cost_limit", 0},
+	{"autovacuum_freeze_min_age", "vacuum_freeze_min_age", 0},
+	{"autovacuum_freeze_max_age", "autovacuum_freeze_max_age", 0},
+	{"autovacuum_freeze_table_age", "vacuum_freeze_table_age", 0},
+	{"autovacuum_multixact_freeze_min_age", "vacuum_multixact_freeze_min_age", 0},
+	{"autovacuum_multixact_freeze_max_age", "autovacuum_multixact_freeze_max_age", 0},
+	{"autovacuum_multixact_freeze_table_age", "vacuum_multixact_freeze_table_age", 0},
+}
+
+// parseReloptions turns pg_class.reloptions ({"key=value", …}) into a map.
+func parseReloptions(reloptions []string) map[string]string {
+	options := make(map[string]string, len(reloptions))
+	for _, option := range reloptions {
+		if key, value, ok := strings.Cut(option, "="); ok {
+			options[key] = value
+		}
+	}
+	return options
+}
+
+func fetchReloptions(ctx context.Context, db *sql.DB, schema, table string) (map[string]string, error) {
+	var reloptions pq.StringArray
+	err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(c.reloptions, '{}')
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1 AND c.relname = $2`,
 		schema, table,
-	).Scan(&relopts)
-
-	tableParams := make(map[string]string)
-	for _, opt := range strings.Split(relopts, ",") {
-		opt = strings.TrimSpace(opt)
-		if opt == "" {
-			continue
-		}
-		parts := strings.SplitN(opt, "=", 2)
-		if len(parts) == 2 {
-			tableParams[parts[0]] = parts[1]
-		}
-	}
-
-	// Read global values from pg_settings.
-	rows, err := db.QueryContext(ctx, `
-		SELECT name, setting, COALESCE(unit, '')
-		FROM pg_settings
-		WHERE name IN (
-			'autovacuum_vacuum_scale_factor',
-			'autovacuum_vacuum_threshold',
-			'autovacuum_analyze_scale_factor',
-			'autovacuum_analyze_threshold',
-			'autovacuum_vacuum_cost_delay',
-			'autovacuum_vacuum_cost_limit',
-			'autovacuum_freeze_min_age',
-			'autovacuum_freeze_max_age',
-			'autovacuum_freeze_table_age'
-		)
-		ORDER BY name`)
+	).Scan(&reloptions)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return parseReloptions(reloptions), nil
+}
 
-	globalMap := make(map[string]AutovacuumParam)
+// fetchGlobalSettings returns pg_settings.setting/unit for the given GUC names;
+// names that don't exist on the connected version are simply absent.
+func fetchGlobalSettings(ctx context.Context, db *sql.DB, names []string) (map[string]string, map[string]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT name, setting, COALESCE(unit, '') FROM pg_settings WHERE name = ANY($1)`,
+		pq.Array(names))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	settings := make(map[string]string, len(names))
+	units := make(map[string]string, len(names))
 	for rows.Next() {
 		var name, setting, unit string
 		if err := rows.Scan(&name, &setting, &unit); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		globalMap[name] = AutovacuumParam{Name: name, GlobalValue: setting, Unit: unit}
+		settings[name] = setting
+		units[name] = unit
+	}
+	return settings, units, rows.Err()
+}
+
+func FetchAutovacuumParams(ctx context.Context, db *sql.DB, schema, table string) ([]AutovacuumParam, error) {
+	tableParams, err := fetchReloptions(ctx, db, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	globalNames := make([]string, 0, len(autovacuumParamSpecs))
+	for _, spec := range autovacuumParamSpecs {
+		globalNames = append(globalNames, spec.GlobalName)
+	}
+	globalSettings, globalUnits, err := fetchGlobalSettings(ctx, db, globalNames)
+	if err != nil {
+		return nil, err
 	}
 
 	var results []AutovacuumParam
-	for _, name := range autovacuumParamNames {
-		p := globalMap[name]
-		p.Name = name
-		p.TableValue = tableParams[name] // "" if not customized
-		results = append(results, p)
+	for _, spec := range autovacuumParamSpecs {
+		if pgMajorVersion() < spec.MinPGVersion {
+			continue
+		}
+		results = append(results, AutovacuumParam{
+			Name:        spec.Reloption,
+			TableValue:  tableParams[spec.Reloption], // "" if not customized
+			GlobalValue: globalSettings[spec.GlobalName],
+			Unit:        globalUnits[spec.GlobalName],
+		})
 	}
-	return results, rows.Err()
+	return results, nil
+}
+
+// --- Autovacuum thresholds ---
+
+// Setting sources reported in ThresholdSetting.Source.
+const (
+	SourceTable    = "table"    // table reloption
+	SourceGlobal   = "global"   // postgresql.conf / ALTER SYSTEM (pg_settings)
+	SourceAdjusted = "adjusted" // derived by PostgreSQL from other settings (capped/raised)
+)
+
+// ThresholdSetting is one effective autovacuum setting and where it came from.
+type ThresholdSetting struct {
+	Value  float64
+	Source string
+}
+
+// RowThreshold is a "base + scale_factor × reltuples" autovacuum trigger, computed
+// exactly as autovacuum.c's relation_needs_vacanalyze() does.
+type RowThreshold struct {
+	Base        ThresholdSetting
+	ScaleFactor ThresholdSetting
+	// MaxThreshold caps the dead-tuple threshold (PG18+ autovacuum_vacuum_max_threshold).
+	// nil when not applicable on this version or disabled with -1.
+	MaxThreshold *ThresholdSetting
+	// UnfrozenFraction scales the insert threshold by the share of pages not yet
+	// all-frozen (PG18+, from pg_class.relallfrozen). nil on PG13–17.
+	UnfrozenFraction *float64
+	Threshold        float64
+	Current          int64
+	Due              bool
+}
+
+// AgeThreshold compares a relfrozenxid/relminmxid age against one freeze limit.
+type AgeThreshold struct {
+	Limit   ThresholdSetting
+	Current int64
+	Due     bool
+}
+
+// AutovacuumThresholds is the effective autovacuum decision for one table, mixing
+// table reloptions (when set) with global settings (otherwise).
+type AutovacuumThresholds struct {
+	AutovacuumEnabled       bool
+	AutovacuumEnabledSource string
+	TrackCounts             bool
+	// Reltuples is pg_class.reltuples as autovacuum uses it: -1 ("never vacuumed or
+	// analyzed", PG14+) is treated as 0, flagged by ReltuplesUnknown.
+	Reltuples        float64
+	ReltuplesUnknown bool
+
+	DeadTuples RowThreshold
+	Inserts    *RowThreshold // nil when insert-triggered vacuum is disabled (-1)
+	Analyze    RowThreshold
+
+	XIDWraparound    AgeThreshold // forced anti-wraparound autovacuum (runs even if autovacuum is off)
+	XIDAggressive    AgeThreshold // next VACUUM scans every not-all-frozen page
+	XIDFreezeMinAge  ThresholdSetting
+	XIDFailsafe      *AgeThreshold // PG14+ vacuum_failsafe_age; nil on PG13
+	MXIDWraparound   AgeThreshold
+	MXIDAggressive   AgeThreshold
+	MXIDFreezeMinAge ThresholdSetting
+	MXIDFailsafe     *AgeThreshold // PG14+ vacuum_multixact_failsafe_age; nil on PG13
+}
+
+// AutovacuumDue reports whether autovacuum would pick the table up right now.
+func (t AutovacuumThresholds) AutovacuumDue() bool {
+	if t.XIDWraparound.Due || t.MXIDWraparound.Due {
+		return true
+	}
+	if !t.AutovacuumEnabled || !t.TrackCounts {
+		return false
+	}
+	return t.DeadTuples.Due || (t.Inserts != nil && t.Inserts.Due) || t.Analyze.Due
+}
+
+// autovacuumThresholdInputs are the raw catalog/stats values the computation needs,
+// separated from the SQL so the formulas can be unit-tested per PostgreSQL version.
+type autovacuumThresholdInputs struct {
+	MajorVersion       int
+	TableOptions       map[string]string
+	GlobalSettings     map[string]string
+	Reltuples          float64
+	Relpages           int64
+	Relallfrozen       *int64 // PG18+
+	DeadTuples         int64
+	InsertsSinceVacuum int64
+	ModsSinceAnalyze   int64
+	XIDAge             int64
+	MXIDAge            int64
+}
+
+var autovacuumThresholdGlobals = []string{
+	"autovacuum", "track_counts",
+	"autovacuum_vacuum_threshold", "autovacuum_vacuum_scale_factor", "autovacuum_vacuum_max_threshold",
+	"autovacuum_vacuum_insert_threshold", "autovacuum_vacuum_insert_scale_factor",
+	"autovacuum_analyze_threshold", "autovacuum_analyze_scale_factor",
+	"autovacuum_freeze_max_age", "vacuum_freeze_min_age", "vacuum_freeze_table_age", "vacuum_failsafe_age",
+	"autovacuum_multixact_freeze_max_age", "vacuum_multixact_freeze_min_age",
+	"vacuum_multixact_freeze_table_age", "vacuum_multixact_failsafe_age",
+}
+
+func FetchAutovacuumThresholds(ctx context.Context, db *sql.DB, schema, table string) (AutovacuumThresholds, error) {
+	in := autovacuumThresholdInputs{MajorVersion: pgMajorVersion()}
+	// pg_class.relallfrozen was added in PG18 (feeds the insert threshold); NULL before.
+	relallfrozenColumn := "NULL::bigint"
+	if in.MajorVersion >= 18 {
+		relallfrozenColumn = "c.relallfrozen::bigint"
+	}
+	var reloptions pq.StringArray
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(c.reloptions, '{}'),
+			c.reltuples::float8,
+			c.relpages::bigint,
+			`+relallfrozenColumn+`,
+			COALESCE(s.n_dead_tup, 0),
+			COALESCE(s.n_ins_since_vacuum, 0),
+			COALESCE(s.n_mod_since_analyze, 0),
+			age(c.relfrozenxid),
+			mxid_age(c.relminmxid)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+		WHERE n.nspname = $1 AND c.relname = $2`,
+		schema, table,
+	).Scan(&reloptions, &in.Reltuples, &in.Relpages, &in.Relallfrozen,
+		&in.DeadTuples, &in.InsertsSinceVacuum, &in.ModsSinceAnalyze, &in.XIDAge, &in.MXIDAge)
+	if err != nil {
+		return AutovacuumThresholds{}, err
+	}
+	in.TableOptions = parseReloptions(reloptions)
+	if in.GlobalSettings, _, err = fetchGlobalSettings(ctx, db, autovacuumThresholdGlobals); err != nil {
+		return AutovacuumThresholds{}, err
+	}
+	return computeAutovacuumThresholds(in), nil
+}
+
+// parsePGBool accepts PostgreSQL's boolean spellings (on/off, true/false, yes/no, 1/0
+// and unique prefixes thereof), as stored verbatim in reloptions.
+func parsePGBool(raw string) (bool, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case value == "":
+		return false, false
+	case value == "on", value == "1", strings.HasPrefix("true", value), strings.HasPrefix("yes", value):
+		return true, true
+	case value == "of", value == "off", value == "0", strings.HasPrefix("false", value), strings.HasPrefix("no", value):
+		return false, true
+	}
+	return false, false
+}
+
+func computeAutovacuumThresholds(in autovacuumThresholdInputs) AutovacuumThresholds {
+	setting := func(reloption, globalName string) ThresholdSetting {
+		if raw, ok := in.TableOptions[reloption]; ok {
+			if value, err := strconv.ParseFloat(raw, 64); err == nil {
+				return ThresholdSetting{Value: value, Source: SourceTable}
+			}
+		}
+		value, _ := strconv.ParseFloat(in.GlobalSettings[globalName], 64)
+		return ThresholdSetting{Value: value, Source: SourceGlobal}
+	}
+	// The *_freeze_max_age reloptions can only lower the global limit, never raise it.
+	lowerOnly := func(reloption, globalName string) ThresholdSetting {
+		global := setting("", globalName)
+		table := setting(reloption, globalName)
+		if table.Source == SourceTable && table.Value >= 0 && table.Value < global.Value {
+			return table
+		}
+		return global
+	}
+	ageCheck := func(limit ThresholdSetting, age int64) AgeThreshold {
+		return AgeThreshold{Limit: limit, Current: age, Due: float64(age) > limit.Value}
+	}
+
+	var result AutovacuumThresholds
+	globalEnabled, _ := parsePGBool(in.GlobalSettings["autovacuum"])
+	result.AutovacuumEnabled, result.AutovacuumEnabledSource = globalEnabled, SourceGlobal
+	if tableEnabled, ok := parsePGBool(in.TableOptions["autovacuum_enabled"]); ok {
+		// A table can only switch autovacuum off; with the global launcher off,
+		// autovacuum_enabled=true still doesn't run (except anti-wraparound).
+		result.AutovacuumEnabled = globalEnabled && tableEnabled
+		if !tableEnabled {
+			result.AutovacuumEnabledSource = SourceTable
+		}
+	}
+	result.TrackCounts, _ = parsePGBool(in.GlobalSettings["track_counts"])
+
+	result.Reltuples = in.Reltuples
+	if result.Reltuples < 0 {
+		result.Reltuples = 0
+		result.ReltuplesUnknown = true
+	}
+
+	dead := RowThreshold{
+		Base:        setting("autovacuum_vacuum_threshold", "autovacuum_vacuum_threshold"),
+		ScaleFactor: setting("autovacuum_vacuum_scale_factor", "autovacuum_vacuum_scale_factor"),
+		Current:     in.DeadTuples,
+	}
+	dead.Threshold = dead.Base.Value + dead.ScaleFactor.Value*result.Reltuples
+	// autovacuum_vacuum_max_threshold caps the dead-tuple threshold for huge tables; PG18+.
+	if in.MajorVersion >= 18 {
+		if maxThreshold := setting("autovacuum_vacuum_max_threshold", "autovacuum_vacuum_max_threshold"); maxThreshold.Value >= 0 {
+			dead.MaxThreshold = &maxThreshold
+			dead.Threshold = min(dead.Threshold, maxThreshold.Value)
+		}
+	}
+	dead.Due = float64(dead.Current) > dead.Threshold
+	result.DeadTuples = dead
+
+	if insertBase := setting("autovacuum_vacuum_insert_threshold", "autovacuum_vacuum_insert_threshold"); insertBase.Value >= 0 {
+		inserts := RowThreshold{
+			Base:        insertBase,
+			ScaleFactor: setting("autovacuum_vacuum_insert_scale_factor", "autovacuum_vacuum_insert_scale_factor"),
+			Current:     in.InsertsSinceVacuum,
+		}
+		scaledTuples := result.Reltuples
+		// PG18+ only counts the not-yet-all-frozen part of the table, so insert-only
+		// tables that are mostly frozen don't keep re-triggering vacuums.
+		if in.MajorVersion >= 18 {
+			unfrozen := 1.0
+			if in.Relpages > 0 && in.Relallfrozen != nil && *in.Relallfrozen > 0 {
+				unfrozen = 1 - float64(min(*in.Relallfrozen, in.Relpages))/float64(in.Relpages)
+			}
+			inserts.UnfrozenFraction = &unfrozen
+			scaledTuples *= unfrozen
+		}
+		inserts.Threshold = inserts.Base.Value + inserts.ScaleFactor.Value*scaledTuples
+		inserts.Due = float64(inserts.Current) > inserts.Threshold
+		result.Inserts = &inserts
+	}
+
+	analyze := RowThreshold{
+		Base:        setting("autovacuum_analyze_threshold", "autovacuum_analyze_threshold"),
+		ScaleFactor: setting("autovacuum_analyze_scale_factor", "autovacuum_analyze_scale_factor"),
+		Current:     in.ModsSinceAnalyze,
+	}
+	analyze.Threshold = analyze.Base.Value + analyze.ScaleFactor.Value*result.Reltuples
+	analyze.Due = float64(analyze.Current) > analyze.Threshold
+	result.Analyze = analyze
+
+	// vacuum_get_cutoffs() clamps freeze_table_age to 95% and freeze_min_age to 50%
+	// of the *global* autovacuum_(multixact_)freeze_max_age, so an oversized setting
+	// can't postpone freezing past the point where a wraparound vacuum is forced.
+	clampToFraction := func(value ThresholdSetting, globalMaxAge, fraction float64) ThresholdSetting {
+		if limit := globalMaxAge * fraction; value.Value > limit {
+			return ThresholdSetting{Value: float64(int64(limit)), Source: SourceAdjusted}
+		}
+		return value
+	}
+	// The failsafe never triggers below 105% of autovacuum_(multixact_)freeze_max_age.
+	raiseToFraction := func(value ThresholdSetting, globalMaxAge, fraction float64) ThresholdSetting {
+		if limit := globalMaxAge * fraction; value.Value < limit {
+			return ThresholdSetting{Value: float64(int64(limit)), Source: SourceAdjusted}
+		}
+		return value
+	}
+
+	globalXIDMaxAge := setting("", "autovacuum_freeze_max_age").Value
+	result.XIDWraparound = ageCheck(lowerOnly("autovacuum_freeze_max_age", "autovacuum_freeze_max_age"), in.XIDAge)
+	result.XIDAggressive = ageCheck(clampToFraction(
+		setting("autovacuum_freeze_table_age", "vacuum_freeze_table_age"), globalXIDMaxAge, 0.95), in.XIDAge)
+	result.XIDFreezeMinAge = clampToFraction(
+		setting("autovacuum_freeze_min_age", "vacuum_freeze_min_age"), globalXIDMaxAge, 0.5)
+
+	globalMXIDMaxAge := setting("", "autovacuum_multixact_freeze_max_age").Value
+	result.MXIDWraparound = ageCheck(lowerOnly("autovacuum_multixact_freeze_max_age", "autovacuum_multixact_freeze_max_age"), in.MXIDAge)
+	result.MXIDAggressive = ageCheck(clampToFraction(
+		setting("autovacuum_multixact_freeze_table_age", "vacuum_multixact_freeze_table_age"), globalMXIDMaxAge, 0.95), in.MXIDAge)
+	result.MXIDFreezeMinAge = clampToFraction(
+		setting("autovacuum_multixact_freeze_min_age", "vacuum_multixact_freeze_min_age"), globalMXIDMaxAge, 0.5)
+
+	// vacuum_failsafe_age / vacuum_multixact_failsafe_age were added in PG14.
+	if in.MajorVersion >= 14 {
+		xidFailsafe := ageCheck(raiseToFraction(setting("", "vacuum_failsafe_age"), globalXIDMaxAge, 1.05), in.XIDAge)
+		mxidFailsafe := ageCheck(raiseToFraction(setting("", "vacuum_multixact_failsafe_age"), globalMXIDMaxAge, 1.05), in.MXIDAge)
+		result.XIDFailsafe, result.MXIDFailsafe = &xidFailsafe, &mxidFailsafe
+	}
+	return result
 }
 
 // AutovacuumBloatDetail holds precise bloat information from pgstattuple.
@@ -1305,7 +1623,7 @@ func FetchFreezeByTable(ctx context.Context, db *sql.DB, limit int) ([]FreezeTab
 		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 		  AND c.relfrozenxid != 0
 		ORDER BY age(c.relfrozenxid) DESC
-		LIMIT $1`, limit)
+		LIMIT NULLIF($1::int, 0)`, limit)
 	if err != nil {
 		return nil, err
 	}

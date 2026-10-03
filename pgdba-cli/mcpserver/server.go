@@ -159,7 +159,7 @@ func Serve(port int) error {
 	), handleCheckSchema)
 
 	s.AddTool(mcp.NewTool("check_autovacuum_detail",
-		mcp.WithDescription("Detailed autovacuum statistics for one table: live/dead tuples, vacuum history, freeze status, and custom autovacuum parameters vs globals."),
+		mcp.WithDescription("Detailed autovacuum statistics for one table: live/dead tuples, vacuum history, freeze status, custom autovacuum parameters vs globals, and the computed autovacuum thresholds (dead-tuple, insert and analyze triggers; XID/MXID anti-wraparound, aggressive-scan, freeze-min-age and failsafe limits) using table reloptions when set and global settings otherwise."),
 		mcp.WithString("schema",
 			mcp.Description("Schema name"),
 			mcp.DefaultString("public"),

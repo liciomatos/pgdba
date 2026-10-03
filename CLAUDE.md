@@ -210,6 +210,17 @@ case tea.WindowSizeMsg:
     return m, nil
 ```
 
+When a screen renders anything besides the header/table/footer (summary bars, hint lines,
+a second pane), don't subtract a hand-counted offset from `TableHeight` — use
+`FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })`
+after setting columns. It measures the real frame and shrinks the table until it fits.
+Bubbletea drops the *top* lines of a frame taller than the terminal, so an off-by-one
+silently hides the header. `TestScreens_FitTerminalHeight` renders every screen with more
+rows than fit and fails if any frame overflows — add new screens to it.
+
+TUI screens pass `NoRowLimit` to `Fetch*` functions that take a `limit` (every row; the
+table scrolls). Only MCP handlers use a finite default limit.
+
 For non-table (free-form text) screens, store `m.width` and use it in `View()` — for example
 to set a `lipgloss.NewStyle().Width(m.width)` container or to render full-width dividers.
 

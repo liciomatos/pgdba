@@ -40,7 +40,7 @@ func CheckFreezeMonitor(initialModel func() tea.Model) tea.Model {
 	if err != nil {
 		return NewErrorModel(err, "Loading freeze status by database", initialModel)
 	}
-	tableStatus, err := FetchFreezeByTable(context.Background(), config.Config.DB, 50)
+	tableStatus, err := FetchFreezeByTable(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading freeze status by table", initialModel)
 	}
@@ -101,9 +101,9 @@ func (m FreezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.tableModel.SetHeight(TableHeight(msg.Height) - 1) // -1 for the XID Shutdown bar line
 		cols := StretchColumn(m.tableModel.Columns(), 1, msg.Width)
 		m.tableModel.SetColumns(cols)
+		FitTableHeight(&m.tableModel, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 
 	case tea.KeyMsg:

@@ -138,6 +138,21 @@ func TableHeight(termHeight int) int {
 	return h
 }
 
+// FitTableHeight sets tbl to requestedHeight, then shrinks it until the whole frame
+// returned by render fits in termHeight lines. Use it on screens whose chrome above
+// or below the table (summary bars, hints, wrapped lines) varies with the data, where
+// a fixed offset from TableHeight drifts out of sync — bubbletea drops the *top*
+// lines of an oversized frame, so the header silently disappears instead of the
+// table scrolling. render must read the table through the caller's model variable
+// (a closure, not a method value) so it sees the height just set here.
+func FitTableHeight(tbl *table.Model, requestedHeight, termHeight int, render func() string) {
+	const minimumHeight = 4
+	tbl.SetHeight(requestedHeight)
+	if overflow := lipgloss.Height(render()) - termHeight; overflow > 0 {
+		tbl.SetHeight(max(requestedHeight-overflow, minimumHeight))
+	}
+}
+
 // StretchColumn returns a new column slice where the column at colIdx has its
 // width expanded so that the total table fills termWidth.
 func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
@@ -155,6 +170,79 @@ func StretchColumn(cols []table.Column, colIdx, termWidth int) []table.Column {
 	out := make([]table.Column, len(cols))
 	copy(out, cols)
 	out[colIdx].Width = w
+	return out
+}
+
+// FitColumnsToContent sizes the flexible columns (by index) to their longest value —
+// header included — so names aren't truncated while the terminal has room. Other
+// columns keep their width. Leftover space goes to the last flexible column; when the
+// content doesn't fit, the widest flexible column is narrowed first (down to
+// minimumWidth), so one very long name doesn't squeeze every other column. Pass the
+// unfiltered rows so widths stay stable while filtering.
+func FitColumnsToContent(cols []table.Column, rows []table.Row, flexible []int, termWidth int) []table.Column {
+	const minimumWidth = 8
+	out := make([]table.Column, len(cols))
+	copy(out, cols)
+	isFlexible := make(map[int]bool, len(flexible))
+	for _, idx := range flexible {
+		isFlexible[idx] = true
+	}
+	// Bubbles applies Padding(0,1) to every cell: 2 extra chars per column.
+	available := termWidth - len(cols)*2
+	for i, col := range cols {
+		if !isFlexible[i] {
+			available -= col.Width
+		}
+	}
+	desired := make(map[int]int, len(flexible))
+	total := 0
+	for _, idx := range flexible {
+		width := lipgloss.Width(cols[idx].Title)
+		for _, row := range rows {
+			if idx < len(row) {
+				width = max(width, lipgloss.Width(row[idx]))
+			}
+		}
+		desired[idx] = width
+		total += width
+	}
+	for total > available {
+		widest := -1
+		for _, idx := range flexible {
+			if desired[idx] > minimumWidth && (widest == -1 || desired[idx] > desired[widest]) {
+				widest = idx
+			}
+		}
+		if widest == -1 {
+			break // every flexible column is at its minimum; let the terminal clip
+		}
+		desired[widest]--
+		total--
+	}
+	if total < available && len(flexible) > 0 {
+		desired[flexible[len(flexible)-1]] += available - total
+	}
+	for _, idx := range flexible {
+		out[idx].Width = desired[idx]
+	}
+	return out
+}
+
+// SizeColumnsToContent sets each listed column to the width of its longest value
+// (header included), for short columns like counters and sizes that must never be
+// truncated. Run it before FitColumnsToContent, which treats these as fixed.
+func SizeColumnsToContent(cols []table.Column, rows []table.Row, indexes []int) []table.Column {
+	out := make([]table.Column, len(cols))
+	copy(out, cols)
+	for _, idx := range indexes {
+		width := lipgloss.Width(cols[idx].Title)
+		for _, row := range rows {
+			if idx < len(row) {
+				width = max(width, lipgloss.Width(row[idx]))
+			}
+		}
+		out[idx].Width = width
+	}
 	return out
 }
 

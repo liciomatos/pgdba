@@ -237,7 +237,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
 
-All list screens support live filtering via `/`.
+All list screens show every row (no top-N cut-off) and scroll with `↑↓`/`pgup`/`pgdn` when the list is taller than the terminal. All list screens support live filtering via `/`.
 
 ### Autovacuum Detail
 
@@ -246,7 +246,21 @@ Press `enter` on any row in the Autovacuum screen to open the detail view for th
 - **Stats** — live/dead tuple counts, table and total size
 - **Vacuum History** — last vacuum, autovacuum, analyze, and autoanalyze timestamps with counters
 - **Freeze Status** — `relfrozenxid` age with a visual progress bar
-- **Custom Parameters** — per-table autovacuum settings vs. global defaults
+- **Parameters & Thresholds** — per-table autovacuum reloptions vs. global defaults, plus
+  `Threshold` / `Current` / `Status` columns computed the way PostgreSQL does it (table value
+  when set, global otherwise):
+  - `autovacuum_vacuum_threshold` row: `threshold + scale_factor × reltuples` vs dead tuples
+    (capped by `autovacuum_vacuum_max_threshold` on PG18+)
+  - `autovacuum_vacuum_insert_threshold` row: same for inserts since the last vacuum
+    (× unfrozen fraction of the table on PG18+; `disabled` when `-1`)
+  - `autovacuum_analyze_threshold` row: same for rows modified since the last analyze
+  - `*_freeze_max_age` rows: XID/MultiXact age vs the anti-wraparound limit (`FORCED` when
+    exceeded; a table value can only lower the global)
+  - `*_freeze_table_age` rows: age vs the aggressive-scan limit (capped at 95% of freeze_max_age)
+  - `*_freeze_min_age` rows: effective value (capped at 50% of freeze_max_age)
+  - the stats line shows `reltuples` and whether autovacuum would process the table now
+  - moving the cursor shows the formula behind the selected row as a tip above the footer,
+    with each value's source (`table`, `global` or `adjusted`)
 - **Precise Bloat** — press `b` to run `pgstattuple` for an exact bloat measurement (full table scan)
 
 ### Pub/Sub Monitoring
