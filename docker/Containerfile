@@ -1,0 +1,14 @@
+# Dev-environment images for docker-compose.yaml. The init scripts are baked into
+# the images instead of bind-mounted so the stack also works against a remote
+# engine (e.g. Podman Desktop's machine on WSL), which can't see this checkout's
+# files — `podman build` uploads the build context, bind mounts don't.
+ARG POSTGRES_IMAGE=docker.io/library/postgres:18
+
+FROM ${POSTGRES_IMAGE} AS main
+COPY init-db/ /docker-entrypoint-initdb.d/
+
+FROM ${POSTGRES_IMAGE} AS replica
+COPY docker/replica-setup.sh /replica-setup.sh
+
+FROM ${POSTGRES_IMAGE} AS sub
+COPY docker/subscriber-init.sql /docker-entrypoint-initdb.d/01_tables.sql
