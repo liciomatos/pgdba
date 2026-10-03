@@ -59,11 +59,38 @@ pgdba-cli --host=<host> --user=<user> --password=<password> --dbname=<dbname>
 | `--password` | `PGPASSWORD` | — | Password |
 | `--dbname` | `PGDATABASE` | `mydb` | Database name |
 | `--sslmode` | `PGSSLMODE` | `disable` | SSL mode (`disable`, `require`, `verify-ca`, `verify-full`) |
+| `-W`, `--password-prompt` | — | — | Prompt for the password without echo (like `psql -W`); overrides any password from flags, env, URL, vault or `~/.pgpass` |
+| `--vault` | — | — | Connect using a named connection stored in the encrypted vault (see [Connection Vault](#connection-vault)) |
 | `--slow-ms` | `PG_SLOW_MS` | `1000` | Threshold in ms to classify a query as slow |
 | `--mcp` | — | — | Start MCP server mode (HTTP/SSE) |
 | `--mcp-port` | — | `8811` | Port for MCP server |
 
 All flags fall back to their environment variable counterpart. If `--password` is not set and `PGPASSWORD` is empty, `~/.pgpass` is consulted automatically.
+
+### Connection Vault
+
+Store named connection URIs in a local file encrypted with a master password
+(Argon2id key derivation + AES-256-GCM), so credentials never sit in shell history,
+scripts or plaintext config:
+
+```bash
+pgdba-cli vault add prod              # prompts for the URI (hidden) and the master password
+pgdba-cli vault add staging "postgres://admin:secret@staging-db/app?sslmode=require"
+pgdba-cli vault list                  # names + URIs with passwords masked
+pgdba-cli vault remove staging
+pgdba-cli vault path                  # where the vault file lives
+
+pgdba-cli --vault prod                # connect (prompts for the master password)
+pgdba-cli --vault prod -W             # use the stored URI but type the DB password now
+```
+
+| Env var | Description |
+|---|---|
+| `PGDBA_VAULT_PASSWORD` | Master password for non-interactive use (e.g. `--mcp` under a service manager) |
+| `PGDBA_VAULT_FILE` | Vault location (default: `<user config dir>/pgdba-cli/vault.json`, e.g. `~/.config/pgdba-cli/vault.json`) |
+
+The vault file is written with `0600` permissions. There is no recovery if the master
+password is lost — delete the file and re-add the connections.
 
 ### Examples
 

@@ -67,11 +67,20 @@ func lookupPgPassFile(path, host string, port int, dbname, user string) string {
 	return ""
 }
 
+// quoteConnValue single-quotes a libpq key=value parameter so passwords (and
+// other values) containing spaces, quotes or backslashes survive intact.
+func quoteConnValue(value string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(value)
+	return "'" + escaped + "'"
+}
+
 // buildConnStr returns a lib/pq connection string. When --url is given, it
 // parses the URI to populate config fields (for display in headers/errors) and
 // returns the URI itself directly to the driver. Without --url, it assembles the
 // string from individual flags, falling back to ~/.pgpass for missing passwords.
-func buildConnStr() (string, error) {
+// A non-empty passwordOverride (from -W) replaces any password from the URI,
+// flags, env or ~/.pgpass, matching psql's behavior.
+func buildConnStr(passwordOverride string) (string, error) {
 	if config.Config.URL != "" {
 		u, err := url.Parse(config.Config.URL)
 		if err != nil {
@@ -89,21 +98,35 @@ func buildConnStr() (string, error) {
 		if sslmode := u.Query().Get("sslmode"); sslmode != "" {
 			config.Config.SSLMode = sslmode
 		}
+		if passwordOverride != "" {
+			config.Config.Password = passwordOverride
+			u.User = url.UserPassword(config.Config.User, passwordOverride)
+			return u.String(), nil
+		}
 		return config.Config.URL, nil
 	}
 
-	if config.Config.Password == "" {
+	if passwordOverride != "" {
+		config.Config.Password = passwordOverride
+	} else if config.Config.Password == "" {
 		config.Config.Password = lookupPgPass(
 			config.Config.Host, config.Config.Port,
 			config.Config.DBName, config.Config.User,
 		)
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Config.Host, config.Config.Port, config.Config.User,
-		config.Config.Password, config.Config.DBName, config.Config.SSLMode), nil
+		quoteConnValue(config.Config.Host), config.Config.Port, quoteConnValue(config.Config.User),
+		quoteConnValue(config.Config.Password), quoteConnValue(config.Config.DBName),
+		quoteConnValue(config.Config.SSLMode)), nil
 }
 
 func main() {
+	// `vault` is a subcommand rather than a flag so it can take its own
+	// positional arguments (add/list/remove) without touching the DB flags.
+	if len(os.Args) > 1 && os.Args[1] == "vault" {
+		os.Exit(runVaultCommand(os.Args[2:]))
+	}
+
 	flag.StringVar(&config.Config.URL, "url", getEnv("DATABASE_URL", ""), "PostgreSQL connection URI (postgres://user:pass@host:5432/db?sslmode=disable)")
 	flag.StringVar(&config.Config.Host, "host", getEnv("PGHOST", ""), "database host")
 	flag.IntVar(&config.Config.Port, "port", getEnvInt("PGPORT", 5432), "database port")
@@ -116,12 +139,39 @@ func main() {
 	var mcpPort int
 	flag.BoolVar(&serveMCP, "mcp", false, "Start MCP server mode (HTTP/SSE on --mcp-port)")
 	flag.IntVar(&mcpPort, "mcp-port", 8811, "Port for MCP SSE server (used with --mcp)")
+	var promptPassword bool
+	var vaultName string
+	flag.BoolVar(&promptPassword, "W", false, "force password prompt (like psql -W)")
+	flag.BoolVar(&promptPassword, "password-prompt", false, "force password prompt (same as -W)")
+	flag.StringVar(&vaultName, "vault", "", "connect using a connection stored in the vault (see: pgdba-cli vault help)")
 	flag.Parse()
 
-	connStr, err := buildConnStr()
+	if vaultName != "" {
+		connectionURI, err := connectionURIFromVault(vaultName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: vault: %v\n", err)
+			os.Exit(1)
+		}
+		config.Config.URL = connectionURI
+	}
+
+	connStr, err := buildConnStr("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pgdba-cli: invalid connection URL: %v\n", err)
 		os.Exit(1)
+	}
+
+	if promptPassword {
+		// Prompt after the first build so the username from --url/--vault is known.
+		password, err := readSecret(fmt.Sprintf("Password for user %s: ", config.Config.User))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: could not read password: %v\n", err)
+			os.Exit(1)
+		}
+		if connStr, err = buildConnStr(password); err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: invalid connection URL: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	config.Config.DB, err = sql.Open("postgres", connStr)

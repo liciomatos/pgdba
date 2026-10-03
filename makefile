@@ -29,7 +29,7 @@ run-sub: build
 # pg-replica starts automatically via pg_basebackup once pg-main is healthy.
 dev-up:
 	@echo "Starting containers..."
-	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d
+	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --build
 	@echo "Waiting for pg-main to be ready..."
 	@until podman exec $(CONTAINER_NAME) pg_isready -U postgres -q 2>/dev/null; do sleep 2; done
 	@echo "Waiting for pg-sub to be ready..."
@@ -46,7 +46,7 @@ dev-down: scenarios-clean
 # Start Docker Compose (containers only, no seed/scenarios)
 docker-up:
 	@echo "Starting containers with $(COMPOSE)..."
-	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d
+	$(COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --build
 
 # Stop Docker Compose
 docker-down:
