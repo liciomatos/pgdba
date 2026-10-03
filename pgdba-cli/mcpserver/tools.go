@@ -1281,3 +1281,49 @@ func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 	return jsonResult(out)
 }
+
+// --- replica identity ---
+
+type replicaIdentityResponse struct {
+	SchemaName            string   `json:"schema_name"`
+	TableName             string   `json:"table_name"`
+	HasPrimaryKey         bool     `json:"has_primary_key"`
+	ReplicaIdentity       string   `json:"replica_identity"`
+	Publications          []string `json:"publications"`
+	PublishesUpdateDelete bool     `json:"publishes_update_delete"`
+	PglogicalSets         []string `json:"pglogical_sets"`
+	PglogicalUpdateDelete bool     `json:"pglogical_update_delete"`
+	CandidateIndex        *string  `json:"candidate_index"`
+	SuggestedFix          string   `json:"suggested_fix"`
+	TotalSize             string   `json:"total_size"`
+	Status                string   `json:"status"` // "critical" = UPDATE/DELETE can't be replicated today
+}
+
+func handleCheckReplicaIdentity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	issues, err := util.FetchReplicaIdentityIssues(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]replicaIdentityResponse, 0, len(issues))
+	for _, issue := range issues {
+		status := "warning"
+		if issue.IsCritical() {
+			status = "critical"
+		}
+		resp = append(resp, replicaIdentityResponse{
+			SchemaName:            issue.SchemaName,
+			TableName:             issue.TableName,
+			HasPrimaryKey:         issue.HasPrimaryKey,
+			ReplicaIdentity:       issue.ReplicaIdentity,
+			Publications:          issue.Publications,
+			PublishesUpdateDelete: issue.PublishesUpdateDelete,
+			PglogicalSets:         issue.PglogicalSets,
+			PglogicalUpdateDelete: issue.PglogicalUpdateDelete,
+			CandidateIndex:        issue.CandidateIndex,
+			SuggestedFix:          issue.SuggestedFix(),
+			TotalSize:             issue.TotalSize,
+			Status:                status,
+		})
+	}
+	return jsonResult(resp)
+}

@@ -188,6 +188,7 @@ instead of the global one. Known conflicts:
 | Replication Slots | `S` | Database Sizes | Streaming Standbys |
 | Freeze Monitor | `f` (tables pane) | Open Freeze Monitor | VACUUM FREEZE |
 | Record Locks   | `t`               | Temp Files          | Terminate backend |
+| Replica Identity | `p`             | PgConfig            | Replicated-only toggle |
 
 ### Terminal size — no per-screen bookkeeping required
 

@@ -6,6 +6,19 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Replica Identity screen (`I`)**: lists tables without a usable replica identity for
+  logical replication — no PK with `REPLICA IDENTITY DEFAULT`, `NOTHING`, a dropped identity
+  index, or `FULL` on a table in a pglogical replication set (pglogical needs a PK or
+  `USING INDEX`; FULL isn't supported). Covers native publications (directly, `FOR ALL
+  TABLES`, `FOR TABLES IN SCHEMA`, or via a partitioned parent) and, when installed, the
+  local node's pglogical sets. Tables already replicating UPDATE/DELETE are flagged
+  critical; `p` toggles replicated tables only. The selected row shows the suggested fix
+  (`REPLICA IDENTITY DEFAULT` / `USING INDEX` / `FULL`, or adding a PK for pglogical);
+  read-only. The Pub/Sub screen (`R`) alerts with the critical count, and the new
+  `check_replica_identity` MCP tool returns the same data.
+- **Dev environment**: new `pg-pglogical` service (port 5435, `make run-pglogical`) and
+  Replica Identity scenarios baked into the pg-main and pg-pglogical images, so
+  `make dev-up` comes with every case the `I` screen distinguishes.
 - **`-W` / `--password-prompt`**: prompts for the database password without echo, like
   `psql -W`. The typed password overrides any password from `--password`, `PGPASSWORD`,
   `--url`, the vault, or `~/.pgpass`.
