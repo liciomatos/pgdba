@@ -5,6 +5,20 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`-W` / `--password-prompt`**: prompts for the database password without echo, like
+  `psql -W`. The typed password overrides any password from `--password`, `PGPASSWORD`,
+  `--url`, the vault, or `~/.pgpass`.
+- **Encrypted connection vault**: `pgdba-cli vault add|list|remove|path` stores named
+  connection URIs in a local file encrypted with a master password (Argon2id +
+  AES-256-GCM, `0600` permissions); connect with `pgdba-cli --vault <name>`. The master
+  password can be supplied via `PGDBA_VAULT_PASSWORD` for non-interactive use (e.g.
+  `--mcp`), and the file location overridden with `PGDBA_VAULT_FILE`.
+
+### Fixed
+- Passwords (and other connection values) containing spaces, quotes or backslashes now
+  work with individual connection flags — values are quoted in the libpq key=value string.
+
 ## [0.6.0] - 2026-09-18
 
 ### Added
