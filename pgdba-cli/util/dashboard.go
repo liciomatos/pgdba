@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,7 +31,7 @@ type metricSection struct {
 
 type DashboardModel struct {
 	sections   []metricSection
-	freezeDB   string // empty → hide freeze line
+	uptime     string // shown on the connection line
 	connPct    float64
 	connUsed   int
 	connMax    int
@@ -172,18 +173,8 @@ func CheckDashboard() tea.Model {
 		},
 	}
 
-	// ── Server section ─────────────────────────────────────────────────────
-	serverSection := metricSection{
-		name: "Server",
-		pairs: []metricPair{
-			{
-				left:  dashboardMetric{"Replication slots", fmt.Sprintf("%d", data.ReplicationSlots), 0},
-				right: &dashboardMetric{"Uptime", formatUptime(data.UptimeSeconds), 0},
-			},
-		},
-	}
-
-	freezeDB := ""
+	// ── Server section (only the freeze line; uptime moved to the header) ──
+	serverSection := metricSection{name: "Server"}
 	if data.FreezeOldestDB != "" {
 		freezeLevel := 0
 		if data.FreezePctToward > 8.6 {
@@ -196,12 +187,16 @@ func CheckDashboard() tea.Model {
 		serverSection.pairs = append(serverSection.pairs, metricPair{
 			left: dashboardMetric{"Freeze", freezeValue, freezeLevel},
 		})
-		freezeDB = data.FreezeOldestDB
+	}
+
+	sections := []metricSection{activitySection, storageSection, walReplicationSection()}
+	if len(serverSection.pairs) > 0 {
+		sections = append(sections, serverSection)
 	}
 
 	return DashboardModel{
-		sections:   []metricSection{activitySection, storageSection, serverSection},
-		freezeDB:   freezeDB,
+		sections:   sections,
+		uptime:     formatUptime(data.UptimeSeconds),
 		connPct:    data.ConnectionPct,
 		connUsed:   data.UsedConnections,
 		connMax:    data.MaxConnections,
@@ -317,21 +312,17 @@ func formatBytes(bytes int64) string {
 	}
 }
 
-func (m DashboardModel) View() string {
-	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
-	sep := lipgloss.NewStyle().Foreground(ColorGray).Render(" › ")
-	name := lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Render("Dashboard")
-	conn := lipgloss.NewStyle().Faint(true).Render(
-		fmt.Sprintf("%s@%s:%d/%s  (v%s)",
-			config.Config.User, config.Config.Host, config.Config.Port,
-			config.Config.DBName, config.Config.Version),
-	)
-
+// renderBody renders the bars and metric sections; compact omits the blank lines
+// between blocks for terminals too short to fit them.
+func (m DashboardModel) renderBody(compact bool) string {
+	gap := "\n"
+	if compact {
+		gap = ""
+	}
 	labelStyle := lipgloss.NewStyle().Width(28).Foreground(ColorGray)
 	bw := m.barWidth()
 
-	s := fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
-	s += "\n"
+	s := gap
 
 	// Connection utilization bar
 	connSummary := fmt.Sprintf("%d / %d", m.connUsed, m.connMax)
@@ -349,30 +340,41 @@ func (m DashboardModel) View() string {
 			labelStyle.Render("Cache hit ratio"),
 			lipgloss.NewStyle().Foreground(ColorGray).Render("N/A"))
 	}
-	s += "\n"
+	s += gap
 
-	// Metric sections
 	for _, section := range m.sections {
 		s += renderSectionHeader(section.name, m.width) + "\n"
 		for _, pair := range section.pairs {
 			s += renderMetricPair(pair) + "\n"
 		}
-		s += "\n"
+		s += gap
 	}
+	return s
+}
 
-	// Height budget:
-	// Header block: 2 header + 1 blank + 2 bars + 1 blank = 6
-	// Activity:  1 header + 3 rows + 1 blank = 5
-	// Storage:   1 header + 2 rows + 1 blank = 4
-	// Server:    1 header + 1 base row + 1 blank = 3 (freeze adds 1)
-	// Total base content = 6 + 5 + 4 + 3 = 18; +1 when freeze present
-	contentLines := 18
-	if m.freezeDB != "" {
-		contentLines++
+func (m DashboardModel) View() string {
+	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
+	sep := lipgloss.NewStyle().Foreground(ColorGray).Render(" › ")
+	name := lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Render("Dashboard")
+	conn := lipgloss.NewStyle().Faint(true).Render(
+		fmt.Sprintf("%s@%s:%d/%s  (v%s)  •  up %s",
+			config.Config.User, config.Config.Host, config.Config.Port,
+			config.Config.DBName, config.Config.Version, m.uptime),
+	)
+	header := fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
+
+	// Measure instead of hand-counting lines: sections vary (freeze line, WAL rows).
+	// On short terminals drop the blank separators so the footer stays on screen —
+	// bubbletea would otherwise cut the header off the top.
+	// divider + 3 shortcut rows; the blank line above the divider is the body's
+	// trailing newline, which lipgloss.Height already counts.
+	const footerLines = 4
+	body := m.renderBody(false)
+	if m.height > 0 && lipgloss.Height(header+body)+footerLines > m.height {
+		body = m.renderBody(true)
 	}
-	footerLines := 5 // 1 blank + 1 divider + 3 shortcut rows
-	padding := m.height - contentLines - footerLines
-	if padding > 0 {
+	s := header + body
+	if padding := m.height - lipgloss.Height(s) - footerLines; padding > 0 {
 		s += strings.Repeat("\n", padding)
 	}
 
@@ -407,4 +409,177 @@ func (m DashboardModel) View() string {
 
 	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3
 	return s
+}
+
+// formatAge renders a duration in seconds compactly: 45s, 12m, 3h 5m, 2d 4h 1m.
+func formatAge(seconds int64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", max(seconds, 0))
+	}
+	return formatUptime(seconds)
+}
+
+// walReplicationSection builds the "WAL & Replication" rows. Each row is full width
+// because its values are longer than the 12-character two-column layout.
+func walReplicationSection() metricSection {
+	section := metricSection{name: "WAL & Replication"}
+	status, err := FetchWALReplicationStatus(context.Background(), config.Config.DB)
+	if err != nil {
+		// Optional block: a permission or version problem here mustn't hide the dashboard.
+		section.pairs = []metricPair{{left: dashboardMetric{"WAL & replication", "unavailable: " + err.Error(), 3}}}
+		return section
+	}
+	section.pairs = []metricPair{
+		{left: slotRetentionMetric(status)},
+		{left: slotRiskMetric(status)},
+		{left: archivingMetric(status)},
+		{left: replicationMetric(status)},
+	}
+	return section
+}
+
+// slotRetentionMetric compares the WAL kept by the most demanding slot with
+// max_slot_wal_keep_size. "unlimited" is a warning on purpose: without that cap a
+// stalled consumer keeps WAL until the disk fills.
+func slotRetentionMetric(status WALReplicationStatus) dashboardMetric {
+	const label = "Slot WAL retained"
+	if status.SlotCount == 0 {
+		return dashboardMetric{label, "no replication slots", 3}
+	}
+	retained := formatBytes(status.MaxRetainedBytes)
+	pct := status.SlotRetentionPct()
+	if pct == nil {
+		return dashboardMetric{label,
+			fmt.Sprintf("%s (slot %s) • max_slot_wal_keep_size unlimited", retained, status.MaxRetainedSlot), 1}
+	}
+	level := 0
+	switch {
+	case *pct >= 80:
+		level = 2
+	case *pct >= 50:
+		level = 1
+	}
+	return dashboardMetric{label, fmt.Sprintf("%s of %s max_slot_wal_keep_size (%.0f%%) • slot %s",
+		retained, formatBytes(*status.MaxSlotWALKeepBytes), *pct, status.MaxRetainedSlot), level}
+}
+
+// slotRiskMetric counts slots PostgreSQL is about to invalidate (unreserved) or already
+// invalidated (lost), plus — on PG18+ — the longest idle slot vs idle_replication_slot_timeout.
+func slotRiskMetric(status WALReplicationStatus) dashboardMetric {
+	const label = "Slots at risk"
+	if status.SlotCount == 0 {
+		return dashboardMetric{label, "none", 3}
+	}
+	level := 0
+	switch {
+	case status.SlotsLost > 0:
+		level = 2
+	case status.SlotsUnreserved > 0:
+		level = 1
+	}
+	value := fmt.Sprintf("%d slots • %d unreserved • %d lost", status.SlotCount, status.SlotsUnreserved, status.SlotsLost)
+	if status.LongestIdleSeconds != nil && status.LongestIdleSlot != "" {
+		value += fmt.Sprintf(" • longest idle %s (%s)", formatAge(*status.LongestIdleSeconds), status.LongestIdleSlot)
+		if status.IdleSlotTimeoutSeconds != nil && *status.IdleSlotTimeoutSeconds > 0 {
+			timeout := *status.IdleSlotTimeoutSeconds
+			value += " of " + formatAge(timeout) + " idle timeout"
+			if float64(*status.LongestIdleSeconds) >= 0.8*float64(timeout) {
+				level = max(level, 1)
+			}
+		}
+	}
+	return dashboardMetric{label, value, level}
+}
+
+// archivingMetric is red while archiving is failing: WAL can't leave pg_wal until it
+// succeeds, so the disk fills even without replication slots.
+func archivingMetric(status WALReplicationStatus) dashboardMetric {
+	const label = "Archiving"
+	if status.ArchiveMode == "off" {
+		return dashboardMetric{label, "off", 3}
+	}
+	if status.ArchiveFailingNow {
+		since := ""
+		if status.LastFailedTime != nil {
+			since = fmt.Sprintf(" (last failure %s ago)", formatAge(int64(time.Since(*status.LastFailedTime).Seconds())))
+		}
+		return dashboardMetric{label, fmt.Sprintf("FAILING%s • %d failures since stats reset", since, status.FailedCount), 2}
+	}
+	if status.LastArchivedTime == nil {
+		return dashboardMetric{label, fmt.Sprintf("%s • nothing archived yet", status.ArchiveMode), 0}
+	}
+	return dashboardMetric{label, fmt.Sprintf("ok • last archived %s ago • %d archived, %d failed since stats reset",
+		formatAge(int64(time.Since(*status.LastArchivedTime).Seconds())), status.ArchivedCount, status.FailedCount), 0}
+}
+
+// replicationMetric summarizes physical standbys and logical subscribers fed by this
+// server (worst lag of each), and this server's own subscriptions (errors, and conflicts
+// on PG18+). Error/conflict counters are cumulative since the
+// stats reset, so they warn rather than alarm.
+func replicationMetric(status WALReplicationStatus) dashboardMetric {
+	const label = "Replication"
+	if status.StandbyCount == 0 && status.LogicalSenderCount == 0 && status.SubscriptionCount == 0 {
+		return dashboardMetric{label, "no standbys, subscribers or subscriptions", 3}
+	}
+	lagLevel := func(bytes int64) int {
+		switch {
+		case bytes > 1<<30:
+			return 2
+		case bytes > 64<<20:
+			return 1
+		}
+		return 0
+	}
+	level := 0
+	var parts []string
+	if status.StandbyCount > 0 {
+		standbys := fmt.Sprintf("%d standby(s)", status.StandbyCount)
+		var lag []string
+		if status.MaxStandbyLagBytes != nil {
+			lag = append(lag, formatBytes(*status.MaxStandbyLagBytes)+" behind")
+			level = max(level, lagLevel(*status.MaxStandbyLagBytes))
+		}
+		if status.MaxReplayLagSeconds != nil {
+			lag = append(lag, fmt.Sprintf("replay lag %.1fs", *status.MaxReplayLagSeconds))
+			switch {
+			case *status.MaxReplayLagSeconds > 60:
+				level = max(level, 2)
+			case *status.MaxReplayLagSeconds > 10:
+				level = max(level, 1)
+			}
+		}
+		if len(lag) > 0 {
+			standbys += " (worst: " + strings.Join(lag, ", ") + ")"
+		}
+		parts = append(parts, standbys)
+	}
+	if status.LogicalSenderCount > 0 {
+		senders := fmt.Sprintf("%d logical subscriber(s)", status.LogicalSenderCount)
+		if status.MaxLogicalLagBytes != nil {
+			senders += fmt.Sprintf(" (worst: %s behind)", formatBytes(*status.MaxLogicalLagBytes))
+			level = max(level, lagLevel(*status.MaxLogicalLagBytes))
+		}
+		parts = append(parts, senders)
+	}
+	if status.SubscriptionCount > 0 {
+		subscriptions := fmt.Sprintf("%d subscription(s) here", status.SubscriptionCount)
+		var counters []string
+		if status.SubscriptionErrors != nil {
+			counters = append(counters, fmt.Sprintf("%d errors", *status.SubscriptionErrors))
+			if *status.SubscriptionErrors > 0 {
+				level = max(level, 1)
+			}
+		}
+		if status.SubscriptionConflicts != nil {
+			counters = append(counters, fmt.Sprintf("%d conflicts", *status.SubscriptionConflicts))
+			if *status.SubscriptionConflicts > 0 {
+				level = max(level, 1)
+			}
+		}
+		if len(counters) > 0 {
+			subscriptions += " (" + strings.Join(counters, ", ") + ")"
+		}
+		parts = append(parts, subscriptions)
+	}
+	return dashboardMetric{label, strings.Join(parts, " • "), level}
 }

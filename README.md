@@ -237,6 +237,19 @@ so MCP clients don't need to treat calls as risky.
 
 Navigate with `↑↓` or `j/k`. Press `r` to refresh and `q`/`esc` to go back.
 
+The dashboard's **WAL & Replication** section flags what fills `pg_wal` or breaks replicas
+before it happens:
+
+| Row | Shows | Colors |
+|---|---|---|
+| Slot WAL retained | WAL kept by the most demanding slot vs `max_slot_wal_keep_size` | yellow ≥ 50%, red ≥ 80%; yellow when the limit is `-1` (unlimited — a stalled slot can fill the disk) |
+| Slots at risk | slot count, `wal_status` unreserved (about to be invalidated) / lost (invalidated); on PG18+ the longest idle slot vs `idle_replication_slot_timeout` | yellow if any unreserved or idle ≥ 80% of the timeout, red if any lost |
+| Archiving | `pg_stat_archiver`: ok / FAILING (last attempt failed) / off | red while failing — WAL can't leave `pg_wal` |
+| Replication | physical standbys and logical subscribers fed by this server (worst lag of each), and this server's subscriptions (apply/sync errors on PG15+, conflicts on PG18+) | lag yellow > 64 MB / 10 s, red > 1 GB / 60 s; errors or conflicts yellow |
+
+On short terminals the dashboard drops the blank lines between sections so everything
+still fits in 24 rows. Uptime is shown on the connection line.
+
 From the main dashboard, open each screen with its shortcut key:
 
 | Key | Screen | Description | Actions |
