@@ -5,20 +5,9 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-03
+
 ### Added
-- **Dashboard: WAL & Replication section** — WAL retained by the most demanding slot vs
-  `max_slot_wal_keep_size` (warns when it's unlimited), slots `unreserved` / `lost` and, on
-  PG18+, the longest idle slot vs `idle_replication_slot_timeout`; archiver status
-  (red while archiving fails); worst lag of physical standbys and of logical subscribers,
-  and this server's subscription errors (PG15+) and conflicts (PG18+). Works on standbys.
-  The dashboard now measures its height and compacts on short terminals; uptime moved to
-  the connection line and the slot count into the new section.
-- **`?` help on every screen**: a scrollable, man-page style page per screen — purpose,
-  what each column/metric means, screen keys plus the common ones, how to read the values
-  (including the exact thresholds behind each color) and the catalog views it reads.
-  `q`/`esc`/`?` return to the same screen with its state intact; global shortcuts are
-  disabled while reading. Every footer and the dashboard show `? help`, and a test fails if
-  a screen is added without a help page.
 - **Replica Identity screen (`I`)**: lists tables without a usable replica identity for
   logical replication — no PK with `REPLICA IDENTITY DEFAULT`, `NOTHING`, a dropped identity
   index, or `FULL` on a table in a pglogical replication set (pglogical needs a PK or
@@ -29,17 +18,11 @@ All notable changes to pgdba-cli are documented here. Format follows
   (`REPLICA IDENTITY DEFAULT` / `USING INDEX` / `FULL`, or adding a PK for pglogical);
   read-only. The Pub/Sub screen (`R`) alerts with the critical count, and the new
   `check_replica_identity` MCP tool returns the same data.
-- **Dev environment**: new `pg-pglogical` service (port 5435, `make run-pglogical`) and
-  Replica Identity scenarios baked into the pg-main and pg-pglogical images, so
-  `make dev-up` comes with every case the `I` screen distinguishes.
-- **`-W` / `--password-prompt`**: prompts for the database password without echo, like
-  `psql -W`. The typed password overrides any password from `--password`, `PGPASSWORD`,
-  `--url`, the vault, or `~/.pgpass`.
-- **Encrypted connection vault**: `pgdba-cli vault add|list|remove|path` stores named
-  connection URIs in a local file encrypted with a master password (Argon2id +
-  AES-256-GCM, `0600` permissions); connect with `pgdba-cli --vault <name>`. The master
-  password can be supplied via `PGDBA_VAULT_PASSWORD` for non-interactive use (e.g.
-  `--mcp`), and the file location overridden with `PGDBA_VAULT_FILE`.
+- **Dashboard: WAL & Replication section** — WAL retained by the most demanding slot vs
+  `max_slot_wal_keep_size` (warns when it's unlimited), slots `unreserved` / `lost` and, on
+  PG18+, the longest idle slot vs `idle_replication_slot_timeout`; archiver status
+  (red while archiving fails); worst lag of physical standbys and of logical subscribers,
+  and this server's subscription errors (PG15+) and conflicts (PG18+). Works on standbys.
 - **Autovacuum Detail now computes the autovacuum thresholds**: the parameters table gains
   `Threshold` / `Current` / `Status` columns — dead-tuple, insert and analyze triggers
   (`base + scale_factor × reltuples`) and XID/MultiXact anti-wraparound, aggressive-scan and
@@ -51,6 +34,28 @@ All notable changes to pgdba-cli are documented here. Format follows
   The formula behind the selected parameter is shown as a footer tip while navigating.
   The `check_autovacuum_detail` MCP tool returns the same computation (plus the PG14+
   failsafe limits) as `thresholds`.
+- **`?` help on every screen**: a scrollable, man-page style page per screen — purpose,
+  what each column/metric means, screen keys plus the common ones, how to read the values
+  (including the exact thresholds behind each color) and the catalog views it reads.
+  `q`/`esc`/`?` return to the same screen with its state intact; global shortcuts are
+  disabled while reading. Every footer and the dashboard show `? help`, and a test fails if
+  a screen is added without a help page.
+- **Encrypted connection vault**: `pgdba-cli vault add|list|remove|path` stores named
+  connection URIs in a local file encrypted with a master password (Argon2id +
+  AES-256-GCM, `0600` permissions); connect with `pgdba-cli --vault <name>`. The master
+  password can be supplied via `PGDBA_VAULT_PASSWORD` for non-interactive use (e.g.
+  `--mcp`), and the file location overridden with `PGDBA_VAULT_FILE`.
+- **`-W` / `--password-prompt`**: prompts for the database password without echo, like
+  `psql -W`. The typed password overrides any password from `--password`, `PGPASSWORD`,
+  `--url`, the vault, or `~/.pgpass`.
+- **Dev environment**: new `pg-pglogical` service (port 5435, `make run-pglogical`) and
+  Replica Identity scenarios baked into the pg-main and pg-pglogical images, so
+  `make dev-up` comes with every case the `I` screen distinguishes.
+
+### Changed
+- **Dashboard layout**: uptime moved to the connection line and the replication slot count
+  into the new WAL & Replication section. The dashboard now measures its own height and,
+  on short terminals, drops the blank lines between sections so everything fits in 24 rows.
 
 ### Fixed
 - Passwords (and other connection values) containing spaces, quotes or backslashes now
@@ -71,6 +76,10 @@ All notable changes to pgdba-cli are documented here. Format follows
   showed an empty global default (their GUCs are `vacuum_freeze_min_age` /
   `vacuum_freeze_table_age`); the list now also includes `autovacuum_enabled`, the insert
   thresholds, the MultiXact freeze ages and (PG18+) `autovacuum_vacuum_max_threshold`.
+- **Development**: `make dev-up` works against a remote container engine (e.g. Podman
+  Desktop's machine from WSL) — init scripts are baked into images instead of bind-mounted.
+- **Development**: integration tests no longer leak a PostgreSQL container per run when
+  testcontainers' Ryuk reaper is disabled (Podman) — `TestMain` now terminates it.
 
 ## [0.6.0] - 2026-09-18
 
@@ -185,7 +194,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/liciomatos/pgdba/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/liciomatos/pgdba/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/liciomatos/pgdba/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/liciomatos/pgdba/compare/v0.3.0...v0.4.0
