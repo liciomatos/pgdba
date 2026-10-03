@@ -1,9 +1,13 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/liciomatos/pgdba-cli/config"
 )
 
 func TestGetEnv_WithValue(t *testing.T) {
@@ -88,5 +92,49 @@ func TestLookupPgPassFile_NoMatch(t *testing.T) {
 func TestLookupPgPassFile_NotFound(t *testing.T) {
 	if got := lookupPgPassFile("/nonexistent/.pgpass", "localhost", 5432, "mydb", "postgres"); got != "" {
 		t.Errorf("expected empty for missing file, got %q", got)
+	}
+}
+
+func TestQuoteConnValue_EscapesSpecialCharacters(t *testing.T) {
+	if got := quoteConnValue(`pa ss'w\rd`); got != `'pa ss\'w\\rd'` {
+		t.Fatalf("unexpected quoting: %s", got)
+	}
+}
+
+func TestBuildConnStr_PasswordOverrideReplacesURLPassword(t *testing.T) {
+	saved := *config.Config
+	defer func() { *config.Config = saved }()
+	config.Config.URL = "postgres://admin:old@db.example.com:6432/app?sslmode=require"
+
+	connStr, err := buildConnStr("n3w p@ss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(connStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password, _ := parsed.User.Password(); password != "n3w p@ss" {
+		t.Fatalf("expected prompted password in URI, got %q", password)
+	}
+	if parsed.Host != "db.example.com:6432" || parsed.Query().Get("sslmode") != "require" {
+		t.Fatalf("URI lost other components: %s", connStr)
+	}
+	if config.Config.User != "admin" || config.Config.Password != "n3w p@ss" {
+		t.Fatalf("config not updated: user=%q", config.Config.User)
+	}
+}
+
+func TestBuildConnStr_PasswordOverrideReplacesFlagPassword(t *testing.T) {
+	saved := *config.Config
+	defer func() { *config.Config = saved }()
+	*config.Config = config.AppConfig{Host: "h", Port: 5432, User: "u", Password: "flag", DBName: "d", SSLMode: "disable"}
+
+	connStr, err := buildConnStr("it's secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(connStr, `password='it\'s secret'`) {
+		t.Fatalf("prompted password not used/quoted: %s", connStr)
 	}
 }

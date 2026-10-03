@@ -259,9 +259,19 @@ Flags take priority; env vars are used as defaults:
 | `--dbname` | `PGDATABASE` | `mydb` |
 | `--sslmode` | `PGSSLMODE` | `disable` |
 
+`--vault NAME` loads a connection URI from the encrypted vault (`vault/` package,
+`pgdba-cli vault add|list|remove|path` subcommand in `vault_cmd.go`) and sets `--url` from it.
+`-W` prompts for the password after the URL is parsed and overrides every other source.
+
 If password is still empty after flag parsing, `~/.pgpass` is consulted (`hostname:port:database:username:password`, wildcards `*` supported).
 
 ## Coding Standards
+
+### Branch workflow
+All new work (features, fixes, docs) goes on a new branch created from the latest `main`
+(`git checkout main && git pull && git checkout -b <branch-name>`) **before** writing any
+code, and is merged via PR. Never commit directly to `main` — it is protected (see
+"Release Process" above).
 
 ### Language
 All code, comments, variable names, constants, and identifiers must be in **English**. No Portuguese or other languages anywhere in the codebase. This rule extends to all repository files including `README.md` — documentation must be written in English.
