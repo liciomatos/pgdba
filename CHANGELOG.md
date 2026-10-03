@@ -14,10 +14,37 @@ All notable changes to pgdba-cli are documented here. Format follows
   AES-256-GCM, `0600` permissions); connect with `pgdba-cli --vault <name>`. The master
   password can be supplied via `PGDBA_VAULT_PASSWORD` for non-interactive use (e.g.
   `--mcp`), and the file location overridden with `PGDBA_VAULT_FILE`.
+- **Autovacuum Detail now computes the autovacuum thresholds**: the parameters table gains
+  `Threshold` / `Current` / `Status` columns — dead-tuple, insert and analyze triggers
+  (`base + scale_factor × reltuples`) and XID/MultiXact anti-wraparound, aggressive-scan and
+  freeze-min-age limits — using the table reloption when set and the global setting
+  otherwise, with PostgreSQL's own caps applied (freeze_max_age reloption can only lower the
+  global; freeze_table_age ≤ 95% and freeze_min_age ≤ 50% of freeze_max_age).
+  Version-aware: `autovacuum_vacuum_max_threshold` and the `relallfrozen`-scaled insert
+  threshold on PG18+. The stats line now shows `reltuples` and whether autovacuum is due.
+  The formula behind the selected parameter is shown as a footer tip while navigating.
+  The `check_autovacuum_detail` MCP tool returns the same computation (plus the PG14+
+  failsafe limits) as `thresholds`.
 
 ### Fixed
 - Passwords (and other connection values) containing spaces, quotes or backslashes now
   work with individual connection flags — values are quoted in the libpq key=value string.
+- **List screens no longer stop at the top 20/50 rows**: Index Usage, Autovacuum, Slow
+  Queries, Long Running Queries, Query Load, Cache Hit, Freeze Monitor and TOAST Tables now
+  list every row and scroll as a single list. MCP tools keep their `limit` parameter.
+- **Index Usage no longer truncates table/index names when the terminal has room**: the
+  Schema/Table/Index/Columns columns size to their longest value and share the terminal
+  width (the widest gives way first on narrow terminals); counters and Size take exactly
+  their content width (Size used to cut `8192 bytes` to `8192 by…`). The selected index's
+  full `schema.index on schema.table (columns)` is shown above the footer.
+- Footers of Slow Queries, Index Usage, Long Running Queries, Record Locks and Query Load
+  listed `/ filter` twice.
+- Memory & Checkpoint Stats, Freeze Monitor and Temp Files rendered 1–2 lines taller than
+  the terminal, which pushed the header off the top of the screen.
+- Autovacuum Detail parameters `autovacuum_freeze_min_age` / `autovacuum_freeze_table_age`
+  showed an empty global default (their GUCs are `vacuum_freeze_min_age` /
+  `vacuum_freeze_table_age`); the list now also includes `autovacuum_enabled`, the insert
+  thresholds, the MultiXact freeze ages and (PG18+) `autovacuum_vacuum_max_threshold`.
 
 ## [0.6.0] - 2026-09-18
 

@@ -33,7 +33,7 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 		threshold = 1000
 	}
 
-	queries, err := FetchSlowQueries(context.Background(), config.Config.DB, threshold, 20)
+	queries, err := FetchSlowQueries(context.Background(), config.Config.DB, threshold, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading slow queries", initialModel)
 	}
@@ -177,6 +177,6 @@ func (m SlowQueriesModel) View() string {
 	}
 	s := RenderHeader("Slow Queries") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
 	return s
 }

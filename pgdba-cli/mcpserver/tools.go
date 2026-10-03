@@ -625,9 +625,109 @@ type autovacuumParamResponse struct {
 	Unit        string `json:"unit"`
 }
 
+type thresholdSettingResponse struct {
+	Value  float64 `json:"value"`
+	Source string  `json:"source"` // "table", "global" or "adjusted"
+}
+
+type rowThresholdResponse struct {
+	Base             thresholdSettingResponse  `json:"base"`
+	ScaleFactor      thresholdSettingResponse  `json:"scale_factor"`
+	MaxThreshold     *thresholdSettingResponse `json:"max_threshold,omitempty"`
+	UnfrozenFraction *float64                  `json:"unfrozen_fraction,omitempty"`
+	Threshold        float64                   `json:"threshold"`
+	Current          int64                     `json:"current"`
+	Due              bool                      `json:"due"`
+}
+
+type ageThresholdResponse struct {
+	Limit   thresholdSettingResponse `json:"limit"`
+	Current int64                    `json:"current_age"`
+	Due     bool                     `json:"due"`
+}
+
+type autovacuumThresholdsResponse struct {
+	AutovacuumEnabled       bool                     `json:"autovacuum_enabled"`
+	AutovacuumEnabledSource string                   `json:"autovacuum_enabled_source"`
+	TrackCounts             bool                     `json:"track_counts"`
+	Reltuples               float64                  `json:"reltuples"`
+	ReltuplesUnknown        bool                     `json:"reltuples_unknown"`
+	AutovacuumDue           bool                     `json:"autovacuum_due"`
+	VacuumDeadTuples        rowThresholdResponse     `json:"vacuum_dead_tuples"`
+	VacuumInserts           *rowThresholdResponse    `json:"vacuum_inserts"` // null when disabled (-1)
+	Analyze                 rowThresholdResponse     `json:"analyze"`
+	XIDWraparound           ageThresholdResponse     `json:"xid_wraparound"`
+	XIDAggressive           ageThresholdResponse     `json:"xid_aggressive"`
+	XIDFreezeMinAge         thresholdSettingResponse `json:"xid_freeze_min_age"`
+	XIDFailsafe             *ageThresholdResponse    `json:"xid_failsafe"` // null on PG13
+	MXIDWraparound          ageThresholdResponse     `json:"mxid_wraparound"`
+	MXIDAggressive          ageThresholdResponse     `json:"mxid_aggressive"`
+	MXIDFreezeMinAge        thresholdSettingResponse `json:"mxid_freeze_min_age"`
+	MXIDFailsafe            *ageThresholdResponse    `json:"mxid_failsafe"` // null on PG13
+}
+
+func toSettingResponse(setting util.ThresholdSetting) thresholdSettingResponse {
+	return thresholdSettingResponse{Value: setting.Value, Source: setting.Source}
+}
+
+func toRowThresholdResponse(check util.RowThreshold) rowThresholdResponse {
+	resp := rowThresholdResponse{
+		Base:             toSettingResponse(check.Base),
+		ScaleFactor:      toSettingResponse(check.ScaleFactor),
+		UnfrozenFraction: check.UnfrozenFraction,
+		Threshold:        check.Threshold,
+		Current:          check.Current,
+		Due:              check.Due,
+	}
+	if check.MaxThreshold != nil {
+		maxThreshold := toSettingResponse(*check.MaxThreshold)
+		resp.MaxThreshold = &maxThreshold
+	}
+	return resp
+}
+
+func toAgeThresholdResponse(check util.AgeThreshold) ageThresholdResponse {
+	return ageThresholdResponse{Limit: toSettingResponse(check.Limit), Current: check.Current, Due: check.Due}
+}
+
+func toOptionalAgeThresholdResponse(check *util.AgeThreshold) *ageThresholdResponse {
+	if check == nil {
+		return nil
+	}
+	resp := toAgeThresholdResponse(*check)
+	return &resp
+}
+
+func toThresholdsResponse(thresholds util.AutovacuumThresholds) autovacuumThresholdsResponse {
+	resp := autovacuumThresholdsResponse{
+		AutovacuumEnabled:       thresholds.AutovacuumEnabled,
+		AutovacuumEnabledSource: thresholds.AutovacuumEnabledSource,
+		TrackCounts:             thresholds.TrackCounts,
+		Reltuples:               thresholds.Reltuples,
+		ReltuplesUnknown:        thresholds.ReltuplesUnknown,
+		AutovacuumDue:           thresholds.AutovacuumDue(),
+		VacuumDeadTuples:        toRowThresholdResponse(thresholds.DeadTuples),
+		Analyze:                 toRowThresholdResponse(thresholds.Analyze),
+		XIDWraparound:           toAgeThresholdResponse(thresholds.XIDWraparound),
+		XIDAggressive:           toAgeThresholdResponse(thresholds.XIDAggressive),
+		XIDFreezeMinAge:         toSettingResponse(thresholds.XIDFreezeMinAge),
+		XIDFailsafe:             toOptionalAgeThresholdResponse(thresholds.XIDFailsafe),
+		MXIDWraparound:          toAgeThresholdResponse(thresholds.MXIDWraparound),
+		MXIDAggressive:          toAgeThresholdResponse(thresholds.MXIDAggressive),
+		MXIDFreezeMinAge:        toSettingResponse(thresholds.MXIDFreezeMinAge),
+		MXIDFailsafe:            toOptionalAgeThresholdResponse(thresholds.MXIDFailsafe),
+	}
+	if thresholds.Inserts != nil {
+		inserts := toRowThresholdResponse(*thresholds.Inserts)
+		resp.VacuumInserts = &inserts
+	}
+	return resp
+}
+
 type autovacuumDetailResult struct {
-	Stats  autovacuumDetailResponse  `json:"stats"`
-	Params []autovacuumParamResponse `json:"params"`
+	Stats      autovacuumDetailResponse      `json:"stats"`
+	Params     []autovacuumParamResponse     `json:"params"`
+	Thresholds *autovacuumThresholdsResponse `json:"thresholds,omitempty"`
 }
 
 func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -641,6 +741,11 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	params, _ := util.FetchAutovacuumParams(ctx, config.Config.DB, schema, table)
+	var thresholdsResp *autovacuumThresholdsResponse
+	if thresholds, err := util.FetchAutovacuumThresholds(ctx, config.Config.DB, schema, table); err == nil {
+		computed := toThresholdsResponse(thresholds)
+		thresholdsResp = &computed
+	}
 	paramResp := make([]autovacuumParamResponse, 0, len(params))
 	for _, p := range params {
 		paramResp = append(paramResp, autovacuumParamResponse{
@@ -671,7 +776,8 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 			LastAnalyze:       formatTime(stats.LastAnalyze),
 			LastAutoanalyze:   formatTime(stats.LastAutoanalyze),
 		},
-		Params: paramResp,
+		Params:     paramResp,
+		Thresholds: thresholdsResp,
 	})
 }
 

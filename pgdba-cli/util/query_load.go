@@ -30,7 +30,7 @@ func (m QueryLoadModel) IsInputMode() bool { return m.filterMode }
 // pg_stat_statements, computes each query's share of total instance load,
 // and includes buffer and temp disk usage as resource proxies.
 func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
-	queries, err := FetchQueryLoad(context.Background(), config.Config.DB, 20)
+	queries, err := FetchQueryLoad(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading query load (pg_stat_statements required)", initialModel)
 	}
@@ -184,6 +184,6 @@ func (m QueryLoadModel) View() string {
 	s := RenderHeader("Query Load") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + legend
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • / filter • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • q back")
 	return s
 }

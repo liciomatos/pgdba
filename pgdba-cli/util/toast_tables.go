@@ -46,7 +46,7 @@ func toastTableColumns() []table.Column {
 }
 
 func CheckToastTables(initialModel func() tea.Model) tea.Model {
-	toastTables, err := FetchToastTables(context.Background(), config.Config.DB, 50)
+	toastTables, err := FetchToastTables(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading TOAST tables", initialModel)
 	}

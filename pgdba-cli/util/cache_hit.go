@@ -24,7 +24,7 @@ type CacheHitModel struct {
 func (m CacheHitModel) IsInputMode() bool { return m.filterMode }
 
 func CheckCacheHit(initialModel func() tea.Model) tea.Model {
-	tables, err := FetchCacheHit(context.Background(), config.Config.DB, 20)
+	tables, err := FetchCacheHit(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
 		return NewErrorModel(err, "Loading cache hit ratios", initialModel)
 	}

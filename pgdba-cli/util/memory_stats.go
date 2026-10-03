@@ -65,9 +65,9 @@ func (m MemoryStatsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.width = msg.Width
-		m.table.SetHeight(TableHeight(msg.Height) - 6) // cache hit line, checkpoint stats block, blank lines
 		cols := StretchColumn(m.table.Columns(), 3, msg.Width)
 		m.table.SetColumns(cols)
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 
 	case tea.KeyMsg:
