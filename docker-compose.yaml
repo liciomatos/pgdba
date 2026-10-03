@@ -10,10 +10,19 @@ version: '3.8'
 # Connect to replica:  make run-replica
 # Connect to sub:      make run-sub
 # Tear down:           make dev-down
+#
+# Init scripts (init-db/, docker/replica-setup.sh, docker/subscriber-init.sql) are
+# baked into images built from docker/Containerfile rather than bind-mounted, so this
+# works against a remote engine (CONTAINER_HOST / Podman Desktop) as well as a local one.
+# Editing an init script requires `make dev-down && make dev-up` (rebuild + empty volumes).
 
 services:
   pg-main:
-    image: docker.io/library/postgres:18
+    image: localhost/pgdba-dev-main:18
+    build:
+      context: .
+      dockerfile: docker/Containerfile
+      target: main
     container_name: pgdba_main
     environment:
       POSTGRES_USER: postgres
@@ -24,7 +33,6 @@ services:
       - "5432:5432"
     volumes:
       - pg_main_data:/var/lib/postgresql/data
-      - ./init-db:/docker-entrypoint-initdb.d
     command: >
       postgres
         -c wal_level=logical
@@ -36,7 +44,11 @@ services:
         -c wal_keep_size=256
 
   pg-replica:
-    image: docker.io/library/postgres:18
+    image: localhost/pgdba-dev-replica:18
+    build:
+      context: .
+      dockerfile: docker/Containerfile
+      target: replica
     container_name: pgdba_replica
     environment:
       POSTGRES_PASSWORD: postgres
@@ -45,11 +57,14 @@ services:
       - "5433:5432"
     volumes:
       - pg_replica_data:/var/lib/postgresql/data
-      - ./docker/replica-setup.sh:/replica-setup.sh
     entrypoint: ["/bin/bash", "/replica-setup.sh"]
 
   pg-sub:
-    image: docker.io/library/postgres:18
+    image: localhost/pgdba-dev-sub:18
+    build:
+      context: .
+      dockerfile: docker/Containerfile
+      target: sub
     container_name: pgdba_sub
     environment:
       POSTGRES_USER: postgres
@@ -60,7 +75,6 @@ services:
       - "5434:5432"
     volumes:
       - pg_sub_data:/var/lib/postgresql/data
-      - ./docker/subscriber-init.sql:/docker-entrypoint-initdb.d/01_tables.sql
     command: >
       postgres
         -c shared_preload_libraries=pg_stat_statements

@@ -1,0 +1,6 @@
+# Build context for docker/Containerfile: send only what the dev images copy, so a
+# remote engine doesn't receive .git, Go sources or built binaries.
+*
+!init-db/
+!docker/replica-setup.sh
+!docker/subscriber-init.sql
