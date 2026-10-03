@@ -265,6 +265,11 @@ From the main dashboard, open each screen with its shortcut key:
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
 | `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 
+Press `?` on any screen for its help page — a man-page style description of what the
+screen is for, what each column means, its keys, how to read the values (the thresholds
+behind the green/yellow/red colors) and which catalog views the data comes from.
+`q`, `esc` or `?` returns to the screen exactly where you were.
+
 All list screens show every row (no top-N cut-off) and scroll with `↑↓`/`pgup`/`pgdn` when the list is taller than the terminal. All list screens support live filtering via `/`.
 
 ### Autovacuum Detail

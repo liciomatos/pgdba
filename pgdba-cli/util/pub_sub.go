@@ -393,7 +393,7 @@ func (m PubSubModel) View() string {
 		s += ColorizeTable(m.subTable.View(), m.subTable.Columns(), buildSubColorRules())
 	}
 
-	s += "\n" + FooterStyle.Render("↑↓ navigate • tab switch section • enter detail • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • tab switch section • enter detail • r refresh • ? help • q back")
 	return s
 }
 

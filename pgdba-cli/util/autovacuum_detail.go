@@ -447,7 +447,7 @@ func (m AutovacuumDetailModel) View() string {
 	if m.confirmVacuum {
 		footer = fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schema, m.tableName)
 	} else {
-		footer = "\n" + FooterStyle.Render("↑↓ navigate • b precise bloat • v vacuum analyze • r refresh • q back")
+		footer = "\n" + FooterStyle.Render("↑↓ navigate • b precise bloat • v vacuum analyze • r refresh • ? help • q back")
 	}
 
 	summary := statsLine + "\n" + vacuumLine + "\n" + analyzeLine + "\n" + freezeLine + "\n"

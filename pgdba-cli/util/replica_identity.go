@@ -248,6 +248,6 @@ func (m ReplicaIdentityModel) View() string {
 	if m.publishedOnly {
 		toggleHint = "p show all"
 	}
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • "+toggleHint+" • r refresh • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • "+toggleHint+" • r refresh • ? help • q back")
 	return s
 }

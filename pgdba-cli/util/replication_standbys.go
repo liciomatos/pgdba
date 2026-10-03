@@ -159,7 +159,7 @@ func (m ReplicationStandbysModel) View() string {
 		s += fmt.Sprintf("\nTerminate walsender for '%s' (PID %d)? (y/n)\n",
 			m.appToKill, m.pidToKill)
 	} else {
-		s += "\n" + FooterStyle.Render("↑↓ navigate • k terminate walsender • r refresh • q back")
+		s += "\n" + FooterStyle.Render("↑↓ navigate • k terminate walsender • r refresh • ? help • q back")
 	}
 	return s
 }

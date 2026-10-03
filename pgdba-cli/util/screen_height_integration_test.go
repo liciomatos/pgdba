@@ -82,6 +82,17 @@ func TestScreens_FitTerminalHeight(t *testing.T) {
 				if lines > height {
 					t.Errorf("frame has %d lines, terminal has %d — header would be cut off", lines, height)
 				}
+
+				// "?" from this screen: the help page must fit as well, and close back to it.
+				provider, ok := model.(HelpTopicProvider)
+				if !ok {
+					t.Fatalf("%T has no help topic", model)
+				}
+				var help tea.Model = NewHelpModel(provider.HelpTopic(), model)
+				help, _ = help.Update(tea.WindowSizeMsg{Width: 140, Height: height})
+				if helpLines := strings.Count(help.View(), "\n") + 1; helpLines > height {
+					t.Errorf("help page has %d lines, terminal has %d", helpLines, height)
+				}
 			})
 		}
 	}

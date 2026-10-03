@@ -104,7 +104,7 @@ func (m PubTableDetailModel) View() string {
 	s := RenderHeader("Publication Tables — " + m.pubName) + "\n"
 	s += renderLabel("publication:") + "  " + renderValue(m.pubName) + "\n"
 	s += ColorizeTable(m.tableModel.View(), m.tableModel.Columns(), nil)
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }
 
@@ -217,6 +217,6 @@ func (m SubTableDetailModel) View() string {
 	s := RenderHeader("Subscription Tables — " + m.subName) + "\n"
 	s += renderLabel("subscription:") + "  " + renderValue(m.subName) + "\n"
 	s += ColorizeTable(m.tableModel.View(), m.tableModel.Columns(), syncStateRules)
-	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • q back")
+	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }
