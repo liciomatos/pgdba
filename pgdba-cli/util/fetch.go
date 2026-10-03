@@ -2412,6 +2412,149 @@ func FetchSubscriptionTables(ctx context.Context, db *sql.DB, subname string) ([
 	return result, rows.Err()
 }
 
+// --- Dashboard: WAL & replication health ---
+
+// WALReplicationStatus gathers the signals that predict a full pg_wal or a broken
+// replica: WAL retained by slots against max_slot_wal_keep_size, slots about to be (or
+// already) invalidated, a failing archiver, standby lag and logical replication errors.
+type WALReplicationStatus struct {
+	SlotCount int
+	// MaxRetainedBytes is the WAL kept by the slot that retains the most
+	// (current LSN − restart_lsn); MaxRetainedSlot names it. Zero/empty without slots.
+	MaxRetainedBytes int64
+	MaxRetainedSlot  string
+	// MaxSlotWALKeepBytes is max_slot_wal_keep_size in bytes; nil when it's -1
+	// (unlimited — a stalled slot can fill the disk).
+	MaxSlotWALKeepBytes *int64
+	SlotsUnreserved     int // wal_status = 'unreserved': past max_wal_size, about to be invalidated
+	SlotsLost           int // wal_status = 'lost': invalidated, the consumer must be rebuilt
+	// IdleSlotTimeoutSeconds is idle_replication_slot_timeout (PG18+); nil before PG18,
+	// 0 when disabled. LongestIdleSeconds/LongestIdleSlot come from inactive_since (PG18+).
+	IdleSlotTimeoutSeconds *int64
+	LongestIdleSeconds     *int64
+	LongestIdleSlot        string
+
+	ArchiveMode       string // off, on, always
+	ArchivedCount     int64
+	FailedCount       int64
+	LastArchivedTime  *time.Time
+	LastFailedTime    *time.Time
+	ArchiveFailingNow bool // the last attempt failed (last_failed_time after last_archived_time)
+
+	// Physical standbys and logical subscribers both appear in pg_stat_replication; they
+	// are split because "standby lag" and "subscriber lag" mean different things.
+	StandbyCount        int
+	MaxStandbyLagBytes  *int64   // nil when there are no standbys or lag isn't visible
+	MaxReplayLagSeconds *float64 // nil when unknown (idle standby, insufficient privileges)
+	// LogicalSenderCount is walsenders streaming this server's publications to subscribers.
+	LogicalSenderCount int
+	MaxLogicalLagBytes *int64
+
+	SubscriptionCount int
+	// SubscriptionErrors is apply + sync errors (PG15+); SubscriptionConflicts sums the
+	// confl_* counters (PG18+). nil when the version doesn't provide them.
+	SubscriptionErrors    *int64
+	SubscriptionConflicts *int64
+}
+
+// SlotRetentionPct is MaxRetainedBytes as a percentage of max_slot_wal_keep_size, or
+// nil when that limit is unlimited.
+func (s WALReplicationStatus) SlotRetentionPct() *float64 {
+	if s.MaxSlotWALKeepBytes == nil || *s.MaxSlotWALKeepBytes <= 0 {
+		return nil
+	}
+	pct := float64(s.MaxRetainedBytes) / float64(*s.MaxSlotWALKeepBytes) * 100
+	return &pct
+}
+
+func FetchWALReplicationStatus(ctx context.Context, db *sql.DB) (WALReplicationStatus, error) {
+	var status WALReplicationStatus
+	majorVersion := pgMajorVersion()
+
+	// pg_current_wal_lsn() errors during recovery; on a standby, retention is measured
+	// against the last replayed position instead.
+	const currentLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END`
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			count(*),
+			COALESCE(max(pg_wal_lsn_diff(`+currentLSN+`, restart_lsn)), 0)::bigint,
+			COALESCE((array_agg(slot_name ORDER BY pg_wal_lsn_diff(`+currentLSN+`, restart_lsn) DESC NULLS LAST))[1], ''),
+			count(*) FILTER (WHERE wal_status = 'unreserved'),
+			count(*) FILTER (WHERE wal_status = 'lost')
+		FROM pg_replication_slots`,
+	).Scan(&status.SlotCount, &status.MaxRetainedBytes, &status.MaxRetainedSlot,
+		&status.SlotsUnreserved, &status.SlotsLost); err != nil {
+		return status, err
+	}
+
+	if err := db.QueryRowContext(ctx, `
+		SELECT CASE WHEN setting::bigint < 0 THEN NULL ELSE pg_size_bytes(setting || unit) END
+		FROM pg_settings WHERE name = 'max_slot_wal_keep_size'`,
+	).Scan(&status.MaxSlotWALKeepBytes); err != nil {
+		return status, err
+	}
+
+	// idle_replication_slot_timeout and pg_replication_slots.inactive_since: PG18+.
+	if majorVersion >= 18 {
+		if err := db.QueryRowContext(ctx, `
+			SELECT
+				(SELECT setting::bigint FROM pg_settings WHERE name = 'idle_replication_slot_timeout'),
+				(SELECT EXTRACT(EPOCH FROM now() - min(inactive_since))::bigint FROM pg_replication_slots WHERE NOT active),
+				COALESCE((SELECT slot_name FROM pg_replication_slots WHERE NOT active AND inactive_since IS NOT NULL
+				          ORDER BY inactive_since LIMIT 1), '')`,
+		).Scan(&status.IdleSlotTimeoutSeconds, &status.LongestIdleSeconds, &status.LongestIdleSlot); err != nil {
+			return status, err
+		}
+	}
+
+	if err := db.QueryRowContext(ctx, `
+		SELECT current_setting('archive_mode'), archived_count, failed_count, last_archived_time, last_failed_time,
+		       last_failed_time IS NOT NULL
+		         AND (last_archived_time IS NULL OR last_failed_time > last_archived_time)
+		FROM pg_stat_archiver`,
+	).Scan(&status.ArchiveMode, &status.ArchivedCount, &status.FailedCount,
+		&status.LastArchivedTime, &status.LastFailedTime, &status.ArchiveFailingNow); err != nil {
+		return status, err
+	}
+
+	// replay_lsn / replay_lag are NULL for other users' walsenders without pg_read_all_stats.
+	// A physical walsender isn't connected to a database (datname IS NULL); a logical one
+	// (feeding a subscription) is. For logical senders "replay" is the subscriber's
+	// confirmed position.
+	if err := db.QueryRowContext(ctx, `
+		SELECT
+			count(*) FILTER (WHERE a.datname IS NULL),
+			max(pg_wal_lsn_diff(`+currentLSN+`, r.replay_lsn)) FILTER (WHERE a.datname IS NULL)::bigint,
+			max(EXTRACT(EPOCH FROM r.replay_lag)) FILTER (WHERE a.datname IS NULL)::float8,
+			count(*) FILTER (WHERE a.datname IS NOT NULL),
+			max(pg_wal_lsn_diff(`+currentLSN+`, r.replay_lsn)) FILTER (WHERE a.datname IS NOT NULL)::bigint
+		FROM pg_stat_replication r
+		LEFT JOIN pg_stat_activity a ON a.pid = r.pid`,
+	).Scan(&status.StandbyCount, &status.MaxStandbyLagBytes, &status.MaxReplayLagSeconds,
+		&status.LogicalSenderCount, &status.MaxLogicalLagBytes); err != nil {
+		return status, err
+	}
+
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_subscription`).Scan(&status.SubscriptionCount); err != nil {
+		return status, err
+	}
+	// pg_stat_subscription_stats is PG15+; its confl_* conflict counters are PG18+. Summing
+	// every confl_* key of the row as JSON keeps working if later versions add more types.
+	if majorVersion >= 15 && status.SubscriptionCount > 0 {
+		conflicts := "NULL::bigint"
+		if majorVersion >= 18 {
+			conflicts = `COALESCE(sum((SELECT sum(value::bigint) FROM jsonb_each_text(to_jsonb(s)) WHERE key LIKE 'confl\_%')), 0)::bigint`
+		}
+		if err := db.QueryRowContext(ctx, `
+			SELECT COALESCE(sum(apply_error_count + sync_error_count), 0)::bigint, `+conflicts+`
+			FROM pg_stat_subscription_stats s`,
+		).Scan(&status.SubscriptionErrors, &status.SubscriptionConflicts); err != nil {
+			return status, err
+		}
+	}
+	return status, nil
+}
+
 // --- Replica identity (logical replication readiness) ---
 
 // ReplicaIdentityIssue is a table without a replica identity usable by the logical

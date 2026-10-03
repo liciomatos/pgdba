@@ -54,7 +54,12 @@ var screenHelp = map[string]ScreenHelp{
 			{"Slow queries", "pg_stat_statements entries whose mean time exceeds --slow-ms; yellow > 5, red > 20 (key 1). N/A without pg_stat_statements."},
 			{"Dead tuples", "total across user tables; yellow > 10k, red > 100k (key 6)."},
 			{"Temp files / Invalid indexes / DB size", "temp spill since stats reset (key t); indexes left INVALID by a failed CREATE INDEX CONCURRENTLY (key 7); database size (key S)."},
-			{"Replication slots / Uptime / Freeze", "slot count (key 3); time since start; XID age toward the 2.1B wraparound limit — yellow > 7.1%, red > 8.6% (key f)."},
+			{"Slot WAL retained", "WAL kept by the slot that retains the most vs max_slot_wal_keep_size — yellow ≥ 50%, red ≥ 80%; yellow when the limit is -1 (unlimited: a stalled slot can fill the disk) (key 3)."},
+			{"Slots at risk", "slot count; wal_status unreserved (about to be invalidated, yellow) / lost (invalidated — the consumer must be rebuilt, red); PG18+: longest idle slot vs idle_replication_slot_timeout, yellow at ≥ 80%."},
+			{"Archiving", "pg_stat_archiver: ok, off, or FAILING (red) — while archiving fails, WAL can't leave pg_wal."},
+			{"Replication", "worst lag of physical standbys and of logical subscribers fed by this server — yellow > 64 MB / 10 s, red > 1 GB / 60 s; this server's subscriptions with apply/sync errors (PG15+) and conflicts (PG18+), yellow when > 0."},
+			{"Freeze", "oldest database's XID age toward the 2.1B wraparound limit — yellow > 7.1%, red > 8.6% (key f)."},
+			{"up …", "server uptime, on the connection line."},
 		},
 		Keys: []HelpItem{
 			{"1-0", "slow queries, long running, replication slots, blocked queries, connections, autovacuum, index usage, cache hit, users, roles"},
@@ -65,8 +70,9 @@ var screenHelp = map[string]ScreenHelp{
 		Reading: []string{
 			"Green = fine, yellow = look at it, red = act now. Every number links to a screen via the key shown in the footer.",
 			"Counters such as dead tuples and temp files are cumulative since the last stats reset, not per second.",
+			"On short terminals the blank lines between sections are dropped so everything fits.",
 		},
-		Source: "pg_stat_activity, pg_stat_database, pg_stat_user_tables, pg_index, pg_replication_slots, pg_database, pg_stat_statements",
+		Source: "pg_stat_activity, pg_stat_database, pg_stat_user_tables, pg_index, pg_replication_slots, pg_stat_archiver, pg_stat_replication, pg_stat_subscription_stats (PG15+), pg_settings, pg_database, pg_stat_statements",
 	},
 	"slow_queries": {
 		Title:   "Slow Queries (key 1) — statements with a high average execution time",

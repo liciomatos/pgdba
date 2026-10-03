@@ -6,6 +6,13 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Dashboard: WAL & Replication section** — WAL retained by the most demanding slot vs
+  `max_slot_wal_keep_size` (warns when it's unlimited), slots `unreserved` / `lost` and, on
+  PG18+, the longest idle slot vs `idle_replication_slot_timeout`; archiver status
+  (red while archiving fails); worst lag of physical standbys and of logical subscribers,
+  and this server's subscription errors (PG15+) and conflicts (PG18+). Works on standbys.
+  The dashboard now measures its height and compacts on short terminals; uptime moved to
+  the connection line and the slot count into the new section.
 - **`?` help on every screen**: a scrollable, man-page style page per screen — purpose,
   what each column/metric means, screen keys plus the common ones, how to read the values
   (including the exact thresholds behind each color) and the catalog views it reads.
