@@ -23,6 +23,10 @@ type PubSubModel struct {
 	width         int
 	height        int
 	initialModel  func() tea.Model
+	// criticalIdentityCount is how many replicated tables (UPDATE/DELETE, via publication
+	// or pglogical set) have no usable
+	// replica identity; shown on the Publications label pointing at the I screen.
+	criticalIdentityCount int
 }
 
 func pubColumns() []table.Column {
@@ -65,6 +69,14 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 	subs, err := FetchSubscriptions(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading subscriptions", initialModel)
+	}
+	// A failed identity check shouldn't block the Pub/Sub screen — the alert is optional.
+	identityIssues, _ := FetchReplicaIdentityIssues(context.Background(), config.Config.DB)
+	criticalIdentityCount := 0
+	for _, issue := range identityIssues {
+		if issue.IsCritical() {
+			criticalIdentityCount++
+		}
 	}
 
 	var pubRows []table.Row
@@ -143,6 +155,8 @@ func CheckPubSub(initialModel func() tea.Model) tea.Model {
 		width:         120,
 		height:        40,
 		initialModel:  initialModel,
+
+		criticalIdentityCount: criticalIdentityCount,
 	}
 }
 
@@ -350,6 +364,11 @@ func (m PubSubModel) View() string {
 
 	// Publications section
 	pubLabel := pubStyle.Render(fmt.Sprintf("Publications  (%d)", m.pubCount))
+	// Same line as the label, so the height budget computed in WindowSizeMsg is unchanged.
+	if m.criticalIdentityCount > 0 {
+		pubLabel += "   " + SeverityColor(fmt.Sprintf("⚠ %d replicated table(s) without usable replica identity — UPDATE/DELETE break",
+			m.criticalIdentityCount), 2) + HintStyle.Render(" • press I")
+	}
 	s += pubLabel + "\n"
 	if m.pubCount == 0 {
 		s += HintStyle.Render("  No publications defined on this server.") + "\n"

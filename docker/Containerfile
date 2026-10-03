@@ -12,3 +12,11 @@ COPY docker/replica-setup.sh /replica-setup.sh
 
 FROM ${POSTGRES_IMAGE} AS sub
 COPY docker/subscriber-init.sql /docker-entrypoint-initdb.d/01_tables.sql
+
+# pglogical provider for the Replica Identity screen's pglogical scenarios. Kept out of
+# pg-main so the native pub/sub demo isn't mixed with pglogical's replication sets.
+FROM ${POSTGRES_IMAGE} AS pglogical
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pglogical" \
+ && rm -rf /var/lib/apt/lists/*
+COPY docker/pglogical-init.sql /docker-entrypoint-initdb.d/01_pglogical.sql

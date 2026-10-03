@@ -4,3 +4,4 @@
 !init-db/
 !docker/replica-setup.sh
 !docker/subscriber-init.sql
+!docker/pglogical-init.sql
