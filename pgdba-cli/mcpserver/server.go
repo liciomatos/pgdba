@@ -36,50 +36,62 @@ func Serve(port int) error {
 	), handleCheckDashboard)
 
 	addTool(s, mcp.NewTool("check_blocked_queries",
-		mcp.WithDescription("Sessions blocked by row-level or relation locks, including the blocking session's statement."),
+		mcp.WithDescription("Sessions blocked by row-level or relation locks, including the blocking session's statement (both truncated to 500 characters). status is always critical: a session is waiting on another one."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckBlockedQueries)
 
 	addTool(s, mcp.NewTool("check_connections",
-		mcp.WithDescription("Connection count by state (active, idle, idle in transaction, …) and percentage of max_connections used."),
+		mcp.WithDescription("Connection count by state and % of max_connections used, plus where client connections come from (top 5 applications, users and client addresses), the 5 sessions idle in transaction the longest (with idle time, transaction age and last query) and the age of the oldest open transaction. status: critical at ≥ 90% of max_connections or a session idle in transaction ≥ 1 h; warning at ≥ 70% or idle in transaction ≥ 5 min."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckConnections)
 
 	addTool(s, mcp.NewTool("check_wait_events",
-		mcp.WithDescription("Active wait events grouped by type (Lock, IO, LWLock, CPU, …) with percentage distribution."),
+		mcp.WithDescription("What sessions wait on, sampled: pg_stat_activity is read `samples` times `interval_ms` apart and sessions are averaged per wait event into average active sessions (aas, the Performance Insights unit); total_aas equals the sum of the events' aas. Idle sessions (state idle, e.g. Client:ClientRead) and idle background processes (wait_event_type Activity) are excluded unless include_idle is true. \"CPU\" = running, not waiting. status: Lock critical from 1 aas and warning below; IO, LWLock and BufferPin warning from 1 aas."),
+		mcp.WithInteger("samples",
+			mcp.Description("Number of pg_stat_activity samples"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithInteger("interval_ms",
+			mcp.Description("Milliseconds between samples ((samples-1) × interval_ms ≤ 60 s; the call waits that long)"),
+			mcp.DefaultNumber(1000),
+		),
+		mcp.WithBoolean("include_idle",
+			mcp.Description("Also count idle sessions and idle background processes (the old single-snapshot view)"),
+			mcp.DefaultBool(false),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckWaitEvents)
 
 	addTool(s, mcp.NewTool("check_replication_slots",
-		mcp.WithDescription("Replication slots with WAL accumulation size, slot type, database, and active status."),
+		mcp.WithDescription("Replication slots with WAL retained in bytes (wal_lag_bytes, measured from the replay position on a standby), safe_wal_size_bytes, wal_status, slot type, database and active status. status: critical when wal_status is lost or unreserved, warning when the slot is inactive."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckReplicationSlots)
 
 	addTool(s, mcp.NewTool("check_users",
-		mcp.WithDescription("Login roles with superuser/createdb/replication flags, connection limit, and expiry date."),
+		mcp.WithDescription("Login roles with superuser/createdb/replication flags, connection limit and password expiry. status: critical when the password has expired, warning when it expires within 7 days."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckUsers)
 
 	addTool(s, mcp.NewTool("check_roles",
-		mcp.WithDescription("Group roles (non-login) with privilege flags and member list."),
+		mcp.WithDescription("Group roles (non-login) with privilege flags and member list. status is informational (always ok)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckRoles)
 
 	addTool(s, mcp.NewTool("check_extensions",
-		mcp.WithDescription("Installed PostgreSQL extensions with version, schema, and description."),
+		mcp.WithDescription("Installed PostgreSQL extensions with installed version, default_version (what this server ships), schema and description. status: warning when the installed version is older than default_version — run ALTER EXTENSION ... UPDATE."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckExtensions)
 
 	// --- tools with optional parameters ---
 	addTool(s, mcp.NewTool("check_slow_queries",
-		mcp.WithDescription("Top queries by mean execution time from pg_stat_statements. Requires the pg_stat_statements extension; works with every extension version (pre-1.8 total_time/mean_time columns included) and reports pg_stat_statements_version, with a warning when ALTER EXTENSION pg_stat_statements UPDATE is due."),
+		mcp.WithDescription("Top queries by mean execution time from pg_stat_statements (query text truncated to 500 characters, query_truncated marks it). Works with every extension version (pre-1.8 total_time/mean_time columns included) and reports pg_stat_statements_version, with a warning when ALTER EXTENSION pg_stat_statements UPDATE is due. status: warning above threshold_ms, critical above twice it."),
 		mcp.WithNumber("threshold_ms",
 			mcp.Description("Minimum mean execution time in ms to include a query"),
 			mcp.DefaultNumber(1000.0),
@@ -93,7 +105,7 @@ func Serve(port int) error {
 	), handleCheckSlowQueries)
 
 	addTool(s, mcp.NewTool("check_long_running_queries",
-		mcp.WithDescription("Non-idle sessions whose current query runs longer than the given threshold, with user, application, client address, backend type and wait event. Client backends only unless include_background is true (autovacuum workers, walsenders, … have no user)."),
+		mcp.WithDescription("Non-idle sessions whose current query runs longer than the given threshold, with user, application, client address, backend type and wait event (query truncated to 500 characters). Client backends only unless include_background is true (autovacuum workers, walsenders, … have no user). status: warning above 10 s, critical above 60 s."),
 		mcp.WithInteger("min_duration_seconds",
 			mcp.Description("Minimum query duration in seconds"),
 			mcp.DefaultNumber(5),
@@ -153,7 +165,7 @@ func Serve(port int) error {
 	), handleCheckCacheHit)
 
 	addTool(s, mcp.NewTool("check_query_load",
-		mcp.WithDescription("Top queries by total execution time from pg_stat_statements, with load percentage and buffer/temp usage. Requires pg_stat_statements (any version; pre-1.8 column names handled) and reports pg_stat_statements_version."),
+		mcp.WithDescription("Top queries by total execution time from pg_stat_statements, with load percentage and buffer/temp usage (query truncated to 500 characters). Works with any extension version and reports pg_stat_statements_version. status: warning when one statement takes ≥ 20% of the instance's execution time, critical from 40%."),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
@@ -193,7 +205,7 @@ func Serve(port int) error {
 	), handleCheckPgConfig)
 
 	addTool(s, mcp.NewTool("check_schema",
-		mcp.WithDescription("Tables in the given schema with estimated row count, size, and column definitions."),
+		mcp.WithDescription("Tables in the given schema with estimated row count, size (size_bytes / size_pretty) and column definitions. status is informational (always ok)."),
 		mcp.WithString("schema",
 			mcp.Description("Schema name to inspect"),
 			mcp.DefaultString("public"),
@@ -271,13 +283,13 @@ func Serve(port int) error {
 	), handleCheckWAL)
 
 	addTool(s, mcp.NewTool("check_freeze_by_database",
-		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),
+		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit). status: warning above 7.1%, critical above 8.6%."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckFreezeByDatabase)
 
 	addTool(s, mcp.NewTool("check_freeze_by_table",
-		mcp.WithDescription("Top tables by relfrozenxid age with wraparound risk percentage relative to autovacuum_freeze_max_age."),
+		mcp.WithDescription("Top tables by relfrozenxid age with wraparound risk percentage relative to autovacuum_freeze_max_age and total size in bytes. status: warning above 50%, critical above 75% of autovacuum_freeze_max_age."),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(50),
@@ -287,25 +299,25 @@ func Serve(port int) error {
 	), handleCheckFreezeByTable)
 
 	addTool(s, mcp.NewTool("check_streaming_standbys",
-		mcp.WithDescription("Streaming replication standbys from pg_stat_replication with write/flush/replay lag and byte lag."),
+		mcp.WithDescription("Streaming replication standbys from pg_stat_replication with write/flush/replay lag (intervals and *_lag_seconds) and byte lag. status: warning above 64 MB or 10 s of replay lag, critical above 1 GB or 60 s."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckStreamingStandbys)
 
 	addTool(s, mcp.NewTool("check_replication_config",
-		mcp.WithDescription("Replication-related pg_settings parameters (wal_level, synchronous_commit, slots, archive, etc.) with contextual hints about risk or misconfiguration."),
+		mcp.WithDescription("Replication-related pg_settings parameters (wal_level, synchronous_commit, slots, archive, etc.) with contextual hints about risk or misconfiguration. status per parameter follows the hint: critical (e.g. wal_level minimal, full_page_writes off), warning, or ok."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckReplicationConfig)
 
 	addTool(s, mcp.NewTool("check_database_sizes",
-		mcp.WithDescription("On-disk size of every database and tablespace, plus the total cluster size."),
+		mcp.WithDescription("On-disk size of every database and tablespace (bytes and pretty), plus the total cluster size. status is informational (always ok)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckDatabaseSizes)
 
 	addTool(s, mcp.NewTool("check_temp_files",
-		mcp.WithDescription("Temp file spill activity per database from pg_stat_database (temp_files, temp_bytes) since the last stats reset. High values suggest work_mem is too low."),
+		mcp.WithDescription("Temp file spill per database from pg_stat_database (temp_files, temp_bytes, avg_bytes_per_file) with stats_reset (a note explains a never-reset null), plus the 5 statements that wrote the most temp data (top_queries, from pg_stat_statements: temp_blks_written and bytes). High values suggest work_mem is too low for those statements. status: warning for any temp file since the reset."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckTempFiles)
@@ -321,33 +333,33 @@ func Serve(port int) error {
 	), handleCheckMemoryStats)
 
 	addTool(s, mcp.NewTool("check_publications",
-		mcp.WithDescription("Logical replication publications defined on this server with per-operation flags and table count."),
+		mcp.WithDescription("Logical replication publications defined on this server with per-operation flags and table count. status is informational (always ok)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckPublications)
 
 	addTool(s, mcp.NewTool("check_subscriptions",
-		mcp.WithDescription("Logical replication subscriptions with connection status, received LSN, and error counts (PG15+)."),
+		mcp.WithDescription("Logical replication subscriptions with connection status, received LSN and error counts (PG15+). status: critical when enabled but the apply worker isn't running; warning when disabled or with apply/sync errors."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSubscriptions)
 
 	addTool(s, mcp.NewTool("check_publication_tables",
-		mcp.WithDescription("Tables and statistics (live/dead rows, seq/idx scans, last vacuum) for a specific publication. PG15+ also returns column filters and row filters."),
+		mcp.WithDescription("Tables and statistics (live/dead rows, seq/idx scans, last vacuum) for a specific publication. PG15+ also returns column filters and row filters. status is informational (always ok)."),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Publication name")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckPublicationTables)
 
 	addTool(s, mcp.NewTool("check_subscription_tables",
-		mcp.WithDescription("Per-table sync state and row stats (live rows, INS/UPD/DEL) for a specific subscription."),
+		mcp.WithDescription("Per-table sync state and row stats (live rows, INS/UPD/DEL) for a specific subscription. status: warning until the table reaches the ready state."),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Subscription name")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSubscriptionTables)
 
 	addTool(s, mcp.NewTool("check_toast_tables",
-		mcp.WithDescription("List user tables with TOAST data — size, toast %, dead tuples, cache hit ratio, and last autovacuum on the TOAST heap."),
+		mcp.WithDescription("User tables with TOAST data — TOAST size in bytes, toast %, dead tuples, cache hit ratio and last autovacuum on the TOAST heap. status from the TOAST cache hit ratio: critical < 70%, warning < 90%."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckToastTables)

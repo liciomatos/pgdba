@@ -43,6 +43,24 @@ All notable changes to pgdba-cli are documented here. Format follows
   `trigger_ratio`, `mod_since_analyze`, size in bytes and a `status`.
 
 ### Changed
+- **Every MCP tool returns a `status`** (`ok` / `warning` / `critical`) per row or for
+  the result, with its thresholds in the tool description and on the screen's `?` page
+  (`util/status.go` is the single source for the TUI colors and the MCP). Numbers come
+  raw with the unit in the name (`*_bytes`, `*_seconds`) next to `*_pretty` — slots
+  (`wal_lag_bytes`, `wal_status`), standbys (`*_lag_seconds`), schema, freeze, TOAST,
+  autovacuum detail — and query text is truncated to 500 characters with
+  `query_truncated`. `check_extensions` reports `default_version` and flags outdated
+  extensions; Replication Slots works on standbys.
+- **Wait Events are sampled**: `check_wait_events` reads `pg_stat_activity` `samples`
+  times (default 20 × 1 s) and reports average active sessions per event (`aas`,
+  `total_aas`), excluding idle sessions and idle background processes unless
+  `include_idle`; the screen samples 10 × 100 ms. The old single snapshot was dominated
+  by idle `Client:ClientRead`.
+- **Connections show where sessions come from**: top 5 applications, users and client
+  addresses, the sessions idle in a transaction the longest (with last query) and the
+  oldest open transaction.
+- **Temp Files: average file size and the top temp writers** from pg_stat_statements;
+  `stats_reset` is `null` with a note when never reset instead of an empty string.
 - **Index Usage ranks by wasted space** (size × (1 − share of the table's index scans),
   invalid indexes first) and flags possible redundancies — duplicates, btree prefixes and
   the same columns in another order — checked against every index of the table, so a

@@ -46,6 +46,7 @@ func formatTime(t *time.Time) string {
 // --- dashboard ---
 
 type dashboardResponse struct {
+	Status          string  `json:"status"` // worst of connections, cache hit, blocked, long-running, invalid indexes, freeze
 	Host            string  `json:"host"`
 	Database        string  `json:"database"`
 	UsedConnections int     `json:"used_connections"`
@@ -80,6 +81,7 @@ func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	// server actually queried.
 	target := targetFromContext(ctx)
 	return respond(ctx, dashboardResponse{
+		Status:                     util.DashboardStatus(data).String(),
 		Host:                       target.Host,
 		Database:                   target.DBName,
 		UsedConnections:            data.UsedConnections,
@@ -103,6 +105,8 @@ func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 // --- slow queries ---
 
 type slowQueryResponse struct {
+	Status           string  `json:"status"`
+	QueryTruncated   bool    `json:"query_truncated,omitempty"`
 	QueryID          int64   `json:"query_id"`
 	Query            string  `json:"query"`
 	Calls            int     `json:"calls"`
@@ -138,9 +142,12 @@ func handleCheckSlowQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 	resp := make([]slowQueryResponse, 0, len(queries))
 	for _, q := range queries {
+		query, truncated := truncateQuery(q.Query)
 		resp = append(resp, slowQueryResponse{
 			QueryID:          q.QueryID,
-			Query:            q.Query,
+			Query:            query,
+			QueryTruncated:   truncated,
+			Status:           util.SlowQueryStatus(q.MeanExecTimeMS, threshold).String(),
 			Calls:            q.Calls,
 			TotalExecTimeMS:  q.TotalExecTimeMS,
 			MeanExecTimeMS:   q.MeanExecTimeMS,
@@ -155,6 +162,8 @@ func handleCheckSlowQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 // --- long running queries ---
 
 type longRunningQueryResponse struct {
+	Status          string  `json:"status"`
+	QueryTruncated  bool    `json:"query_truncated,omitempty"`
 	PID             int     `json:"pid"`
 	Username        string  `json:"username"`
 	ApplicationName string  `json:"application_name"`
@@ -177,7 +186,10 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 	}
 	resp := make([]longRunningQueryResponse, 0, len(queries))
 	for _, q := range queries {
+		query, truncated := truncateQuery(q.Query)
 		resp = append(resp, longRunningQueryResponse{
+			Status:          util.LongRunningStatus(q.DurationSeconds).String(),
+			QueryTruncated:  truncated,
 			PID:             q.PID,
 			Username:        q.Username,
 			ApplicationName: q.ApplicationName,
@@ -187,7 +199,7 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 			WaitEventType:   q.WaitEventType,
 			WaitEvent:       q.WaitEvent,
 			DurationSeconds: q.DurationSeconds,
-			Query:           q.Query,
+			Query:           query,
 		})
 	}
 	return respond(ctx, resp)
@@ -196,6 +208,7 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 // --- blocked queries ---
 
 type blockedQueryResponse struct {
+	Status              string `json:"status"` // always critical: a session is waiting on another one's lock
 	BlockedPID          int    `json:"blocked_pid"`
 	BlockedUser         string `json:"blocked_user"`
 	BlockingPID         int    `json:"blocking_pid"`
@@ -213,13 +226,16 @@ func handleCheckBlockedQueries(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 	resp := make([]blockedQueryResponse, 0, len(blocked))
 	for _, b := range blocked {
+		blockedStatement, _ := truncateQuery(b.BlockedStatement)
+		blockingStatement, _ := truncateQuery(b.BlockingStatement)
 		resp = append(resp, blockedQueryResponse{
+			Status:              util.StatusCritical.String(),
 			BlockedPID:          b.BlockedPID,
 			BlockedUser:         b.BlockedUser,
 			BlockingPID:         b.BlockingPID,
 			BlockingUser:        b.BlockingUser,
-			BlockedStatement:    b.BlockedStatement,
-			BlockingStatement:   b.BlockingStatement,
+			BlockedStatement:    blockedStatement,
+			BlockingStatement:   blockingStatement,
 			BlockedApplication:  b.BlockedApplication,
 			BlockingApplication: b.BlockingApplication,
 		})
@@ -234,11 +250,43 @@ type connectionStateResponse struct {
 	Count int    `json:"count"`
 }
 
+type connectionGroupResponse struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+type idleTransactionResponse struct {
+	PID                   int    `json:"pid"`
+	Status                string `json:"status"`
+	User                  string `json:"user"`
+	Application           string `json:"application"`
+	ClientAddr            string `json:"client_addr"`
+	State                 string `json:"state"`
+	StateAgeSeconds       int64  `json:"idle_seconds"`
+	TransactionAgeSeconds *int64 `json:"xact_age_seconds"`
+	Query                 string `json:"last_query"`
+	QueryTruncated        bool   `json:"query_truncated,omitempty"`
+}
+
 type connectionsResponse struct {
-	States     []connectionStateResponse `json:"states"`
-	TotalUsed  int                       `json:"total_used"`
-	MaxAllowed int                       `json:"max_allowed"`
-	UsagePct   float64                   `json:"usage_pct"`
+	Status                      string                    `json:"status"`
+	States                      []connectionStateResponse `json:"states"`
+	TotalUsed                   int                       `json:"total_used"`
+	MaxAllowed                  int                       `json:"max_allowed"`
+	UsagePct                    float64                   `json:"usage_pct"`
+	TopApplications             []connectionGroupResponse `json:"top_applications"`
+	TopUsers                    []connectionGroupResponse `json:"top_users"`
+	TopClients                  []connectionGroupResponse `json:"top_clients"`
+	IdleInTransaction           []idleTransactionResponse `json:"idle_in_transaction"`
+	OldestTransactionAgeSeconds *int64                    `json:"oldest_xact_age_seconds"`
+}
+
+func toGroupResponses(groups []util.ConnectionGroup) []connectionGroupResponse {
+	resp := make([]connectionGroupResponse, 0, len(groups))
+	for _, group := range groups {
+		resp = append(resp, connectionGroupResponse{Name: group.Name, Count: group.Count})
+	}
+	return resp
 }
 
 func handleCheckConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -250,12 +298,38 @@ func handleCheckConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	for _, s := range result.States {
 		states = append(states, connectionStateResponse{State: s.State, Count: s.Count})
 	}
+	// Overall status: the connection usage, or a long idle-in-transaction session.
+	status := util.ConnectionUsageStatus(result.UsagePct)
+	idle := make([]idleTransactionResponse, 0, len(result.IdleInTransaction))
+	for _, session := range result.IdleInTransaction {
+		sessionStatus := util.IdleInTransactionStatus(session.StateAgeSeconds)
+		status = max(status, sessionStatus)
+		query, truncated := truncateQuery(session.Query)
+		idle = append(idle, idleTransactionResponse{
+			PID:                   session.PID,
+			Status:                sessionStatus.String(),
+			User:                  session.User,
+			Application:           session.Application,
+			ClientAddr:            session.ClientAddr,
+			State:                 session.State,
+			StateAgeSeconds:       session.StateAgeSeconds,
+			TransactionAgeSeconds: session.TransactionAgeSeconds,
+			Query:                 query,
+			QueryTruncated:        truncated,
+		})
+	}
 	return respond(ctx, connectionsResponse{
-		States:     states,
-		TotalUsed:  result.TotalUsed,
-		MaxAllowed: result.MaxAllowed,
-		UsagePct:   result.UsagePct,
-	})
+		Status:                      status.String(),
+		States:                      states,
+		TotalUsed:                   result.TotalUsed,
+		MaxAllowed:                  result.MaxAllowed,
+		UsagePct:                    result.UsagePct,
+		TopApplications:             toGroupResponses(result.TopApplications),
+		TopUsers:                    toGroupResponses(result.TopUsers),
+		TopClients:                  toGroupResponses(result.TopClients),
+		IdleInTransaction:           idle,
+		OldestTransactionAgeSeconds: result.OldestTransactionAgeSeconds,
+	}, result.Warnings...)
 }
 
 // --- autovacuum ---
@@ -373,6 +447,7 @@ type xminHolderResponse struct {
 }
 
 type xminHorizonResponse struct {
+	Status               string               `json:"status"`                // status of the holder that defines the horizon; ok when none
 	HorizonXminAge       *int64               `json:"horizon_xmin_age_xids"` // null when nothing (or only catalog_xmin) holds it
 	HotStandbyFeedback   bool                 `json:"hot_standby_feedback"`
 	FreezeMaxAge         int64                `json:"autovacuum_freeze_max_age"`
@@ -391,8 +466,10 @@ func handleCheckXminHorizon(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		DatabaseFrozenXIDAge: horizon.DatabaseFrozenXIDAge,
 		Holders:              make([]xminHolderResponse, 0, len(horizon.Holders)),
 	}
+	resp.Status = util.StatusOK.String()
 	if holder := horizon.HorizonHolder(); holder != nil {
 		resp.HorizonXminAge = &holder.XminAge
+		resp.Status = util.XminHolderStatus(holder.XminAge, holder.TransactionAgeSeconds, horizon.FreezeMaxAge).String()
 	}
 	for _, holder := range horizon.Holders {
 		var transactionStart *string
@@ -750,40 +827,74 @@ func handleCheckCacheHit(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 // --- wait events ---
 
 type waitEventResponse struct {
-	EventType string  `json:"event_type"`
-	Event     string  `json:"event"`
-	Count     int     `json:"count"`
-	Pct       float64 `json:"pct"`
+	EventType       string  `json:"event_type"` // "CPU" = running, not waiting
+	Event           string  `json:"event"`
+	Status          string  `json:"status"`
+	AAS             float64 `json:"aas"` // average active sessions over the samples
+	SessionsSampled int     `json:"sessions_sampled"`
+	Pct             float64 `json:"pct"`
 }
 
+type waitEventsResponse struct {
+	Status      string              `json:"status"` // worst event status
+	Samples     int                 `json:"samples"`
+	IntervalMS  int64               `json:"interval_ms"`
+	IncludeIdle bool                `json:"include_idle"`
+	TotalAAS    float64             `json:"total_aas"` // equals the sum of the events' aas
+	Events      []waitEventResponse `json:"events"`
+}
+
+// maxWaitSamplingSeconds caps samples × interval: the call blocks while sampling.
+const maxWaitSamplingSeconds = 60
+
 func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	events, err := util.FetchWaitEvents(ctx, targetDB(ctx))
+	samples := intParam(req, "samples", 20)
+	intervalMS := intParam(req, "interval_ms", 1000)
+	if samples < 1 || intervalMS < 0 || (samples-1)*intervalMS > maxWaitSamplingSeconds*1000 {
+		return mcp.NewToolResultError(fmt.Sprintf("samples must be ≥ 1 and (samples-1) × interval_ms ≤ %d s", maxWaitSamplingSeconds)), nil
+	}
+	sampling, err := util.FetchWaitEvents(ctx, targetDB(ctx), samples, time.Duration(intervalMS)*time.Millisecond,
+		req.GetBool("include_idle", false))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]waitEventResponse, 0, len(events))
-	for _, e := range events {
-		resp = append(resp, waitEventResponse{
-			EventType: e.EventType,
-			Event:     e.Event,
-			Count:     e.Count,
-			Pct:       e.Pct,
+	events := make([]waitEventResponse, 0, len(sampling.Events))
+	overall := util.StatusOK
+	for _, e := range sampling.Events {
+		eventStatus := util.WaitEventStatus(e.EventType, e.AAS)
+		overall = max(overall, eventStatus)
+		events = append(events, waitEventResponse{
+			EventType:       e.EventType,
+			Event:           e.Event,
+			Status:          eventStatus.String(),
+			AAS:             e.AAS,
+			SessionsSampled: e.Count,
+			Pct:             e.Pct,
 		})
 	}
-	return respond(ctx, resp)
+	return respond(ctx, waitEventsResponse{
+		Status:      overall.String(),
+		Samples:     sampling.Samples,
+		IntervalMS:  int64(intervalMS),
+		IncludeIdle: sampling.IncludeIdle,
+		TotalAAS:    sampling.TotalAAS,
+		Events:      events,
+	})
 }
 
 // --- query load ---
 
 type queryLoadResponse struct {
-	QueryID  string  `json:"query_id"`
-	Query    string  `json:"query"`
-	Calls    int     `json:"calls"`
-	TotalMS  float64 `json:"total_ms"`
-	MeanMS   float64 `json:"mean_ms"`
-	BufferMB float64 `json:"buffer_mb"`
-	TempMB   float64 `json:"temp_mb"`
-	LoadPct  float64 `json:"load_pct"`
+	Status         string  `json:"status"`
+	QueryTruncated bool    `json:"query_truncated,omitempty"`
+	QueryID        string  `json:"query_id"`
+	Query          string  `json:"query"`
+	Calls          int     `json:"calls"`
+	TotalMS        float64 `json:"total_ms"`
+	MeanMS         float64 `json:"mean_ms"`
+	BufferMB       float64 `json:"buffer_mb"`
+	TempMB         float64 `json:"temp_mb"`
+	LoadPct        float64 `json:"load_pct"`
 }
 
 func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -794,15 +905,18 @@ func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	}
 	resp := make([]queryLoadResponse, 0, len(queries))
 	for _, q := range queries {
+		query, truncated := truncateQuery(q.Query)
 		resp = append(resp, queryLoadResponse{
-			QueryID:  q.QueryID,
-			Query:    q.Query,
-			Calls:    q.Calls,
-			TotalMS:  q.TotalMS,
-			MeanMS:   q.MeanMS,
-			BufferMB: q.BufferMB,
-			TempMB:   q.TempMB,
-			LoadPct:  q.LoadPct,
+			Status:         util.QueryLoadStatus(q.LoadPct).String(),
+			QueryTruncated: truncated,
+			QueryID:        q.QueryID,
+			Query:          query,
+			Calls:          q.Calls,
+			TotalMS:        q.TotalMS,
+			MeanMS:         q.MeanMS,
+			BufferMB:       q.BufferMB,
+			TempMB:         q.TempMB,
+			LoadPct:        q.LoadPct,
 		})
 	}
 	version, warning := pgStatStatementsVersion(ctx)
@@ -812,18 +926,22 @@ func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 // --- replication slots ---
 
 type replicationSlotResponse struct {
-	SlotName      string  `json:"slot_name"`
-	Plugin        string  `json:"plugin"`
-	SlotType      string  `json:"slot_type"`
-	Database      *string `json:"database"`
-	Active        bool    `json:"active"`
-	ActivePID     *int    `json:"active_pid"`
-	WALLag        string  `json:"wal_lag"`
-	SafeWALSize   *string `json:"safe_wal_size"`
-	TwoPhase      bool    `json:"two_phase"`
-	Failover      *bool   `json:"failover,omitempty"`
-	Synced        *bool   `json:"synced,omitempty"`
-	InactiveSince *string `json:"inactive_since,omitempty"`
+	SlotName         string  `json:"slot_name"`
+	Plugin           string  `json:"plugin"`
+	SlotType         string  `json:"slot_type"`
+	Database         *string `json:"database"`
+	Active           bool    `json:"active"`
+	ActivePID        *int    `json:"active_pid"`
+	Status           string  `json:"status"`
+	WALStatus        string  `json:"wal_status"`
+	WALLagBytes      *int64  `json:"wal_lag_bytes"`
+	WALLag           string  `json:"wal_lag_pretty"`
+	SafeWALSizeBytes *int64  `json:"safe_wal_size_bytes"`
+	SafeWALSize      *string `json:"safe_wal_size_pretty"`
+	TwoPhase         bool    `json:"two_phase"`
+	Failover         *bool   `json:"failover,omitempty"`
+	Synced           *bool   `json:"synced,omitempty"`
+	InactiveSince    *string `json:"inactive_since,omitempty"`
 }
 
 func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -834,18 +952,22 @@ func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (
 	resp := make([]replicationSlotResponse, 0, len(slots))
 	for _, s := range slots {
 		resp = append(resp, replicationSlotResponse{
-			SlotName:      s.SlotName,
-			Plugin:        s.Plugin,
-			SlotType:      s.SlotType,
-			Database:      s.Database,
-			Active:        s.Active,
-			ActivePID:     s.ActivePID,
-			WALLag:        s.WALLag,
-			SafeWALSize:   s.SafeWALSize,
-			TwoPhase:      s.TwoPhase,
-			Failover:      s.Failover,
-			Synced:        s.Synced,
-			InactiveSince: s.InactiveSince,
+			Status:           util.ReplicationSlotStatus(s).String(),
+			WALStatus:        s.WALStatus,
+			WALLagBytes:      s.WALLagBytes,
+			SafeWALSizeBytes: s.SafeWALSizeBytes,
+			SlotName:         s.SlotName,
+			Plugin:           s.Plugin,
+			SlotType:         s.SlotType,
+			Database:         s.Database,
+			Active:           s.Active,
+			ActivePID:        s.ActivePID,
+			WALLag:           s.WALLag,
+			SafeWALSize:      s.SafeWALSize,
+			TwoPhase:         s.TwoPhase,
+			Failover:         s.Failover,
+			Synced:           s.Synced,
+			InactiveSince:    s.InactiveSince,
 		})
 	}
 	return respond(ctx, resp)
@@ -854,6 +976,7 @@ func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (
 // --- users ---
 
 type userResponse struct {
+	Status      string `json:"status"` // critical = password expired, warning = expires within 7 days
 	RoleName    string `json:"role_name"`
 	Superuser   bool   `json:"superuser"`
 	CreateDB    bool   `json:"create_db"`
@@ -872,6 +995,7 @@ func handleCheckUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	resp := make([]userResponse, 0, len(users))
 	for _, u := range users {
 		resp = append(resp, userResponse{
+			Status:      util.UserStatus(u.ValidUntil, time.Now()).String(),
 			RoleName:    u.RoleName,
 			Superuser:   u.Superuser,
 			CreateDB:    u.CreateDB,
@@ -888,6 +1012,7 @@ func handleCheckUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 // --- roles ---
 
 type roleResponse struct {
+	Status     string `json:"status"` // informational: always ok
 	RoleName   string `json:"role_name"`
 	Superuser  bool   `json:"superuser"`
 	Inherit    bool   `json:"inherit"`
@@ -904,6 +1029,7 @@ func handleCheckRoles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	resp := make([]roleResponse, 0, len(roles))
 	for _, r := range roles {
 		resp = append(resp, roleResponse{
+			Status:     util.StatusOK.String(),
 			RoleName:   r.RoleName,
 			Superuser:  r.Superuser,
 			Inherit:    r.Inherit,
@@ -918,10 +1044,12 @@ func handleCheckRoles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 // --- extensions ---
 
 type extensionResponse struct {
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Schema      string `json:"schema"`
-	Description string `json:"description"`
+	DefaultVersion string `json:"default_version"`
+	Status         string `json:"status"` // warning = older than default_version (ALTER EXTENSION ... UPDATE)
+	Name           string `json:"name"`
+	Version        string `json:"version"`
+	Schema         string `json:"schema"`
+	Description    string `json:"description"`
 }
 
 func handleCheckExtensions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -932,10 +1060,12 @@ func handleCheckExtensions(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	resp := make([]extensionResponse, 0, len(exts))
 	for _, e := range exts {
 		resp = append(resp, extensionResponse{
-			Name:        e.Name,
-			Version:     e.Version,
-			Schema:      e.Schema,
-			Description: e.Description,
+			DefaultVersion: e.DefaultVersion,
+			Status:         util.ExtensionStatus(e).String(),
+			Name:           e.Name,
+			Version:        e.Version,
+			Schema:         e.Schema,
+			Description:    e.Description,
 		})
 	}
 	return respond(ctx, resp)
@@ -944,6 +1074,7 @@ func handleCheckExtensions(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 // --- pg_config ---
 
 type pgSettingResponse struct {
+	Status         string `json:"status"` // warning = changed but waiting for a restart
 	Name           string `json:"name"`
 	Setting        string `json:"setting"`
 	Unit           string `json:"unit"`
@@ -991,7 +1122,12 @@ func handleCheckPgConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	}
 	settings := make([]pgSettingResponse, 0, len(result.Settings))
 	for _, s := range result.Settings {
+		settingStatus := util.StatusOK
+		if s.PendingRestart {
+			settingStatus = util.StatusWarning
+		}
 		setting := pgSettingResponse{
+			Status:         settingStatus.String(),
 			Name:           s.Name,
 			Setting:        s.Setting,
 			Unit:           s.Unit,
@@ -1031,7 +1167,9 @@ type schemaColumnResponse struct {
 type schemaTableResponse struct {
 	SchemaName string                 `json:"schema_name"`
 	TableName  string                 `json:"table_name"`
-	SizePretty string                 `json:"size"`
+	Status     string                 `json:"status"` // informational: always ok
+	SizeBytes  int64                  `json:"size_bytes"`
+	SizePretty string                 `json:"size_pretty"`
 	EstRows    int64                  `json:"est_rows"`
 	Columns    []schemaColumnResponse `json:"columns"`
 }
@@ -1055,6 +1193,8 @@ func handleCheckSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 			})
 		}
 		resp = append(resp, schemaTableResponse{
+			Status:     util.StatusOK.String(),
+			SizeBytes:  t.SizeBytes,
 			SchemaName: t.SchemaName,
 			TableName:  t.TableName,
 			SizePretty: t.SizePretty,
@@ -1068,6 +1208,8 @@ func handleCheckSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 // --- autovacuum detail ---
 
 type autovacuumDetailResponse struct {
+	TableSizeBytes    int64  `json:"table_size_bytes"`
+	TotalSizeBytes    int64  `json:"total_size_bytes"`
 	SchemaName        string `json:"schema_name"`
 	TableName         string `json:"table_name"`
 	LiveTuples        int64  `json:"live_tuples"`
@@ -1195,6 +1337,7 @@ func toThresholdsResponse(thresholds util.AutovacuumThresholds) autovacuumThresh
 }
 
 type autovacuumDetailResult struct {
+	Status     string                        `json:"status"` // from thresholds: critical = anti-wraparound/failsafe due, warning = autovacuum due
 	Stats      autovacuumDetailResponse      `json:"stats"`
 	Params     []autovacuumParamResponse     `json:"params"`
 	Thresholds *autovacuumThresholdsResponse `json:"thresholds,omitempty"`
@@ -1212,9 +1355,14 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 	}
 	params, _ := util.FetchAutovacuumParams(ctx, targetDB(ctx), schema, table)
 	var thresholdsResp *autovacuumThresholdsResponse
+	status := util.StatusOK
+	var warnings []string
 	if thresholds, err := util.FetchAutovacuumThresholds(ctx, targetDB(ctx), schema, table); err == nil {
 		computed := toThresholdsResponse(thresholds)
 		thresholdsResp = &computed
+		status = util.AutovacuumThresholdsStatus(thresholds)
+	} else {
+		warnings = append(warnings, "thresholds: "+err.Error())
 	}
 	paramResp := make([]autovacuumParamResponse, 0, len(params))
 	for _, p := range params {
@@ -1226,7 +1374,10 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 		})
 	}
 	return respond(ctx, autovacuumDetailResult{
+		Status: status.String(),
 		Stats: autovacuumDetailResponse{
+			TableSizeBytes:    stats.TableSizeBytes,
+			TotalSizeBytes:    stats.TotalSizeBytes,
 			SchemaName:        stats.SchemaName,
 			TableName:         stats.TableName,
 			LiveTuples:        stats.LiveTuples,
@@ -1248,7 +1399,7 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 		},
 		Params:     paramResp,
 		Thresholds: thresholdsResp,
-	})
+	}, warnings...)
 }
 
 // --- freeze by database ---
@@ -1287,6 +1438,7 @@ func handleCheckFreezeByDatabase(ctx context.Context, req mcp.CallToolRequest) (
 // --- freeze by table ---
 
 type freezeTableResponse struct {
+	TotalSizeBytes  int64   `json:"total_size_bytes"`
 	SchemaName      string  `json:"schema_name"`
 	TableName       string  `json:"table_name"`
 	XIDAge          int64   `json:"xid_age"`
@@ -1312,6 +1464,7 @@ func handleCheckFreezeByTable(ctx context.Context, req mcp.CallToolRequest) (*mc
 			statusLabel = statusLabels[t.Status]
 		}
 		resp = append(resp, freezeTableResponse{
+			TotalSizeBytes:  t.TotalSizeBytes,
 			SchemaName:      t.SchemaName,
 			TableName:       t.TableName,
 			XIDAge:          t.XIDAge,
@@ -1329,19 +1482,23 @@ func handleCheckFreezeByTable(ctx context.Context, req mcp.CallToolRequest) (*mc
 // --- streaming standbys ---
 
 type streamingStandbyResponse struct {
-	ApplicationName string `json:"application_name"`
-	ClientAddr      string `json:"client_addr"`
-	State           string `json:"state"`
-	SyncState       string `json:"sync_state"`
-	SentLSN         string `json:"sent_lsn"`
-	WriteLSN        string `json:"write_lsn"`
-	FlushLSN        string `json:"flush_lsn"`
-	ReplayLSN       string `json:"replay_lsn"`
-	WriteLag        string `json:"write_lag"`
-	FlushLag        string `json:"flush_lag"`
-	ReplayLag       string `json:"replay_lag"`
-	LagBytes        int64  `json:"lag_bytes"`
-	PID             int    `json:"pid"`
+	Status           string   `json:"status"`
+	WriteLagSeconds  *float64 `json:"write_lag_seconds"`
+	FlushLagSeconds  *float64 `json:"flush_lag_seconds"`
+	ReplayLagSeconds *float64 `json:"replay_lag_seconds"`
+	ApplicationName  string   `json:"application_name"`
+	ClientAddr       string   `json:"client_addr"`
+	State            string   `json:"state"`
+	SyncState        string   `json:"sync_state"`
+	SentLSN          string   `json:"sent_lsn"`
+	WriteLSN         string   `json:"write_lsn"`
+	FlushLSN         string   `json:"flush_lsn"`
+	ReplayLSN        string   `json:"replay_lsn"`
+	WriteLag         string   `json:"write_lag"`
+	FlushLag         string   `json:"flush_lag"`
+	ReplayLag        string   `json:"replay_lag"`
+	LagBytes         int64    `json:"lag_bytes"`
+	PID              int      `json:"pid"`
 }
 
 func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1352,19 +1509,23 @@ func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) 
 	resp := make([]streamingStandbyResponse, 0, len(standbys))
 	for _, s := range standbys {
 		resp = append(resp, streamingStandbyResponse{
-			ApplicationName: s.ApplicationName,
-			ClientAddr:      s.ClientAddr,
-			State:           s.State,
-			SyncState:       s.SyncState,
-			SentLSN:         s.SentLSN,
-			WriteLSN:        s.WriteLSN,
-			FlushLSN:        s.FlushLSN,
-			ReplayLSN:       s.ReplayLSN,
-			WriteLag:        s.WriteLag,
-			FlushLag:        s.FlushLag,
-			ReplayLag:       s.ReplayLag,
-			LagBytes:        s.LagBytes,
-			PID:             s.PID,
+			Status:           util.StandbyLagStatus(s.LagBytes, s.ReplayLagSeconds).String(),
+			WriteLagSeconds:  s.WriteLagSeconds,
+			FlushLagSeconds:  s.FlushLagSeconds,
+			ReplayLagSeconds: s.ReplayLagSeconds,
+			ApplicationName:  s.ApplicationName,
+			ClientAddr:       s.ClientAddr,
+			State:            s.State,
+			SyncState:        s.SyncState,
+			SentLSN:          s.SentLSN,
+			WriteLSN:         s.WriteLSN,
+			FlushLSN:         s.FlushLSN,
+			ReplayLSN:        s.ReplayLSN,
+			WriteLag:         s.WriteLag,
+			FlushLag:         s.FlushLag,
+			ReplayLag:        s.ReplayLag,
+			LagBytes:         s.LagBytes,
+			PID:              s.PID,
 		})
 	}
 	return respond(ctx, resp)
@@ -1373,6 +1534,7 @@ func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) 
 // --- replication config ---
 
 type replicationParamResponse struct {
+	Status    string `json:"status"`
 	Name      string `json:"name"`
 	Setting   string `json:"setting"`
 	Unit      string `json:"unit"`
@@ -1397,6 +1559,7 @@ func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) 
 	paramResp := make([]replicationParamResponse, 0, len(params))
 	for _, p := range params {
 		paramResp = append(paramResp, replicationParamResponse{
+			Status:    util.HintLevelStatus(p.HintLevel).String(),
 			Name:      p.Name,
 			Setting:   p.Setting,
 			Unit:      p.Unit,
@@ -1417,6 +1580,7 @@ func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) 
 // --- database sizes ---
 
 type databaseSizeResponse struct {
+	Status     string `json:"status"` // informational: always ok
 	Name       string `json:"name"`
 	Owner      string `json:"owner"`
 	Encoding   string `json:"encoding"`
@@ -1446,6 +1610,7 @@ func handleCheckDatabaseSizes(ctx context.Context, req mcp.CallToolRequest) (*mc
 	databases := make([]databaseSizeResponse, 0, len(report.Databases))
 	for _, d := range report.Databases {
 		databases = append(databases, databaseSizeResponse{
+			Status:     util.StatusOK.String(),
 			Name:       d.Name,
 			Owner:      d.Owner,
 			Encoding:   d.Encoding,
@@ -1473,29 +1638,72 @@ func handleCheckDatabaseSizes(ctx context.Context, req mcp.CallToolRequest) (*mc
 // --- temp file usage ---
 
 type tempFileUsageResponse struct {
-	Database   string `json:"database"`
-	TempFiles  int64  `json:"temp_files"`
-	TempBytes  int64  `json:"temp_bytes"`
-	TempPretty string `json:"temp_pretty"`
-	StatsReset string `json:"stats_reset"`
+	Database        string             `json:"database"`
+	Status          string             `json:"status"` // warning = any temp file since the stats reset
+	TempFiles       int64              `json:"temp_files"`
+	TempBytes       int64              `json:"temp_bytes"`
+	TempPretty      string             `json:"temp_pretty"`
+	AvgBytesPerFile *float64           `json:"avg_bytes_per_file"`
+	StatsReset      statsResetResponse `json:"stats_reset"`
 }
+
+type tempQueryResponse struct {
+	QueryID          int64   `json:"query_id"`
+	Query            string  `json:"query"`
+	QueryTruncated   bool    `json:"query_truncated,omitempty"`
+	Calls            int64   `json:"calls"`
+	TempBlksWritten  int64   `json:"temp_blks_written"`
+	TempBytesWritten int64   `json:"temp_bytes_written"`
+	TempBlksRead     int64   `json:"temp_blks_read"`
+	MeanTimeMS       float64 `json:"mean_time_ms"`
+}
+
+type tempFilesResponse struct {
+	Databases  []tempFileUsageResponse `json:"databases"`
+	TopQueries []tempQueryResponse     `json:"top_queries"` // from pg_stat_statements; empty without it (see warnings)
+}
+
+// tempTopQueries is how many statements check_temp_files attributes temp files to.
+const tempTopQueries = 5
 
 func handleCheckTempFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	usage, err := util.FetchTempFileUsage(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]tempFileUsageResponse, 0, len(usage))
+	now := time.Now()
+	databases := make([]tempFileUsageResponse, 0, len(usage))
 	for _, u := range usage {
-		resp = append(resp, tempFileUsageResponse{
-			Database:   u.Database,
-			TempFiles:  u.TempFiles,
-			TempBytes:  u.TempBytes,
-			TempPretty: u.TempPretty,
-			StatsReset: u.StatsReset,
+		databases = append(databases, tempFileUsageResponse{
+			Database:        u.Database,
+			Status:          util.TempFileStatus(u).String(),
+			TempFiles:       u.TempFiles,
+			TempBytes:       u.TempBytes,
+			TempPretty:      u.TempPretty,
+			AvgBytesPerFile: u.AvgBytesPerFile,
+			StatsReset:      toStatsReset(u.StatsReset, now),
 		})
 	}
-	return respond(ctx, resp)
+	var warnings []string
+	topQueries := []tempQueryResponse{}
+	queries, err := util.FetchTopTempQueries(ctx, targetDB(ctx), tempTopQueries)
+	if err != nil {
+		warnings = append(warnings, "top temp queries: "+err.Error())
+	}
+	for _, q := range queries {
+		query, truncated := truncateQuery(q.Query)
+		topQueries = append(topQueries, tempQueryResponse{
+			QueryID:          q.QueryID,
+			Query:            query,
+			QueryTruncated:   truncated,
+			Calls:            q.Calls,
+			TempBlksWritten:  q.TempBlksWritten,
+			TempBytesWritten: q.TempBytesWritten,
+			TempBlksRead:     q.TempBlksRead,
+			MeanTimeMS:       q.MeanTimeMS,
+		})
+	}
+	return respond(ctx, tempFilesResponse{Databases: databases, TopQueries: topQueries}, warnings...)
 }
 
 // --- memory & checkpoint stats ---
@@ -1520,6 +1728,7 @@ type checkpointStatsResponse struct {
 }
 
 type memoryStatsResponse struct {
+	Status     string                  `json:"status"` // worst cache hit status; warning when requested checkpoints exceed timed ones
 	Configs    []memoryConfigResponse  `json:"configs"`
 	CacheHit   cacheHitSummaryResponse `json:"cache_hit"`
 	Checkpoint checkpointStatsResponse `json:"checkpoint"`
@@ -1553,6 +1762,7 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		})
 	}
 	return respond(ctx, memoryStatsResponse{
+		Status:   util.MemoryStatsStatus(stats).String(),
 		Configs:  configs,
 		CacheHit: cacheHit,
 		Checkpoint: checkpointStatsResponse{
@@ -1572,6 +1782,7 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 // --- publications ---
 
 type publicationResponse struct {
+	Status     string `json:"status"` // informational: always ok
 	PubName    string `json:"pub_name"`
 	AllTables  bool   `json:"all_tables"`
 	Insert     bool   `json:"insert"`
@@ -1591,6 +1802,7 @@ func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	out := make([]publicationResponse, len(pubs))
 	for i, pub := range pubs {
 		out[i] = publicationResponse{
+			Status:     util.StatusOK.String(),
 			PubName:    pub.PubName,
 			AllTables:  pub.AllTables,
 			Insert:     pub.Insert,
@@ -1608,6 +1820,7 @@ func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp
 // --- subscriptions ---
 
 type subscriptionResponse struct {
+	Status          string  `json:"status"` // critical = enabled without a running worker; warning = disabled or errors
 	SubName         string  `json:"sub_name"`
 	Enabled         bool    `json:"enabled"`
 	SlotName        string  `json:"slot_name"`
@@ -1623,6 +1836,7 @@ type subscriptionResponse struct {
 }
 
 type publicationTableResponse struct {
+	Status     string `json:"status"` // informational: always ok
 	SchemaName string `json:"schema_name"`
 	TableName  string `json:"table_name"`
 	Columns    string `json:"columns"`
@@ -1646,6 +1860,7 @@ func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) 
 	out := make([]publicationTableResponse, len(tables))
 	for i, t := range tables {
 		out[i] = publicationTableResponse{
+			Status:     util.StatusOK.String(),
 			SchemaName: t.SchemaName,
 			TableName:  t.TableName,
 			Columns:    t.Columns,
@@ -1661,6 +1876,7 @@ func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 type subscriptionTableResponse struct {
+	Status     string `json:"status"` // warning until the table is ready
 	SchemaName string `json:"schema_name"`
 	TableName  string `json:"table_name"`
 	SyncState  string `json:"sync_state"`
@@ -1684,6 +1900,7 @@ func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest)
 	out := make([]subscriptionTableResponse, len(tables))
 	for i, t := range tables {
 		out[i] = subscriptionTableResponse{
+			Status:     util.SubscriptionTableStatus(t.SyncState).String(),
 			SchemaName: t.SchemaName,
 			TableName:  t.TableName,
 			SyncState:  t.SyncState,
@@ -1703,7 +1920,9 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		SchemaName      string   `json:"schema_name"`
 		TableName       string   `json:"table_name"`
 		ToastRelname    string   `json:"toast_relname"`
-		ToastSizePretty string   `json:"toast_size"`
+		Status          string   `json:"status"` // TOAST heap cache hit: critical < 70%, warning < 90%
+		ToastSizeBytes  int64    `json:"toast_size_bytes"`
+		ToastSizePretty string   `json:"toast_size_pretty"`
 		ToastPct        float64  `json:"toast_pct"`
 		ToastDeadTuples int64    `json:"toast_dead_tuples"`
 		BlksRead        int64    `json:"blks_read"`
@@ -1724,6 +1943,8 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			lastAV = &formatted
 		}
 		out[i] = toastTableResponse{
+			Status:          util.TableCacheHitStatus(tt.CacheHitPct).String(),
+			ToastSizeBytes:  tt.ToastSizeBytes,
 			SchemaName:      tt.SchemaName,
 			TableName:       tt.TableName,
 			ToastRelname:    tt.ToastRelname,
@@ -1748,6 +1969,7 @@ func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mc
 	out := make([]subscriptionResponse, len(subs))
 	for i, sub := range subs {
 		out[i] = subscriptionResponse{
+			Status:          util.SubscriptionStatus(sub).String(),
 			SubName:         sub.SubName,
 			Enabled:         sub.Enabled,
 			SlotName:        sub.SlotName,

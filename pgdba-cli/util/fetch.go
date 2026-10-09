@@ -463,12 +463,70 @@ type ConnectionState struct {
 	Count int
 }
 
-// ConnectionsResult holds per-state counts plus the max_connections limit.
+// ConnectionGroup is a number of client connections sharing one source value.
+type ConnectionGroup struct {
+	Name  string
+	Count int
+}
+
+// IdleTransaction is a session sitting "idle in transaction": it holds its locks and
+// the xmin horizon while doing nothing.
+type IdleTransaction struct {
+	PID                   int
+	User                  string
+	Application           string
+	ClientAddr            string
+	State                 string
+	StateAgeSeconds       int64 // time since it went idle
+	TransactionAgeSeconds *int64
+	Query                 string // the last statement it ran
+}
+
+// ConnectionsResult holds per-state counts, the max_connections limit, and where the
+// client connections come from.
 type ConnectionsResult struct {
 	States     []ConnectionState
 	TotalUsed  int
 	MaxAllowed int
 	UsagePct   float64
+	// Top* group client backends by application_name, user and client address (top 5).
+	TopApplications []ConnectionGroup
+	TopUsers        []ConnectionGroup
+	TopClients      []ConnectionGroup
+	// IdleInTransaction lists the 5 sessions idle in a transaction the longest.
+	IdleInTransaction []IdleTransaction
+	// OldestTransactionAgeSeconds is the age of the oldest open transaction of any
+	// client backend; nil when none is open.
+	OldestTransactionAgeSeconds *int64
+	// Warnings lists the source breakdowns that couldn't be read.
+	Warnings []string
+}
+
+// connectionGroupLimit is how many sources each breakdown keeps.
+const connectionGroupLimit = 5
+
+func fetchConnectionGroups(ctx context.Context, db *sql.DB, expression string) ([]ConnectionGroup, error) {
+	// expression is one of a fixed set of column expressions chosen by the caller.
+	rows, err := db.QueryContext(ctx, `
+		SELECT `+expression+` AS name, count(*)
+		FROM pg_stat_activity
+		WHERE backend_type = 'client backend'
+		GROUP BY 1
+		ORDER BY 2 DESC, 1
+		LIMIT $1`, connectionGroupLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	groups := []ConnectionGroup{}
+	for rows.Next() {
+		var group ConnectionGroup
+		if err := rows.Scan(&group.Name, &group.Count); err != nil {
+			return nil, err
+		}
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
 }
 
 func FetchConnections(ctx context.Context, db *sql.DB) (ConnectionsResult, error) {
@@ -501,7 +559,61 @@ func FetchConnections(ctx context.Context, db *sql.DB) (ConnectionsResult, error
 	if result.MaxAllowed > 0 {
 		result.UsagePct = float64(result.TotalUsed) / float64(result.MaxAllowed) * 100
 	}
+
+	// The source breakdowns are extras: a failure becomes a warning, not an error.
+	for _, breakdown := range []struct {
+		name       string
+		expression string
+		target     *[]ConnectionGroup
+	}{
+		{"applications", `COALESCE(NULLIF(application_name, ''), '(none)')`, &result.TopApplications},
+		{"users", `COALESCE(usename::text, '(none)')`, &result.TopUsers},
+		{"clients", `COALESCE(host(client_addr), 'local socket')`, &result.TopClients},
+	} {
+		groups, err := fetchConnectionGroups(ctx, db, breakdown.expression)
+		if err != nil {
+			result.Warnings = append(result.Warnings, breakdown.name+": "+err.Error())
+		}
+		*breakdown.target = groups
+	}
+	if err := fetchIdleTransactions(ctx, db, &result); err != nil {
+		result.Warnings = append(result.Warnings, "idle in transaction: "+err.Error())
+	}
 	return result, nil
+}
+
+func fetchIdleTransactions(ctx context.Context, db *sql.DB, result *ConnectionsResult) error {
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXTRACT(EPOCH FROM (now() - min(xact_start)))::bigint
+		FROM pg_stat_activity
+		WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()`,
+	).Scan(&result.OldestTransactionAgeSeconds); err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT pid, COALESCE(usename::text, ''), COALESCE(application_name, ''), COALESCE(host(client_addr), ''),
+		       state,
+		       EXTRACT(EPOCH FROM (now() - state_change))::bigint,
+		       CASE WHEN xact_start IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM (now() - xact_start))::bigint END,
+		       COALESCE(query, '')
+		FROM pg_stat_activity
+		WHERE state IN ('idle in transaction', 'idle in transaction (aborted)')
+		ORDER BY state_change
+		LIMIT $1`, connectionGroupLimit)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	result.IdleInTransaction = []IdleTransaction{}
+	for rows.Next() {
+		var idle IdleTransaction
+		if err := rows.Scan(&idle.PID, &idle.User, &idle.Application, &idle.ClientAddr, &idle.State,
+			&idle.StateAgeSeconds, &idle.TransactionAgeSeconds, &idle.Query); err != nil {
+			return err
+		}
+		result.IdleInTransaction = append(result.IdleInTransaction, idle)
+	}
+	return rows.Err()
 }
 
 // AutovacuumCost is the effective vacuum cost-based delay for a table's autovacuum,
@@ -1154,41 +1266,88 @@ func FetchCacheHit(ctx context.Context, db *sql.DB, limit int) ([]CacheHitTable,
 	return report.Tables, err
 }
 
-// WaitEvent is one grouped wait event from pg_stat_activity.
+// WaitEvent is one wait event averaged over the samples of a FetchWaitEvents call.
 type WaitEvent struct {
-	EventType string
+	EventType string // "CPU" when the session was running, not waiting
 	Event     string
-	Count     int
-	Pct       float64
+	Count     int     // sessions seen on this event, summed over all samples
+	AAS       float64 // average active sessions: Count ÷ samples (the Performance Insights unit)
+	Pct       float64 // share of all sampled sessions
 }
 
-func FetchWaitEvents(ctx context.Context, db *sql.DB) ([]WaitEvent, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT
-			COALESCE(wait_event_type, 'CPU') AS event_type,
-			COALESCE(wait_event, '-') AS event,
-			count(*) AS count,
-			COALESCE(
-				ROUND(100.0 * count(*) / NULLIF(SUM(count(*)) OVER(), 0), 1),
-				0
-			) AS pct
-		FROM pg_stat_activity
-		WHERE state = 'active' OR wait_event IS NOT NULL
-		GROUP BY wait_event_type, wait_event
-		ORDER BY count DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var results []WaitEvent
-	for rows.Next() {
-		var e WaitEvent
-		if err := rows.Scan(&e.EventType, &e.Event, &e.Count, &e.Pct); err != nil {
-			return nil, err
+// WaitEventSampling is the result of sampling pg_stat_activity several times.
+type WaitEventSampling struct {
+	Samples     int
+	Interval    time.Duration
+	IncludeIdle bool
+	// TotalAAS is the average number of active sessions per sample; it equals the sum
+	// of every event's AAS.
+	TotalAAS float64
+	Events   []WaitEvent
+}
+
+// FetchWaitEvents samples pg_stat_activity `samples` times, `interval` apart, and
+// averages sessions per wait event. A single snapshot is mostly noise; averaging gives
+// the same "average active sessions" picture as RDS Performance Insights.
+//
+// Unless includeIdle is set, sessions that aren't doing work are left out: state
+// 'idle' (a client connection waiting for its next query, Client:ClientRead) and
+// wait_event_type 'Activity' (background processes idling in their main loop).
+func FetchWaitEvents(ctx context.Context, db *sql.DB, samples int, interval time.Duration, includeIdle bool) (WaitEventSampling, error) {
+	sampling := WaitEventSampling{Samples: max(samples, 1), Interval: interval, IncludeIdle: includeIdle}
+	type eventKey struct{ eventType, event string }
+	counts := map[eventKey]int{}
+	var order []eventKey
+	total := 0
+	for sample := 0; sample < sampling.Samples; sample++ {
+		if sample > 0 {
+			select {
+			case <-time.After(interval):
+			case <-ctx.Done():
+				return sampling, ctx.Err()
+			}
 		}
-		results = append(results, e)
+		// Each sample is its own statement, so pg_stat_activity is re-read every time
+		// instead of being served from the transaction's cached snapshot.
+		rows, err := db.QueryContext(ctx, `
+			SELECT COALESCE(wait_event_type, 'CPU'), COALESCE(wait_event, '-'), count(*)
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND ($1 OR (state IS DISTINCT FROM 'idle' AND wait_event_type IS DISTINCT FROM 'Activity'))
+			GROUP BY 1, 2`, includeIdle)
+		if err != nil {
+			return sampling, err
+		}
+		for rows.Next() {
+			var key eventKey
+			var count int
+			if err := rows.Scan(&key.eventType, &key.event, &count); err != nil {
+				rows.Close()
+				return sampling, err
+			}
+			if _, seen := counts[key]; !seen {
+				order = append(order, key)
+			}
+			counts[key] += count
+			total += count
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return sampling, err
+		}
 	}
-	return results, rows.Err()
+	sampling.Events = []WaitEvent{}
+	for _, key := range order {
+		event := WaitEvent{EventType: key.eventType, Event: key.event, Count: counts[key],
+			AAS: float64(counts[key]) / float64(sampling.Samples)}
+		if total > 0 {
+			event.Pct = float64(counts[key]) / float64(total) * 100
+		}
+		sampling.TotalAAS += event.AAS
+		sampling.Events = append(sampling.Events, event)
+	}
+	sort.SliceStable(sampling.Events, func(i, j int) bool { return sampling.Events[i].Count > sampling.Events[j].Count })
+	return sampling, nil
 }
 
 // QueryLoad is one row from pg_stat_statements sorted by total execution time.
@@ -1246,18 +1405,23 @@ func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, er
 
 // ReplicationSlot holds information from pg_replication_slots.
 type ReplicationSlot struct {
-	SlotName      string
-	Plugin        string
-	SlotType      string
-	Database      *string
-	Active        bool
-	ActivePID     *int
-	WALLag        string
-	SafeWALSize   *string // PG 13+; nil when slot has no confirmed_flush_lsn
-	TwoPhase      bool    // PG 15+
-	Failover      *bool   // PG 17+; logical slots only, nil on older PG
-	Synced        *bool   // PG 17+; standby-side physical slots only, nil otherwise
-	InactiveSince *string // PG 18+; nil on older PG or when slot is active
+	SlotName  string
+	Plugin    string
+	SlotType  string
+	Database  *string
+	Active    bool
+	ActivePID *int
+	WALLag    string
+	// WALLagBytes is WAL retained for the slot (current LSN − restart_lsn); nil when
+	// restart_lsn is unknown. On a standby it is measured from the replay position.
+	WALLagBytes      *int64
+	SafeWALSizeBytes *int64  // nil when max_slot_wal_keep_size is unlimited
+	WALStatus        string  // reserved, extended, unreserved, lost ("" when unknown)
+	SafeWALSize      *string // PG 13+; nil when slot has no confirmed_flush_lsn
+	TwoPhase         bool    // PG 15+
+	Failover         *bool   // PG 17+; logical slots only, nil on older PG
+	Synced           *bool   // PG 17+; standby-side physical slots only, nil otherwise
+	InactiveSince    *string // PG 18+; nil on older PG or when slot is active
 }
 
 func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, error) {
@@ -1278,6 +1442,9 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 	if pgMajorVersion() >= 18 {
 		inactiveSinceExpr = "inactive_since::text"
 	}
+	// pg_current_wal_lsn() errors during recovery; on a standby the retained WAL is
+	// measured from the last replayed position.
+	const slotCurrentLSN = `CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END`
 	query := `
 		SELECT
 			slot_name,
@@ -1286,8 +1453,11 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 			database,
 			active,
 			active_pid,
-			pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_lag,
+			pg_size_pretty(pg_wal_lsn_diff(` + slotCurrentLSN + `, restart_lsn)) AS wal_lag,
 			pg_size_pretty(safe_wal_size) AS safe_wal_size,
+			pg_wal_lsn_diff(` + slotCurrentLSN + `, restart_lsn)::bigint,
+			safe_wal_size,
+			COALESCE(wal_status, ''),
 			` + twoPhaseExpr + `,
 			` + failoverExpr + `,
 			` + syncedExpr + `,
@@ -1305,7 +1475,8 @@ func FetchReplicationSlots(ctx context.Context, db *sql.DB) ([]ReplicationSlot, 
 		var failover, synced sql.NullBool
 		if err := rows.Scan(
 			&s.SlotName, &s.Plugin, &s.SlotType, &s.Database, &s.Active, &s.ActivePID,
-			&walLag, &safeWAL, &s.TwoPhase, &failover, &synced, &inactiveSince,
+			&walLag, &safeWAL, &s.WALLagBytes, &s.SafeWALSizeBytes, &s.WALStatus,
+			&s.TwoPhase, &failover, &synced, &inactiveSince,
 		); err != nil {
 			return nil, err
 		}
@@ -1417,16 +1588,20 @@ func FetchRoles(ctx context.Context, db *sql.DB) ([]Role, error) {
 
 // Extension holds an installed PostgreSQL extension.
 type Extension struct {
-	Name        string
-	Version     string
-	Schema      string
-	Description string
+	Name    string
+	Version string
+	// DefaultVersion is the version this server's packages would install
+	// (pg_available_extensions); "" when the package is gone.
+	DefaultVersion string
+	Schema         string
+	Description    string
 }
 
 func FetchExtensions(ctx context.Context, db *sql.DB) ([]Extension, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT e.extname AS name,
 			   e.extversion AS version,
+			   COALESCE(ae.default_version, '') AS default_version,
 			   n.nspname AS schema,
 			   COALESCE(ae.comment, '-') AS description
 		FROM pg_extension e
@@ -1440,7 +1615,7 @@ func FetchExtensions(ctx context.Context, db *sql.DB) ([]Extension, error) {
 	var results []Extension
 	for rows.Next() {
 		var e Extension
-		if err := rows.Scan(&e.Name, &e.Version, &e.Schema, &e.Description); err != nil {
+		if err := rows.Scan(&e.Name, &e.Version, &e.DefaultVersion, &e.Schema, &e.Description); err != nil {
 			return nil, err
 		}
 		results = append(results, e)
@@ -1575,6 +1750,7 @@ type SchemaColumn struct {
 type SchemaTable struct {
 	SchemaName string
 	TableName  string
+	SizeBytes  int64
 	SizePretty string
 	EstRows    int64
 	Columns    []SchemaColumn
@@ -1586,9 +1762,8 @@ func FetchSchema(ctx context.Context, db *sql.DB, schema string) ([]SchemaTable,
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			t.table_schema, t.table_name,
-			pg_size_pretty(pg_total_relation_size(
-				quote_ident(t.table_schema)||'.'||quote_ident(t.table_name)
-			)) AS size,
+			pg_total_relation_size(c.oid) AS size_bytes,
+			pg_size_pretty(pg_total_relation_size(c.oid)) AS size,
 			c.reltuples::bigint AS est_rows,
 			COALESCE(col.column_name, ''),
 			COALESCE(col.data_type, ''),
@@ -1612,8 +1787,8 @@ func FetchSchema(ctx context.Context, db *sql.DB, schema string) ([]SchemaTable,
 	var tableOrder []string
 	for rows.Next() {
 		var schemaName, tableName, size, colName, dataType, length, isNullable, colDefault string
-		var estRows int64
-		if err := rows.Scan(&schemaName, &tableName, &size, &estRows, &colName, &dataType, &length, &isNullable, &colDefault); err != nil {
+		var estRows, sizeBytes int64
+		if err := rows.Scan(&schemaName, &tableName, &sizeBytes, &size, &estRows, &colName, &dataType, &length, &isNullable, &colDefault); err != nil {
 			return nil, err
 		}
 		key := schemaName + "." + tableName
@@ -1621,6 +1796,7 @@ func FetchSchema(ctx context.Context, db *sql.DB, schema string) ([]SchemaTable,
 			tableMap[key] = &SchemaTable{
 				SchemaName: schemaName,
 				TableName:  tableName,
+				SizeBytes:  sizeBytes,
 				SizePretty: size,
 				EstRows:    estRows,
 			}
@@ -1662,6 +1838,8 @@ type AutovacuumDetailStats struct {
 	TableSize         string
 	TotalSize         string
 	ToastAndIndexSize string
+	TableSizeBytes    int64
+	TotalSizeBytes    int64
 	FrozenXIDAge      int64
 	MXIDAge           int64
 	LastVacuum        *time.Time
@@ -1691,7 +1869,9 @@ func FetchAutovacuumDetail(ctx context.Context, db *sql.DB, schema, table string
 			pg_size_pretty(pg_total_relation_size(c.oid))                         AS total_size,
 			pg_size_pretty(pg_total_relation_size(c.oid) - pg_relation_size(c.oid)) AS toast_and_index_size,
 			age(c.relfrozenxid)                                                   AS frozen_xid_age,
-			mxid_age(c.relminmxid)                                                AS mxid_age
+			mxid_age(c.relminmxid)                                                AS mxid_age,
+			pg_relation_size(c.oid),
+			pg_total_relation_size(c.oid)
 		FROM pg_stat_user_tables s
 		JOIN pg_class c ON c.oid = s.relid
 		WHERE s.schemaname = $1 AND s.relname = $2`,
@@ -1701,7 +1881,7 @@ func FetchAutovacuumDetail(ctx context.Context, db *sql.DB, schema, table string
 		&d.LastVacuum, &d.LastAutovacuum, &d.LastAnalyze, &d.LastAutoanalyze,
 		&d.VacuumCount, &d.AutovacuumCount, &d.AnalyzeCount, &d.AutoanalyzeCount,
 		&d.TableSize, &d.TotalSize, &d.ToastAndIndexSize,
-		&d.FrozenXIDAge, &d.MXIDAge,
+		&d.FrozenXIDAge, &d.MXIDAge, &d.TableSizeBytes, &d.TotalSizeBytes,
 	)
 	return d, err
 }
@@ -2500,6 +2680,7 @@ type FreezeTableStatus struct {
 	MXIDAge         int64
 	FreezeMaxAge    int64
 	PctTowardFreeze float64
+	TotalSizeBytes  int64
 	TotalSize       string
 	LastAutovacuum  *time.Time
 	Status          int // 0=ok 1=warn 2=critical
@@ -2517,6 +2698,7 @@ func FetchFreezeByTable(ctx context.Context, db *sql.DB, limit int) ([]FreezeTab
 				/ NULLIF((SELECT setting::bigint FROM pg_settings WHERE name = 'autovacuum_freeze_max_age'), 0)
 				* 100, 1)                                                                      AS pct_toward_freeze,
 			pg_size_pretty(pg_total_relation_size(c.oid))                                     AS total_size,
+			pg_total_relation_size(c.oid),
 			s.last_autovacuum
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -2536,7 +2718,7 @@ func FetchFreezeByTable(ctx context.Context, db *sql.DB, limit int) ([]FreezeTab
 		var pct sql.NullFloat64
 		if err := rows.Scan(
 			&t.SchemaName, &t.TableName, &t.XIDAge, &t.MXIDAge,
-			&t.FreezeMaxAge, &pct, &t.TotalSize, &t.LastAutovacuum,
+			&t.FreezeMaxAge, &pct, &t.TotalSize, &t.TotalSizeBytes, &t.LastAutovacuum,
 		); err != nil {
 			return nil, err
 		}
@@ -2571,8 +2753,13 @@ type StreamingStandby struct {
 	WriteLag        string
 	FlushLag        string
 	ReplayLag       string
-	LagBytes        int64
-	PID             int
+	// Write/Flush/ReplayLagSeconds are the *_lag intervals in seconds; nil when the
+	// standby is idle or the lag isn't visible (missing pg_read_all_stats).
+	WriteLagSeconds  *float64
+	FlushLagSeconds  *float64
+	ReplayLagSeconds *float64
+	LagBytes         int64
+	PID              int
 }
 
 func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby, error) {
@@ -2590,7 +2777,10 @@ func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby
 			COALESCE(flush_lag::text, ''),
 			COALESCE(replay_lag::text, ''),
 			COALESCE(pg_wal_lsn_diff(sent_lsn, replay_lsn), 0) AS lag_bytes,
-			pid
+			pid,
+			EXTRACT(EPOCH FROM write_lag)::float8,
+			EXTRACT(EPOCH FROM flush_lag)::float8,
+			EXTRACT(EPOCH FROM replay_lag)::float8
 		FROM pg_stat_replication
 		ORDER BY lag_bytes DESC NULLS LAST`)
 	if err != nil {
@@ -2604,7 +2794,7 @@ func FetchStreamingStandbys(ctx context.Context, db *sql.DB) ([]StreamingStandby
 			&s.ApplicationName, &s.ClientAddr, &s.State, &s.SyncState,
 			&s.SentLSN, &s.WriteLSN, &s.FlushLSN, &s.ReplayLSN,
 			&s.WriteLag, &s.FlushLag, &s.ReplayLag,
-			&s.LagBytes, &s.PID,
+			&s.LagBytes, &s.PID, &s.WriteLagSeconds, &s.FlushLagSeconds, &s.ReplayLagSeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -2839,7 +3029,11 @@ type TempFileUsage struct {
 	TempFiles  int64
 	TempBytes  int64
 	TempPretty string
-	StatsReset string
+	// AvgBytesPerFile is TempBytes ÷ TempFiles: ~1 GB files mean single sorts/hashes far
+	// above work_mem. nil without temp files.
+	AvgBytesPerFile *float64
+	// StatsReset is nil when the database's counters were never reset.
+	StatsReset *time.Time
 }
 
 func FetchTempFileUsage(ctx context.Context, db *sql.DB) ([]TempFileUsage, error) {
@@ -2849,7 +3043,7 @@ func FetchTempFileUsage(ctx context.Context, db *sql.DB) ([]TempFileUsage, error
 			temp_files,
 			temp_bytes,
 			pg_size_pretty(temp_bytes),
-			COALESCE(stats_reset::text, '')
+			stats_reset
 		FROM pg_stat_database
 		WHERE datname IS NOT NULL
 		ORDER BY temp_bytes DESC`)
@@ -2864,7 +3058,54 @@ func FetchTempFileUsage(ctx context.Context, db *sql.DB) ([]TempFileUsage, error
 		if err := rows.Scan(&t.Database, &t.TempFiles, &t.TempBytes, &t.TempPretty, &t.StatsReset); err != nil {
 			return nil, err
 		}
+		if t.TempFiles > 0 {
+			average := float64(t.TempBytes) / float64(t.TempFiles)
+			t.AvgBytesPerFile = &average
+		}
 		results = append(results, t)
+	}
+	return results, rows.Err()
+}
+
+// TempQuery is a statement ranked by the temp file data it wrote (pg_stat_statements).
+type TempQuery struct {
+	QueryID          int64
+	Query            string
+	Calls            int64
+	TempBlksWritten  int64
+	TempBytesWritten int64 // temp_blks_written × block_size
+	TempBlksRead     int64
+	MeanTimeMS       float64
+}
+
+// FetchTopTempQueries returns the statements that wrote the most temp file data —
+// the queries behind pg_stat_database.temp_bytes. Requires pg_stat_statements.
+func FetchTopTempQueries(ctx context.Context, db *sql.DB, limit int) ([]TempQuery, error) {
+	pgss, err := requirePgStatStatements(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	// Column names come from pgStatStatementsColumns (fixed identifiers), never user input.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT queryid, query, calls, temp_blks_written,
+		       temp_blks_written * current_setting('block_size')::bigint,
+		       temp_blks_read, %s
+		FROM %s
+		WHERE temp_blks_written > 0
+		ORDER BY temp_blks_written DESC
+		LIMIT NULLIF($1::int, 0)`, pgss.MeanTimeColumn, pgss.Relation), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []TempQuery{}
+	for rows.Next() {
+		var q TempQuery
+		if err := rows.Scan(&q.QueryID, &q.Query, &q.Calls, &q.TempBlksWritten, &q.TempBytesWritten,
+			&q.TempBlksRead, &q.MeanTimeMS); err != nil {
+			return nil, err
+		}
+		results = append(results, q)
 	}
 	return results, rows.Err()
 }
