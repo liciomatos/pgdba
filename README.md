@@ -152,7 +152,10 @@ Every tool answers with the same envelope:
 
 `meta` also carries the role (primary/replica), uptime, and the `stats_reset` of the
 database, bgwriter and (PG17+) checkpointer counters with the seconds since each reset —
-`check_server_info` returns just that block. `warnings` lists the parts that failed without aborting the call (composite tools such as
+`check_server_info` returns just that block. Every tool's rows (or the result itself) carry a `status` — `ok`, `warning` or `critical`,
+with the thresholds documented in each tool's description — and numbers come raw with the
+unit in the field name (`*_bytes`, `*_seconds`, `*_ms`, next to `*_pretty`). Query text is
+truncated to 500 characters (`query_truncated: true`). `warnings` lists the parts that failed without aborting the call (composite tools such as
 `check_dashboard` read each part independently) and things that need attention. Notable
 parameters:
 
@@ -161,6 +164,7 @@ parameters:
 | `check_pg_config` | `scope` | `key` (no filter) / `all` (with `filter`) | `key` = curated tuning parameters; `modified` = changed from the built-in default; `all` |
 | `check_pg_config` | `limit` / `offset` / `include_description` | `100` / `0` / `false` | paging; `short_desc` per parameter |
 | `check_long_running_queries` | `include_background` | `false` | also list autovacuum workers, walsenders and other background processes |
+| `check_wait_events` | `samples` / `interval_ms` / `include_idle` | `20` / `1000` / `false` | sample `pg_stat_activity` and average into active sessions (AAS); idle sessions excluded |
 | `check_index_usage` | `include_constraints` | `false` | also list indexes backing PK / UNIQUE / EXCLUDE constraints |
 | `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
 | `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
@@ -304,7 +308,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `2` | **Long Running Queries** | Client sessions whose query runs longer than 5 seconds | `k` kill session |
 | `3` | **Replication Slots** | Slots, plugin, WAL lag, and safe WAL size | `d` drop slot, `s` streaming standbys, `p` replication config |
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
-| `5` | **Connections** | Connections by state with % of limit used | — |
+| `5` | **Connections** | Connections by state with % of limit used, top applications/users/clients, oldest transaction and longest idle-in-transaction session | — |
 | `6` | **Autovacuum** | Tables ranked by dead tuples, with a Status column flagging what's vacuuming right now, dead tuples vs. the autovacuum trigger (Trigger %), per-table cost overrides and how many times slower than the global settings they make the table's vacuum (Throttle), and a worker-saturation bar vs. `autovacuum_max_workers` | `enter` detail view, `v` VACUUM ANALYZE |
 | `7` | **Index Usage** | Indexes ranked by wasted space (size × low share of the table's scans), with share of scans, tuples per scan, and possible redundancies (duplicate, prefix, same columns in another order); PK/unique indexes hidden by default | `enter` index detail, `c` show/hide PK/unique |
 | `8` | **Cache Hit Ratio** | Buffer cache hit ratio per table | — |
@@ -315,10 +319,10 @@ From the main dashboard, open each screen with its shortcut key:
 | `e` | **Extensions** | Installed extensions | — |
 | `D` | **Switch Database** | Switch database without restarting | `enter` connect |
 | `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
-| `w` | **Wait Events** | Active wait events grouped by type with distribution bar | — |
+| `w` | **Wait Events** | Wait events sampled over 1 s and averaged into active sessions (AAS), idle sessions excluded, with distribution bar | — |
 | `f` | **Freeze Monitor** | XID age by database and top tables approaching wrap-around | `f` VACUUM FREEZE selected table |
 | `S` | **Database Sizes** | On-disk size of every database and tablespace, plus cluster total | — |
-| `t` | **Temp Files** | Temp file spill activity per database (`pg_stat_database`) | — |
+| `t` | **Temp Files** | Temp file spill per database with average file size, plus the statements that wrote the most temp data (`pg_stat_statements`) | — |
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |

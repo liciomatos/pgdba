@@ -163,10 +163,13 @@ var screenHelp = map[string]ScreenHelp{
 	},
 	"connections": {
 		Title:   "Connections (key 5) — sessions by state",
-		Purpose: "Counts sessions per state against max_connections to spot connection exhaustion and leaks.",
+		Purpose: "Counts sessions per state against max_connections to spot connection exhaustion and leaks, and shows who opens them and which sessions sit idle in a transaction.",
 		Columns: []HelpItem{
 			{"State", "active, idle, idle in transaction, idle in transaction (aborted), …"},
 			{"Count", "number of sessions in that state."},
+			{"used / max", "sessions vs max_connections — yellow from 70%, red from 90%."},
+			{"Top applications / users / clients", "the 5 application_names, users and client addresses with the most client connections."},
+			{"Oldest transaction / Longest idle in transaction", "age of the oldest open transaction; the session idle in a transaction the longest — yellow from 5 minutes, red from 1 hour (it holds locks and the xmin horizon)."},
 		},
 		Keys: []HelpItem{{"/", "filter rows by text"}},
 		Reading: []string{
@@ -174,7 +177,7 @@ var screenHelp = map[string]ScreenHelp{
 			"'idle in transaction' should be near zero; set idle_in_transaction_session_timeout to cap it.",
 			"superuser_reserved_connections are kept free for administrators, so ordinary users hit the limit earlier.",
 		},
-		Source: "pg_stat_activity, max_connections",
+		Source: "pg_stat_activity (state, application_name, usename, client_addr, state_change, xact_start), max_connections",
 	},
 	"autovacuum": {
 		Title:   "Autovacuum Monitor (key 6) — dead tuples and vacuum activity",
@@ -367,13 +370,14 @@ var screenHelp = map[string]ScreenHelp{
 	},
 	"wait_events": {
 		Title:   "Wait Events (key w) — what active sessions are waiting on",
-		Purpose: "Groups active sessions by wait event, a quick answer to 'why is the database slow right now?'.",
+		Purpose: "Samples active sessions 10 times over one second and groups them by wait event, averaged into active sessions (AAS) — a quick answer to 'why is the database slow right now?'. Idle sessions are left out.",
 		Columns: []HelpItem{
-			{"Type", "CPU = running, not waiting (green); Lock = row/table locks (red); IO, LWLock, BufferPin = storage and internal contention (yellow); Client = waiting for the application."},
-			{"Event / Count / Distribution", "specific wait event and how many sessions are in it."},
+			{"Type", "CPU = running, not waiting (green); Lock = row/table locks (red); IO, LWLock, BufferPin = storage and internal contention (yellow); Client = waiting for the application inside a transaction."},
+			{"Event / AAS / Distribution", "specific wait event; average number of sessions in it per sample (the RDS Performance Insights unit); share of all sampled sessions. The line above the table gives the total, which equals the sum of the AAS column."},
 		},
 		Reading: []string{
-			"It's a single snapshot — refresh (r) a few times before drawing conclusions.",
+			"Sessions in state 'idle' (waiting for their client's next query, Client:ClientRead) and background processes idling in their main loop (wait type Activity) are excluded — they used to dominate a single snapshot without saying anything.",
+			"One second of samples is still short: refresh (r) a few times, or use the MCP check_wait_events tool, which samples for 20 s by default.",
 			"Many Lock waits → Blocked Queries (4). Many IO waits → check Cache Hit (8) and Temp Files (t).",
 		},
 		Source: "pg_stat_activity (wait_event_type, wait_event)",
@@ -406,13 +410,15 @@ var screenHelp = map[string]ScreenHelp{
 		Purpose: "Per-database count and volume of temporary files written since the last stats reset. Temp files mean operations didn't fit in work_mem.",
 		Columns: []HelpItem{
 			{"Temp Files / Temp Size", "files created and bytes written; non-zero counts are yellow."},
-			{"Stats Reset", "when the counters started — compare volumes over the same period."},
+			{"Avg / File", "temp bytes per file: files around 1 GB mean single sorts or hashes far above work_mem."},
+			{"Stats Reset", "when the counters started — compare volumes over the same period; 'never reset' = since the cluster was created or its last crash recovery."},
+			{"Top temp writers", "the 5 statements that wrote the most temp data (pg_stat_statements temp_blks_written × block_size), with their call count."},
 		},
 		Reading: []string{
-			"Find the statements causing it in Query Load (L, Temp column) or by setting log_temp_files.",
+			"The Top temp writers list names the statements to fix; Query Load (L, Temp column) and log_temp_files give more context.",
 			"Raise work_mem per role or session for heavy reports instead of globally: it applies per sort/hash node, per connection.",
 		},
-		Source: "pg_stat_database (temp_files, temp_bytes, stats_reset)",
+		Source: "pg_stat_database (temp_files, temp_bytes, stats_reset), pg_stat_statements (temp_blks_written)",
 	},
 	"xmin_horizon": {
 		Title:   "Xmin Horizon (key X) — what keeps vacuum from cleaning up",

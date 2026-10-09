@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -43,5 +44,17 @@ func TestRespond_WarningsNeverNull(t *testing.T) {
 	}
 	if string(decoded["warnings"]) != "[]" {
 		t.Errorf("warnings should be an empty list, got %s", decoded["warnings"])
+	}
+}
+
+func TestTruncateQuery(t *testing.T) {
+	short := "SELECT 1"
+	if query, truncated := truncateQuery(short); query != short || truncated {
+		t.Errorf("short query changed: %q %v", query, truncated)
+	}
+	long := strings.Repeat("é", maxQueryChars+10)
+	query, truncated := truncateQuery(long)
+	if !truncated || len([]rune(query)) != maxQueryChars {
+		t.Errorf("expected %d runes and truncated=true, got %d %v", maxQueryChars, len([]rune(query)), truncated)
 	}
 }

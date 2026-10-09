@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,15 +13,25 @@ import (
 
 type WaitEventsModel struct {
 	table        table.Model
+	sampling     WaitEventSampling
 	initialModel func() tea.Model
+	width        int
 	height       int
 }
 
-// CheckWaitEvents loads active wait events from pg_stat_activity, grouping
-// by wait_event_type and wait_event. Sessions on CPU (no wait event) are
-// shown as type "CPU". Distribution bar shows each event's share of total.
+// The TUI samples for one second so opening the screen stays snappy; the MCP tool
+// defaults to 20 one-second samples.
+const (
+	waitEventScreenSamples  = 10
+	waitEventScreenInterval = 100 * time.Millisecond
+)
+
+// CheckWaitEvents samples pg_stat_activity and groups sessions by wait_event_type and
+// wait_event, averaged into active sessions (AAS). Sessions running on CPU (no wait
+// event) are shown as type "CPU"; idle sessions are left out. The distribution bar
+// shows each event's share of the total.
 func CheckWaitEvents(initialModel func() tea.Model) tea.Model {
-	events, err := FetchWaitEvents(context.Background(), config.Config.DB)
+	sampling, err := FetchWaitEvents(context.Background(), config.Config.DB, waitEventScreenSamples, waitEventScreenInterval, false)
 	if err != nil {
 		return NewErrorModel(err, "Loading wait events", initialModel)
 	}
@@ -29,16 +40,16 @@ func CheckWaitEvents(initialModel func() tea.Model) tea.Model {
 	columns := []table.Column{
 		{Title: "Type", Width: 18},
 		{Title: "Event", Width: 25},
-		{Title: "Count", Width: 8},
+		{Title: "AAS", Width: 8},
 		{Title: "Distribution", Width: 22},
 	}
 
 	var rowsData []table.Row
-	for _, e := range events {
+	for _, e := range sampling.Events {
 		rowsData = append(rowsData, table.Row{
 			e.EventType,
 			e.Event,
-			fmt.Sprintf("%d", e.Count),
+			fmt.Sprintf("%.2f", e.AAS),
 			RenderBar(e.Pct, 12),
 		})
 	}
@@ -51,7 +62,7 @@ func CheckWaitEvents(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return WaitEventsModel{table: t, initialModel: initialModel, height: 30}
+	return WaitEventsModel{table: t, sampling: sampling, initialModel: initialModel, height: 30}
 }
 
 func (m WaitEventsModel) Init() tea.Cmd { return nil }
@@ -59,8 +70,9 @@ func (m WaitEventsModel) Init() tea.Cmd { return nil }
 func (m WaitEventsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
-		m.table.SetHeight(TableHeight(msg.Height))
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -98,7 +110,10 @@ func (m WaitEventsModel) View() string {
 	}
 	legend := "  " + dot(2, "Lock") + "   " + dot(1, "IO · LWLock · BufferPin") + "   " + dot(0, "CPU")
 
+	summary := HintStyle.Render(fmt.Sprintf("  %d samples over %s • %.2f average active sessions (idle sessions excluded)",
+		m.sampling.Samples, time.Duration(m.sampling.Samples)*m.sampling.Interval, m.sampling.TotalAAS))
 	s := RenderHeader("Wait Events") + "\n"
+	s += summary + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + legend
 	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
