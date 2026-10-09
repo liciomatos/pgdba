@@ -150,7 +150,9 @@ Every tool answers with the same envelope:
 }
 ```
 
-`warnings` lists the parts that failed without aborting the call (composite tools such as
+`meta` also carries the role (primary/replica), uptime, and the `stats_reset` of the
+database, bgwriter and (PG17+) checkpointer counters with the seconds since each reset —
+`check_server_info` returns just that block. `warnings` lists the parts that failed without aborting the call (composite tools such as
 `check_dashboard` read each part independently) and things that need attention. Notable
 parameters:
 
@@ -271,7 +273,8 @@ before it happens:
 | Replication | physical standbys and logical subscribers fed by this server (worst lag of each), and this server's subscriptions (apply/sync errors on PG15+, conflicts on PG18+) | lag yellow > 64 MB / 10 s, red > 1 GB / 60 s; errors or conflicts yellow |
 
 On short terminals the dashboard drops the blank lines between sections so everything
-still fits in 24 rows. Uptime is shown on the connection line.
+still fits in 24 rows. Uptime and the date of the last statistics reset (every cumulative
+counter on the dashboard accumulates since then) are shown on the connection line.
 
 From the main dashboard, open each screen with its shortcut key:
 
@@ -282,7 +285,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `3` | **Replication Slots** | Slots, plugin, WAL lag, and safe WAL size | `d` drop slot, `s` streaming standbys, `p` replication config |
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
 | `5` | **Connections** | Connections by state with % of limit used | — |
-| `6` | **Autovacuum** | Tables ranked by dead tuples, with a Status column flagging what's vacuuming right now and a worker-saturation bar vs. `autovacuum_max_workers` | `enter` detail view, `v` VACUUM ANALYZE |
+| `6` | **Autovacuum** | Tables ranked by dead tuples, with a Status column flagging what's vacuuming right now, dead tuples vs. the autovacuum trigger (Trigger %), per-table cost overrides and how many times slower than the global settings they make the table's vacuum (Throttle), and a worker-saturation bar vs. `autovacuum_max_workers` | `enter` detail view, `v` VACUUM ANALYZE |
 | `7` | **Index Usage** | Indexes sorted by scan count | `enter` index detail |
 | `8` | **Cache Hit Ratio** | Buffer cache hit ratio per table | — |
 | `9` | **Users** | Login roles and their privileges | — |
@@ -299,6 +302,8 @@ From the main dashboard, open each screen with its shortcut key:
 | `m` | **Memory & Checkpoint Stats** | Memory-related config, cache hit ratio, checkpoint/bgwriter activity | — |
 | `R` | **Pub/Sub** | Publications and subscriptions with table drill-down and live stats | `tab` switch section, `enter` table detail |
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
+| `X` | **Xmin Horizon** | Everything holding back the xmin horizon — sessions, standbys (`hot_standby_feedback`), replication slots, prepared transactions — oldest first, flagging the one that defines it | `enter` full query, `/` filter |
+| `V` | **Vacuum Progress** | Every VACUUM/autovacuum running now: phase, % scanned/vacuumed, index passes, dead-tuple memory, anti-wraparound flag | — |
 | `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 
 Press `?` on any screen for its help page — a man-page style description of what the

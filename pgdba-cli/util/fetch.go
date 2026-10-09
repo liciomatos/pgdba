@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,12 +48,13 @@ type DashboardResult struct {
 	FreezeOldestDB             string
 	FreezeOldestDBAge          int64
 	FreezePctToward            float64
-	LongRunningCount           int      // queries running > 60 seconds
-	WaitEventCount             int      // non-idle queries with an active wait event
-	TempFilesBytes             int64    // temp_bytes from pg_stat_database for current db
-	DBSizePretty               string   // pg_size_pretty(pg_database_size(current_database()))
-	CommitPct                  *float64 // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
-	UptimeSeconds              int64    // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
+	LongRunningCount           int        // queries running > 60 seconds
+	WaitEventCount             int        // non-idle queries with an active wait event
+	TempFilesBytes             int64      // temp_bytes from pg_stat_database for current db
+	DBSizePretty               string     // pg_size_pretty(pg_database_size(current_database()))
+	CommitPct                  *float64   // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
+	UptimeSeconds              int64      // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
+	StatsReset                 *time.Time // pg_stat_database.stats_reset of the current db; nil = never reset
 	// Warnings lists the parts that failed ("part: error"); their fields keep zero values.
 	Warnings []string
 }
@@ -167,9 +169,10 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 		var commitPct sql.NullFloat64
 		if err := db.QueryRowContext(ctx, `
 			SELECT COALESCE(temp_bytes, 0),
-			       ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1)
+			       ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1),
+			       stats_reset
 			FROM pg_stat_database WHERE datname = current_database()`,
-		).Scan(&result.TempFilesBytes, &commitPct); err != nil {
+		).Scan(&result.TempFilesBytes, &commitPct, &result.StatsReset); err != nil {
 			return err
 		}
 		if commitPct.Valid {
@@ -506,7 +509,97 @@ func FetchConnections(ctx context.Context, db *sql.DB) (ConnectionsResult, error
 	return result, nil
 }
 
-// AutovacuumTable holds per-table vacuum statistics from pg_stat_user_tables.
+// AutovacuumCost is the effective vacuum cost-based delay for a table's autovacuum,
+// compared with what the global settings would give it.
+//
+// Autovacuum sleeps cost_delay ms every time it accumulates cost_limit "cost units"
+// (vacuum_cost_page_hit/miss/dirty per page), so its maximum speed is
+// cost_limit / cost_delay units per millisecond. A per-table override that raises the
+// delay or lowers the limit can make a big table's vacuum many times slower.
+type AutovacuumCost struct {
+	DelayMS     float64
+	DelaySource string // SourceTable or SourceGlobal
+	Limit       float64
+	LimitSource string
+	// ThroughputPerSec is cost units per second (limit / delay × 1000); nil when
+	// unthrottled (delay 0). MaxReadMBPerSec converts it with vacuum_cost_page_miss
+	// into the read rate it allows for pages not in shared_buffers.
+	ThroughputPerSec       *float64
+	MaxReadMBPerSec        *float64
+	GlobalDelayMS          float64
+	GlobalLimit            float64
+	GlobalThroughputPerSec *float64
+	GlobalMaxReadMBPerSec  *float64
+	// SlowerThanGlobal is set when the table's overrides throttle it more than the
+	// global settings would; SlowdownFactor is global ÷ table throughput (nil when the
+	// global setting is unthrottled, i.e. infinitely faster).
+	SlowerThanGlobal bool
+	SlowdownFactor   *float64
+}
+
+// autovacuumCostGlobals are the GUCs effectiveAutovacuumCost reads.
+var autovacuumCostGlobals = []string{
+	"autovacuum_vacuum_cost_delay", "autovacuum_vacuum_cost_limit",
+	"vacuum_cost_delay", "vacuum_cost_limit", "vacuum_cost_page_miss",
+}
+
+// effectiveAutovacuumCost resolves the delay/limit autovacuum uses for a table:
+// the table reloption when set (and not -1), else autovacuum_vacuum_cost_*, which
+// itself falls back to vacuum_cost_* when -1.
+func effectiveAutovacuumCost(tableOptions, globals map[string]string) AutovacuumCost {
+	parse := func(raw string) (float64, bool) {
+		value, err := strconv.ParseFloat(raw, 64)
+		return value, err == nil
+	}
+	globalValue := func(autovacuumName, vacuumName string) float64 {
+		if value, ok := parse(globals[autovacuumName]); ok && value >= 0 {
+			return value
+		}
+		value, _ := parse(globals[vacuumName])
+		return value
+	}
+	cost := AutovacuumCost{
+		GlobalDelayMS: globalValue("autovacuum_vacuum_cost_delay", "vacuum_cost_delay"),
+		GlobalLimit:   globalValue("autovacuum_vacuum_cost_limit", "vacuum_cost_limit"),
+		DelaySource:   SourceGlobal,
+		LimitSource:   SourceGlobal,
+	}
+	cost.DelayMS, cost.Limit = cost.GlobalDelayMS, cost.GlobalLimit
+	if value, ok := parse(tableOptions["autovacuum_vacuum_cost_delay"]); ok && value >= 0 {
+		cost.DelayMS, cost.DelaySource = value, SourceTable
+	}
+	if value, ok := parse(tableOptions["autovacuum_vacuum_cost_limit"]); ok && value > 0 {
+		cost.Limit, cost.LimitSource = value, SourceTable
+	}
+	pageMiss, _ := parse(globals["vacuum_cost_page_miss"])
+	rates := func(delayMS, limit float64) (*float64, *float64) {
+		if delayMS <= 0 {
+			return nil, nil
+		}
+		perSecond := limit / delayMS * 1000
+		var readMB *float64
+		if pageMiss > 0 {
+			mb := perSecond / pageMiss * 8192 / (1024 * 1024)
+			readMB = &mb
+		}
+		return &perSecond, readMB
+	}
+	cost.ThroughputPerSec, cost.MaxReadMBPerSec = rates(cost.DelayMS, cost.Limit)
+	cost.GlobalThroughputPerSec, cost.GlobalMaxReadMBPerSec = rates(cost.GlobalDelayMS, cost.GlobalLimit)
+	switch {
+	case cost.ThroughputPerSec == nil: // unthrottled: never slower
+	case cost.GlobalThroughputPerSec == nil:
+		cost.SlowerThanGlobal = true
+	case *cost.ThroughputPerSec < *cost.GlobalThroughputPerSec:
+		cost.SlowerThanGlobal = true
+		factor := *cost.GlobalThroughputPerSec / *cost.ThroughputPerSec
+		cost.SlowdownFactor = &factor
+	}
+	return cost
+}
+
+// AutovacuumTable holds per-table vacuum statistics from pg_stat_user_tables, with the
+// table's autovacuum overrides and how close it is to its next autovacuum.
 type AutovacuumTable struct {
 	SchemaName      string
 	TableName       string
@@ -514,14 +607,39 @@ type AutovacuumTable struct {
 	LiveTuples      int64
 	DeadPct         *float64
 	TotalSize       string
+	TotalSizeBytes  int64
+	ModSinceAnalyze int64
 	LastVacuum      *time.Time
 	LastAnalyze     *time.Time
 	LastAutovacuum  *time.Time
 	LastAutoanalyze *time.Time
 	AutovacuumCount int64
+	// Overrides are the table's autovacuum_* reloptions (empty when it uses the globals).
+	Overrides         map[string]string
+	AutovacuumEnabled bool
+	Cost              AutovacuumCost
+	// TriggerThreshold is the dead-tuple count that triggers autovacuum
+	// (base + scale_factor × reltuples, with the table's overrides); TriggerRatio is
+	// DeadTuples ÷ TriggerThreshold — ≥ 1 means a vacuum is due. nil when the
+	// threshold is 0.
+	TriggerThreshold float64
+	TriggerRatio     *float64
 }
 
+// HasOverrides reports whether the table sets any autovacuum_* reloption.
+func (t AutovacuumTable) HasOverrides() bool { return len(t.Overrides) > 0 }
+
 func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTable, error) {
+	globals, _, err := fetchGlobalSettings(ctx, db, append(slices.Clone(autovacuumThresholdGlobals), autovacuumCostGlobals...))
+	if err != nil {
+		return nil, err
+	}
+	majorVersion := pgMajorVersion()
+	// pg_class.relallfrozen was added in PG18 (feeds the insert threshold); NULL before.
+	relallfrozenColumn := "NULL::bigint"
+	if majorVersion >= 18 {
+		relallfrozenColumn = "c.relallfrozen::bigint"
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			s.schemaname,
@@ -531,12 +649,21 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 			CASE WHEN s.n_live_tup + s.n_dead_tup = 0 THEN NULL
 				 ELSE ROUND(100.0 * s.n_dead_tup / (s.n_live_tup + s.n_dead_tup), 1)
 			END AS dead_pct,
-			pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
+			pg_total_relation_size(c.oid),
+			pg_size_pretty(pg_total_relation_size(c.oid)),
+			s.n_mod_since_analyze,
+			s.n_ins_since_vacuum,
 			s.last_vacuum,
 			s.last_analyze,
 			s.last_autovacuum,
 			s.last_autoanalyze,
-			s.autovacuum_count
+			s.autovacuum_count,
+			COALESCE(c.reloptions, '{}'),
+			c.reltuples::float8,
+			c.relpages::bigint,
+			`+relallfrozenColumn+`,
+			age(c.relfrozenxid),
+			mxid_age(c.relminmxid)
 		FROM pg_stat_user_tables s
 		JOIN pg_class c ON c.oid = s.relid
 		ORDER BY s.n_dead_tup DESC
@@ -549,17 +676,36 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 	for rows.Next() {
 		var t AutovacuumTable
 		var deadPct sql.NullFloat64
+		var reloptions pq.StringArray
+		in := autovacuumThresholdInputs{MajorVersion: majorVersion, GlobalSettings: globals}
 		if err := rows.Scan(
 			&t.SchemaName, &t.TableName, &t.DeadTuples, &t.LiveTuples, &deadPct,
-			&t.TotalSize,
+			&t.TotalSizeBytes, &t.TotalSize, &t.ModSinceAnalyze, &in.InsertsSinceVacuum,
 			&t.LastVacuum, &t.LastAnalyze, &t.LastAutovacuum, &t.LastAutoanalyze,
 			&t.AutovacuumCount,
+			&reloptions, &in.Reltuples, &in.Relpages, &in.Relallfrozen, &in.XIDAge, &in.MXIDAge,
 		); err != nil {
 			return nil, err
 		}
 		if deadPct.Valid {
 			t.DeadPct = &deadPct.Float64
 		}
+		in.TableOptions = parseReloptions(reloptions)
+		in.DeadTuples, in.ModsSinceAnalyze = t.DeadTuples, t.ModSinceAnalyze
+		t.Overrides = map[string]string{}
+		for key, value := range in.TableOptions {
+			if strings.HasPrefix(key, "autovacuum_") {
+				t.Overrides[key] = value
+			}
+		}
+		thresholds := computeAutovacuumThresholds(in)
+		t.AutovacuumEnabled = thresholds.AutovacuumEnabled
+		t.TriggerThreshold = thresholds.DeadTuples.Threshold
+		if t.TriggerThreshold > 0 {
+			ratio := float64(t.DeadTuples) / t.TriggerThreshold
+			t.TriggerRatio = &ratio
+		}
+		t.Cost = effectiveAutovacuumCost(in.TableOptions, globals)
 		results = append(results, t)
 	}
 	return results, rows.Err()
@@ -1761,53 +1907,285 @@ func FetchAutovacuumWorkerSaturation(ctx context.Context, db *sql.DB) (Autovacuu
 	return s, nil
 }
 
-// AutovacuumWorkerActivity is one currently-running (auto)vacuum, from pg_stat_progress_vacuum.
-type AutovacuumWorkerActivity struct {
-	PID             int
-	IsAutovacuum    bool
-	SchemaName      string
-	TableName       string
-	Phase           string
-	HeapBlksTotal   int64
-	HeapBlksScanned int64
-	DurationSeconds *int64
+// VacuumProgress is one running VACUUM (manual or autovacuum) from
+// pg_stat_progress_vacuum. Version-specific columns are nullable pointers: nil means
+// the column doesn't exist on the connected server.
+type VacuumProgress struct {
+	PID      int
+	Database string
+	// SchemaName/TableName are empty for vacuums running in another database, whose
+	// relid can't be resolved from this database's pg_class (RelationID is still set).
+	SchemaName   string
+	TableName    string
+	RelationID   int64
+	Phase        string
+	IsAutovacuum bool
+	// IsWraparound is an autovacuum started "to prevent wraparound" — it can't be
+	// skipped and doesn't yield to lock requests.
+	IsWraparound     bool
+	HeapBlksTotal    int64
+	HeapBlksScanned  int64
+	HeapBlksVacuumed int64
+	IndexVacuumCount int64
+	IndexesTotal     *int64 // PG17+
+	IndexesProcessed *int64 // PG17+
+	// Dead-tuple memory: tuple counts up to PG16, bytes from PG17 (TID store).
+	DeadTuples        *int64 // PG13–16 num_dead_tuples
+	MaxDeadTuples     *int64 // PG13–16 max_dead_tuples
+	DeadTupleBytes    *int64 // PG17+ dead_tuple_bytes
+	MaxDeadTupleBytes *int64 // PG17+ max_dead_tuple_bytes
+	DeadItemIDs       *int64 // PG17+ num_dead_item_ids
+	DurationSeconds   *int64
+	Query             string
 }
 
-func FetchAutovacuumActivity(ctx context.Context, db *sql.DB) ([]AutovacuumWorkerActivity, error) {
-	// LEFT JOIN pg_stat_activity: a progress row can briefly outlive its activity row
-	// (e.g. worker exiting), and we'd rather show it as "unknown type" than drop it.
+// ScannedPct is the share of heap blocks scanned so far; nil before the total is known.
+func (p VacuumProgress) ScannedPct() *float64 {
+	return blockPct(p.HeapBlksScanned, p.HeapBlksTotal)
+}
+
+// VacuumedPct is the share of heap blocks vacuumed so far; nil before the total is known.
+func (p VacuumProgress) VacuumedPct() *float64 {
+	return blockPct(p.HeapBlksVacuumed, p.HeapBlksTotal)
+}
+
+func blockPct(done, total int64) *float64 {
+	if total <= 0 {
+		return nil
+	}
+	pct := float64(done) / float64(total) * 100
+	return &pct
+}
+
+// FetchVacuumProgress lists every running VACUUM in the cluster, longest first.
+func FetchVacuumProgress(ctx context.Context, db *sql.DB) ([]VacuumProgress, error) {
+	// PG17 replaced the dead-tuple counters with byte counters (the TID store) and
+	// added index progress.
+	deadColumns := `num_dead_tuples::bigint, max_dead_tuples::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint`
+	if pgMajorVersion() >= 17 {
+		deadColumns = `NULL::bigint, NULL::bigint, dead_tuple_bytes, max_dead_tuple_bytes, num_dead_item_ids, indexes_total, indexes_processed`
+	}
+	// pg_stat_progress_vacuum covers every database, but relid only resolves through
+	// this database's pg_class — hence the LEFT JOIN restricted to current_database().
+	// LEFT JOIN pg_stat_activity: a progress row can briefly outlive its activity row.
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			p.pid,
-			COALESCE(a.backend_type, '') = 'autovacuum worker' AS is_autovacuum,
-			n.nspname,
-			c.relname,
+			COALESCE(p.datname, ''),
+			COALESCE(n.nspname, ''),
+			COALESCE(c.relname, ''),
+			p.relid::bigint,
 			p.phase,
+			COALESCE(a.backend_type, '') = 'autovacuum worker',
+			COALESCE(a.query, '') LIKE '%to prevent wraparound%',
 			p.heap_blks_total,
 			p.heap_blks_scanned,
-			CASE WHEN a.query_start IS NULL THEN NULL
-			     ELSE EXTRACT(EPOCH FROM (now() - a.query_start))::bigint END AS duration_seconds
+			p.heap_blks_vacuumed,
+			p.index_vacuum_count,
+			`+deadColumns+`,
+			CASE WHEN a.xact_start IS NULL THEN NULL
+			     ELSE EXTRACT(EPOCH FROM (now() - a.xact_start))::bigint END,
+			COALESCE(a.query, '')
 		FROM pg_stat_progress_vacuum p
-		JOIN pg_class c ON c.oid = p.relid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_class c ON c.oid = p.relid AND p.datname = current_database()
+		LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
 		LEFT JOIN pg_stat_activity a ON a.pid = p.pid
-		ORDER BY duration_seconds DESC NULLS LAST`)
+		ORDER BY a.xact_start NULLS LAST`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var results []AutovacuumWorkerActivity
+	results := []VacuumProgress{}
 	for rows.Next() {
-		var w AutovacuumWorkerActivity
+		var progress VacuumProgress
 		if err := rows.Scan(
-			&w.PID, &w.IsAutovacuum, &w.SchemaName, &w.TableName, &w.Phase,
-			&w.HeapBlksTotal, &w.HeapBlksScanned, &w.DurationSeconds,
+			&progress.PID, &progress.Database, &progress.SchemaName, &progress.TableName, &progress.RelationID,
+			&progress.Phase, &progress.IsAutovacuum, &progress.IsWraparound,
+			&progress.HeapBlksTotal, &progress.HeapBlksScanned, &progress.HeapBlksVacuumed, &progress.IndexVacuumCount,
+			&progress.DeadTuples, &progress.MaxDeadTuples, &progress.DeadTupleBytes, &progress.MaxDeadTupleBytes,
+			&progress.DeadItemIDs, &progress.IndexesTotal, &progress.IndexesProcessed,
+			&progress.DurationSeconds, &progress.Query,
 		); err != nil {
 			return nil, err
 		}
-		results = append(results, w)
+		results = append(results, progress)
 	}
 	return results, rows.Err()
+}
+
+// --- Xmin horizon ---
+
+// Xmin horizon holder sources reported in XminHolder.Source.
+const (
+	XminSourceSession  = "session"  // a backend with an open snapshot or assigned XID
+	XminSourceReplica  = "replica"  // a standby's hot_standby_feedback, via its walsender
+	XminSourceSlot     = "slot"     // a replication slot's xmin / catalog_xmin
+	XminSourcePrepared = "prepared" // a two-phase transaction waiting for COMMIT PREPARED
+)
+
+// XminHolder is something that keeps the xmin horizon from advancing.
+type XminHolder struct {
+	Source string
+	// ID is the pid (session), application name or pid (replica), slot name, or gid.
+	ID          string
+	Database    string
+	User        string
+	State       string
+	Application string
+	ClientAddr  string
+	XminAge     int64
+	// CatalogOnly marks a slot holding only catalog_xmin: it blocks cleanup of system
+	// catalogs, not of user tables.
+	CatalogOnly           bool
+	TransactionStart      *time.Time
+	TransactionAgeSeconds *int64
+	Query                 string
+	// DefinesHorizon marks the holder(s) with the oldest xmin among those that aren't
+	// catalog-only — the horizon that limits vacuum on user tables.
+	DefinesHorizon bool
+}
+
+// XminHorizon lists everything holding back the xmin horizon, oldest first.
+type XminHorizon struct {
+	HotStandbyFeedback bool
+	FreezeMaxAge       int64 // autovacuum_freeze_max_age, the reference for XminHolderStatus
+	// DatabaseFrozenXIDAge is age(datfrozenxid) of the current database.
+	DatabaseFrozenXIDAge int64
+	Holders              []XminHolder
+}
+
+// FetchXminHorizon finds every session, standby (hot_standby_feedback), replication
+// slot and prepared transaction holding back the xmin horizon.
+func FetchXminHorizon(ctx context.Context, db *sql.DB) (XminHorizon, error) {
+	horizon := XminHorizon{Holders: []XminHolder{}}
+	if err := db.QueryRowContext(ctx, `
+		SELECT current_setting('hot_standby_feedback')::boolean,
+		       current_setting('autovacuum_freeze_max_age')::bigint,
+		       (SELECT age(datfrozenxid) FROM pg_database WHERE datname = current_database())`,
+	).Scan(&horizon.HotStandbyFeedback, &horizon.FreezeMaxAge, &horizon.DatabaseFrozenXIDAge); err != nil {
+		return horizon, err
+	}
+	// Sessions: backend_xid counts too — a transaction that wrote something holds the
+	// horizon with its XID even when it has no snapshot. Walsenders are left out of the
+	// session list because their backend_xmin is the standby's feedback, reported once
+	// under "replica". client_addr is NULL on unix sockets, so it's COALESCEd on its own.
+	rows, err := db.QueryContext(ctx, `
+		WITH holders AS (
+			SELECT 'session' AS source, a.pid::text AS id, COALESCE(a.datname, '') AS database,
+			       COALESCE(a.usename, '') AS username, COALESCE(a.state, '') AS state,
+			       COALESCE(a.application_name, '') AS application, COALESCE(a.client_addr::text, '') AS client_addr,
+			       greatest(age(a.backend_xmin), age(a.backend_xid))::bigint AS xmin_age,
+			       false AS catalog_only, a.xact_start AS transaction_start, COALESCE(a.query, '') AS query
+			FROM pg_stat_activity a
+			WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
+			  AND a.backend_type IS DISTINCT FROM 'walsender'
+			  AND a.pid <> pg_backend_pid()
+			UNION ALL
+			SELECT 'replica', COALESCE(NULLIF(r.application_name, ''), r.pid::text), '',
+			       COALESCE(r.usename, ''), COALESCE(r.state, ''), COALESCE(r.application_name, ''),
+			       COALESCE(r.client_addr::text, ''), age(r.backend_xmin)::bigint, false, NULL::timestamptz, ''
+			FROM pg_stat_replication r
+			WHERE r.backend_xmin IS NOT NULL
+			UNION ALL
+			SELECT 'slot', s.slot_name::text, COALESCE(s.database::text, ''), '',
+			       CASE WHEN s.active THEN 'active' ELSE 'inactive' END, COALESCE(s.plugin::text, ''), '',
+			       greatest(age(s.xmin), age(s.catalog_xmin))::bigint, s.xmin IS NULL, NULL::timestamptz, ''
+			FROM pg_replication_slots s
+			WHERE s.xmin IS NOT NULL OR s.catalog_xmin IS NOT NULL
+			UNION ALL
+			SELECT 'prepared', p.gid, p.database::text, p.owner::text, 'prepared', '', '',
+			       age(p.transaction)::bigint, false, p.prepared, ''
+			FROM pg_prepared_xacts p
+		)
+		SELECT *, CASE WHEN transaction_start IS NULL THEN NULL
+		               ELSE EXTRACT(EPOCH FROM (now() - transaction_start))::bigint END
+		FROM holders
+		ORDER BY xmin_age DESC NULLS LAST, transaction_start NULLS LAST`)
+	if err != nil {
+		return horizon, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var holder XminHolder
+		if err := rows.Scan(&holder.Source, &holder.ID, &holder.Database, &holder.User, &holder.State,
+			&holder.Application, &holder.ClientAddr, &holder.XminAge, &holder.CatalogOnly,
+			&holder.TransactionStart, &holder.Query, &holder.TransactionAgeSeconds); err != nil {
+			return horizon, err
+		}
+		horizon.Holders = append(horizon.Holders, holder)
+	}
+	if err := rows.Err(); err != nil {
+		return horizon, err
+	}
+	// The horizon for user tables is set by the oldest holder that isn't catalog-only:
+	// a slot's catalog_xmin only keeps system-catalog rows. Holders come oldest first.
+	horizonAge := int64(-1)
+	for i := range horizon.Holders {
+		holder := &horizon.Holders[i]
+		if holder.CatalogOnly {
+			continue
+		}
+		if horizonAge < 0 {
+			horizonAge = holder.XminAge
+		}
+		holder.DefinesHorizon = holder.XminAge == horizonAge
+	}
+	return horizon, nil
+}
+
+// HorizonHolder returns the holder that defines the user-table horizon, or nil when
+// nothing (or only catalog-only slots) holds it back.
+func (horizon XminHorizon) HorizonHolder() *XminHolder {
+	for i := range horizon.Holders {
+		if horizon.Holders[i].DefinesHorizon {
+			return &horizon.Holders[i]
+		}
+	}
+	return nil
+}
+
+// --- Server metadata ---
+
+// ServerMeta describes the server a response came from and when its cumulative
+// statistics were last reset, so counters can be read as "since <reset>".
+type ServerMeta struct {
+	ServerVersion       string
+	InRecovery          bool
+	ServerTime          time.Time
+	PostmasterStartTime time.Time
+	UptimeSeconds       int64
+	// The stats_reset timestamps are nil when the counters were never reset: they then
+	// accumulate since the cluster was created (or since the last crash recovery, which
+	// discards statistics).
+	DatabaseStatsReset     *time.Time
+	BgwriterStatsReset     *time.Time
+	CheckpointerStatsReset *time.Time // PG17+; checkpoint counters moved to pg_stat_checkpointer
+	// PgStatStatementsVersion is "" when the extension isn't installed in this database.
+	PgStatStatementsVersion string
+}
+
+func FetchServerMeta(ctx context.Context, db *sql.DB) (ServerMeta, error) {
+	var meta ServerMeta
+	// pg_stat_checkpointer (and its stats_reset) exists from PG17 on.
+	checkpointerReset := "NULL::timestamptz"
+	if pgMajorVersion() >= 17 {
+		checkpointerReset = "(SELECT stats_reset FROM pg_stat_checkpointer)"
+	}
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			current_setting('server_version'),
+			pg_is_in_recovery(),
+			now(),
+			pg_postmaster_start_time(),
+			EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint,
+			(SELECT stats_reset FROM pg_stat_database WHERE datname = current_database()),
+			(SELECT stats_reset FROM pg_stat_bgwriter),
+			`+checkpointerReset+`,
+			COALESCE((SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'), '')`,
+	).Scan(&meta.ServerVersion, &meta.InRecovery, &meta.ServerTime, &meta.PostmasterStartTime,
+		&meta.UptimeSeconds, &meta.DatabaseStatsReset, &meta.BgwriterStatsReset,
+		&meta.CheckpointerStatsReset, &meta.PgStatStatementsVersion)
+	return meta, err
 }
 
 // --- Freeze Monitor ---

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liciomatos/pgdba-cli/config"
 	"github.com/lib/pq"
+	"github.com/liciomatos/pgdba-cli/config"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,7 +24,51 @@ type AutovacuumModel struct {
 	schemaName    string
 	tableName     string
 	saturation    AutovacuumWorkerSaturation
+	width         int
 	height        int
+}
+
+// autovacuumNameColumns (Schema, Table) are sized to their content and shrink first on
+// narrow terminals; the value columns take exactly the width of their longest value.
+var autovacuumNameColumns = []int{0, 1}
+var autovacuumValueColumns = []int{2, 3, 4, 5, 6, 7, 8, 9}
+
+// throttleText summarizes a table's autovacuum cost settings: "global" when it doesn't
+// override them, otherwise "limit/delay" plus "xN" when that is N times slower than the
+// global settings ("x∞"-like cases, where the global setting is unthrottled, show "slower").
+// ASCII only: ColorizeTable locates later columns by byte offset.
+func throttleText(cost AutovacuumCost) string {
+	if cost.DelaySource == SourceGlobal && cost.LimitSource == SourceGlobal {
+		return "global"
+	}
+	text := fmt.Sprintf("%g/%gms", cost.Limit, cost.DelayMS)
+	if cost.DelayMS == 0 {
+		text = "unthrottled"
+	}
+	switch {
+	case cost.SlowerThanGlobal && cost.SlowdownFactor != nil:
+		text += fmt.Sprintf(" x%.0f", *cost.SlowdownFactor)
+	case cost.SlowerThanGlobal:
+		text += " slower"
+	}
+	return text
+}
+
+// throttleLevel colors throttleText with the same thresholds as AutovacuumTableStatus.
+func throttleLevel(text string) int {
+	switch {
+	case text == "global":
+		return 3
+	case strings.HasSuffix(text, " slower"):
+		return 2
+	}
+	if _, factorText, found := strings.Cut(text, " x"); found {
+		if factor, err := strconv.ParseFloat(factorText, 64); err == nil && factor >= 10 {
+			return 2
+		}
+		return 1
+	}
+	return -1
 }
 
 func (m AutovacuumModel) IsInputMode() bool { return m.filterMode }
@@ -51,13 +95,15 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 	if err != nil {
 		return NewErrorModel(err, "Loading autovacuum worker saturation", initialModel)
 	}
-	activity, err := FetchAutovacuumActivity(context.Background(), config.Config.DB)
+	activity, err := FetchVacuumProgress(context.Background(), config.Config.DB)
 	if err != nil {
 		return NewErrorModel(err, "Loading autovacuum activity", initialModel)
 	}
 	activeIsAutovacuum := make(map[string]bool, len(activity))
 	for _, w := range activity {
-		activeIsAutovacuum[w.SchemaName+"."+w.TableName] = w.IsAutovacuum
+		if w.TableName != "" { // vacuums in other databases have no resolvable table
+			activeIsAutovacuum[w.SchemaName+"."+w.TableName] = w.IsAutovacuum
+		}
 	}
 
 	columns := []table.Column{
@@ -66,9 +112,11 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		{Title: "Status", Width: 14},
 		{Title: "Dead Tuples", Width: 12},
 		{Title: "Dead %", Width: 8},
+		{Title: "Trigger", Width: 8},
 		{Title: "Size", Width: 10},
+		{Title: "Throttle", Width: 12},
 		{Title: "Last Autovacuum", Width: 18},
-		{Title: "Autovac Count", Width: 14},
+		{Title: "Autovacs", Width: 9},
 	}
 
 	formatTime := func(t *time.Time) string {
@@ -84,6 +132,10 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 		if av.DeadPct != nil {
 			deadPctStr = fmt.Sprintf("%.1f%%", *av.DeadPct)
 		}
+		triggerStr := "N/A"
+		if av.TriggerRatio != nil {
+			triggerStr = fmt.Sprintf("%.0f%%", *av.TriggerRatio*100)
+		}
 		isAutovacuum, active := activeIsAutovacuum[av.SchemaName+"."+av.TableName]
 		rowsData = append(rowsData, table.Row{
 			av.SchemaName,
@@ -91,7 +143,9 @@ func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
 			vacuumStatusText(isAutovacuum, active),
 			fmt.Sprintf("%d", av.DeadTuples),
 			deadPctStr,
+			triggerStr,
 			av.TotalSize,
+			throttleText(av.Cost),
 			formatTime(av.LastAutovacuum),
 			fmt.Sprintf("%d", av.AutovacuumCount),
 		})
@@ -119,9 +173,11 @@ func (m AutovacuumModel) Init() tea.Cmd { return nil }
 func (m AutovacuumModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
-		// -3 for the worker-saturation line, hint line, and blank line above the table.
-		m.table.SetHeight(TableHeight(msg.Height) - 3)
+		cols := SizeColumnsToContent(m.table.Columns(), m.allRows, autovacuumValueColumns)
+		m.table.SetColumns(FitColumnsToContent(cols, m.allRows, autovacuumNameColumns, msg.Width))
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 	case tea.KeyMsg:
 		if m.filterMode {
@@ -231,6 +287,21 @@ func (m AutovacuumModel) View() string {
 				return 0
 			}
 		}},
+		// Same thresholds as AutovacuumTableStatus: ≥ 100% of the trigger = vacuum due.
+		{Column: 5, Colorize: func(v string) int {
+			f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+			if err != nil {
+				return -1
+			}
+			switch {
+			case f >= 200:
+				return 2
+			case f >= 100:
+				return 1
+			}
+			return -1
+		}},
+		{Column: 7, Colorize: func(v string) int { return throttleLevel(strings.TrimSpace(v)) }},
 	}
 
 	level := 0
@@ -247,7 +318,12 @@ func (m AutovacuumModel) View() string {
 
 	s := RenderHeader("Autovacuum Monitor") + "\n"
 	s += saturationLine + "\n"
-	s += HintStyle.Render("  Status shows what's vacuuming right now; the list below is ranked by dead tuples.") + "\n\n"
+	// MaxWidth keeps the hint on one line, so FitTableHeight's measurement stays exact.
+	hint := HintStyle
+	if m.width > 0 {
+		hint = hint.MaxWidth(m.width)
+	}
+	s += hint.Render("  Trigger = dead tuples vs autovacuum threshold • Throttle = per-table cost override, xN = N times slower than global") + "\n\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)

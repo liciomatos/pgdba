@@ -68,6 +68,8 @@ func TestScreens_FitTerminalHeight(t *testing.T) {
 		"ReplicaIdentity":     func() tea.Model { return CheckReplicaIdentity(dummyInitialModel) },
 		"ReplicationConfig":   func() tea.Model { return CheckReplicationConfig(dummyInitialModel) },
 		"ReplicationStandbys": func() tea.Model { return CheckReplicationStandbys(dummyInitialModel) },
+		"XminHorizon":         func() tea.Model { return CheckXminHorizon(dummyInitialModel) },
+		"VacuumProgress":      func() tea.Model { return CheckVacuumProgress(dummyInitialModel) },
 	}
 
 	for _, height := range []int{24, 40} {

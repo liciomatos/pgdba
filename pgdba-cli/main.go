@@ -313,6 +313,10 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckToastTables(dashboard)), nil
 			case "I":
 				return n.wrapChild(util.CheckReplicaIdentity(dashboard)), nil
+			case "X":
+				return n.wrapChild(util.CheckXminHorizon(dashboard)), nil
+			case "V":
+				return n.wrapChild(util.CheckVacuumProgress(dashboard)), nil
 			}
 		}
 	}

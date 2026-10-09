@@ -12,7 +12,8 @@ import (
 // Serve registers all diagnostic tools and starts the SSE server on the given port.
 // The caller is responsible for ensuring config.Config.DB is connected before calling.
 //
-// Every response uses the same envelope: {"meta": {host, database, server_version},
+// Every response uses the same envelope: {"meta": {host, database, server_version,
+// role, uptime, stats_reset…},
 // "warnings": [parts that failed or need attention], "result": <tool-specific>}.
 //
 // Every tool is annotated read-only/non-destructive: all handlers only run SELECT
@@ -106,7 +107,7 @@ func Serve(port int) error {
 	), handleCheckLongRunningQueries)
 
 	s.AddTool(mcp.NewTool("check_autovacuum",
-		mcp.WithDescription("Tables with the most dead tuples, last vacuum/analyze timestamps, and autovacuum count."),
+		mcp.WithDescription("Tables with the most dead tuples, with each table's autovacuum overrides and effective throttling: cost_delay/cost_limit actually used (table reloption or global, with the -1 fallback to vacuum_cost_* resolved), the resulting throughput in cost units/s and max uncached read MB/s, and how many times slower than the global settings an override makes it (slowdown_factor). trigger_ratio = dead tuples ÷ autovacuum trigger threshold (≥ 1 = vacuum due). status: critical when trigger_ratio ≥ 2 or an override is ≥ 10× slower than global; warning when trigger_ratio ≥ 1, any override is slower than global, or autovacuum is disabled for the table."),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
@@ -204,6 +205,24 @@ func Serve(port int) error {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckReplicaIdentity)
+
+	s.AddTool(mcp.NewTool("check_server_info",
+		mcp.WithDescription("Server identity and statistics context only — the meta block every tool returns: host, database, server_version, role (primary/replica), postmaster start time, uptime, the stats_reset of the database / bgwriter / checkpointer (PG17+) counters with seconds since each reset, and the pg_stat_statements version."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckServerInfo)
+
+	s.AddTool(mcp.NewTool("check_xmin_horizon",
+		mcp.WithDescription("Everything holding back the xmin horizon (what keeps vacuum from removing dead rows and freezing from advancing), oldest first: sessions with an open snapshot or XID, standbys via hot_standby_feedback, replication slots (xmin/catalog_xmin) and prepared transactions. defines_horizon marks the oldest. status per holder: critical when xmin_age ≥ 25% of autovacuum_freeze_max_age, warning from 5% or a transaction open > 1 h. Empty holders = nothing holds the horizon."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckXminHorizon)
+
+	s.AddTool(mcp.NewTool("check_vacuum_progress",
+		mcp.WithDescription("VACUUMs running right now (manual and autovacuum, all databases) from pg_stat_progress_vacuum: table, phase, % of heap blocks scanned/vacuumed, index vacuum passes, dead-tuple memory (tuples on PG ≤ 16, bytes on PG17+), duration, and is_wraparound for anti-wraparound autovacuums. status: warning for anti-wraparound or more than one index pass (dead-tuple memory too small). Empty list = no vacuum running."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckVacuumProgress)
 
 	s.AddTool(mcp.NewTool("check_freeze_by_database",
 		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),

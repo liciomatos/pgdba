@@ -53,9 +53,11 @@ func runTests(m *testing.M) int {
 		// pg_stat_statements must be preloaded at server startup — CREATE EXTENSION
 		// alone fails without this, matching the root docker-compose.yaml setup.
 		// wal_level=logical is required for CREATE PUBLICATION (tested in pub/sub integration tests).
+		// max_prepared_transactions > 0 lets the xmin horizon tests leave a prepared transaction.
 		testcontainers.WithCmd("postgres",
 			"-c", "shared_preload_libraries=pg_stat_statements",
 			"-c", "wal_level=logical",
+			"-c", "max_prepared_transactions=5",
 		),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),

@@ -20,6 +20,19 @@ func strParam(req mcp.CallToolRequest, key, def string) string {
 	return req.GetString(key, def)
 }
 
+// maxQueryChars caps query text in responses: statements can be megabytes long and may
+// carry literals (pg_stat_activity shows them un-normalized).
+const maxQueryChars = 500
+
+// truncateQuery cuts query text to maxQueryChars runes and reports whether it did.
+func truncateQuery(query string) (string, bool) {
+	runes := []rune(query)
+	if len(runes) <= maxQueryChars {
+		return query, false
+	}
+	return string(runes[:maxQueryChars]), true
+}
+
 // formatTime converts a nullable *time.Time to a string for JSON output.
 func formatTime(t *time.Time) string {
 	if t == nil {
@@ -236,18 +249,42 @@ func handleCheckConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 
 // --- autovacuum ---
 
+type autovacuumCostResponse struct {
+	CostDelayMS            float64  `json:"cost_delay_ms"`
+	CostDelaySource        string   `json:"cost_delay_source"` // "table" or "global"
+	CostLimit              float64  `json:"cost_limit"`
+	CostLimitSource        string   `json:"cost_limit_source"`
+	ThroughputPerSec       *float64 `json:"throughput_cost_units_per_sec"` // null = unthrottled
+	MaxReadMBPerSec        *float64 `json:"max_read_mb_per_sec"`
+	GlobalCostDelayMS      float64  `json:"global_cost_delay_ms"`
+	GlobalCostLimit        float64  `json:"global_cost_limit"`
+	GlobalThroughputPerSec *float64 `json:"global_throughput_cost_units_per_sec"`
+	GlobalMaxReadMBPerSec  *float64 `json:"global_max_read_mb_per_sec"`
+	SlowerThanGlobal       bool     `json:"slower_than_global"`
+	SlowdownFactor         *float64 `json:"slowdown_factor"` // global ÷ table throughput
+}
+
 type autovacuumTableResponse struct {
-	SchemaName      string   `json:"schema_name"`
-	TableName       string   `json:"table_name"`
-	DeadTuples      int64    `json:"dead_tuples"`
-	LiveTuples      int64    `json:"live_tuples"`
-	DeadPct         *float64 `json:"dead_pct"`
-	TotalSize       string   `json:"total_size"`
-	LastVacuum      string   `json:"last_vacuum"`
-	LastAnalyze     string   `json:"last_analyze"`
-	LastAutovacuum  string   `json:"last_autovacuum"`
-	LastAutoanalyze string   `json:"last_autoanalyze"`
-	AutovacuumCount int64    `json:"autovacuum_count"`
+	SchemaName        string                 `json:"schema_name"`
+	TableName         string                 `json:"table_name"`
+	Status            string                 `json:"status"`
+	DeadTuples        int64                  `json:"dead_tuples"`
+	LiveTuples        int64                  `json:"live_tuples"`
+	DeadPct           *float64               `json:"dead_pct"`
+	TriggerThreshold  float64                `json:"trigger_threshold_tuples"`
+	TriggerRatio      *float64               `json:"trigger_ratio"` // dead ÷ threshold; ≥ 1 = vacuum due
+	ModSinceAnalyze   int64                  `json:"mod_since_analyze"`
+	TotalSizeBytes    int64                  `json:"total_size_bytes"`
+	TotalSize         string                 `json:"total_size_pretty"`
+	AutovacuumEnabled bool                   `json:"autovacuum_enabled"`
+	HasOverrides      bool                   `json:"has_overrides"`
+	Overrides         map[string]string      `json:"overrides"`
+	Cost              autovacuumCostResponse `json:"cost"`
+	LastVacuum        string                 `json:"last_vacuum"`
+	LastAnalyze       string                 `json:"last_analyze"`
+	LastAutovacuum    string                 `json:"last_autovacuum"`
+	LastAutoanalyze   string                 `json:"last_autoanalyze"`
+	AutovacuumCount   int64                  `json:"autovacuum_count"`
 }
 
 func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -259,17 +296,180 @@ func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	resp := make([]autovacuumTableResponse, 0, len(tables))
 	for _, t := range tables {
 		resp = append(resp, autovacuumTableResponse{
-			SchemaName:      t.SchemaName,
-			TableName:       t.TableName,
-			DeadTuples:      t.DeadTuples,
-			LiveTuples:      t.LiveTuples,
-			DeadPct:         t.DeadPct,
-			TotalSize:       t.TotalSize,
+			SchemaName:        t.SchemaName,
+			TableName:         t.TableName,
+			Status:            util.AutovacuumTableStatus(t).String(),
+			DeadTuples:        t.DeadTuples,
+			LiveTuples:        t.LiveTuples,
+			DeadPct:           t.DeadPct,
+			TriggerThreshold:  t.TriggerThreshold,
+			TriggerRatio:      t.TriggerRatio,
+			ModSinceAnalyze:   t.ModSinceAnalyze,
+			TotalSizeBytes:    t.TotalSizeBytes,
+			TotalSize:         t.TotalSize,
+			AutovacuumEnabled: t.AutovacuumEnabled,
+			HasOverrides:      t.HasOverrides(),
+			Overrides:         t.Overrides,
+			Cost: autovacuumCostResponse{
+				CostDelayMS:            t.Cost.DelayMS,
+				CostDelaySource:        t.Cost.DelaySource,
+				CostLimit:              t.Cost.Limit,
+				CostLimitSource:        t.Cost.LimitSource,
+				ThroughputPerSec:       t.Cost.ThroughputPerSec,
+				MaxReadMBPerSec:        t.Cost.MaxReadMBPerSec,
+				GlobalCostDelayMS:      t.Cost.GlobalDelayMS,
+				GlobalCostLimit:        t.Cost.GlobalLimit,
+				GlobalThroughputPerSec: t.Cost.GlobalThroughputPerSec,
+				GlobalMaxReadMBPerSec:  t.Cost.GlobalMaxReadMBPerSec,
+				SlowerThanGlobal:       t.Cost.SlowerThanGlobal,
+				SlowdownFactor:         t.Cost.SlowdownFactor,
+			},
 			LastVacuum:      formatTime(t.LastVacuum),
 			LastAnalyze:     formatTime(t.LastAnalyze),
 			LastAutovacuum:  formatTime(t.LastAutovacuum),
 			LastAutoanalyze: formatTime(t.LastAutoanalyze),
 			AutovacuumCount: t.AutovacuumCount,
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- server info ---
+
+func handleCheckServerInfo(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// The envelope's meta block is the whole answer; result repeats nothing.
+	return respond(ctx, struct{}{})
+}
+
+// --- xmin horizon ---
+
+type xminHolderResponse struct {
+	Source                string  `json:"source"` // session, replica, slot, prepared
+	ID                    string  `json:"id"`
+	Status                string  `json:"status"`
+	DefinesHorizon        bool    `json:"defines_horizon"`
+	XminAge               int64   `json:"xmin_age_xids"`
+	CatalogOnly           bool    `json:"catalog_only,omitempty"`
+	TransactionStart      *string `json:"xact_start"`
+	TransactionAgeSeconds *int64  `json:"xact_age_seconds"`
+	Database              string  `json:"database,omitempty"`
+	User                  string  `json:"user,omitempty"`
+	State                 string  `json:"state,omitempty"`
+	Application           string  `json:"application,omitempty"`
+	ClientAddr            string  `json:"client_addr,omitempty"`
+	Query                 string  `json:"query,omitempty"`
+	QueryTruncated        bool    `json:"query_truncated,omitempty"`
+}
+
+type xminHorizonResponse struct {
+	HorizonXminAge       *int64               `json:"horizon_xmin_age_xids"` // null when nothing (or only catalog_xmin) holds it
+	HotStandbyFeedback   bool                 `json:"hot_standby_feedback"`
+	FreezeMaxAge         int64                `json:"autovacuum_freeze_max_age"`
+	DatabaseFrozenXIDAge int64                `json:"database_frozen_xid_age"`
+	Holders              []xminHolderResponse `json:"holders"`
+}
+
+func handleCheckXminHorizon(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	horizon, err := util.FetchXminHorizon(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := xminHorizonResponse{
+		HotStandbyFeedback:   horizon.HotStandbyFeedback,
+		FreezeMaxAge:         horizon.FreezeMaxAge,
+		DatabaseFrozenXIDAge: horizon.DatabaseFrozenXIDAge,
+		Holders:              make([]xminHolderResponse, 0, len(horizon.Holders)),
+	}
+	if holder := horizon.HorizonHolder(); holder != nil {
+		resp.HorizonXminAge = &holder.XminAge
+	}
+	for _, holder := range horizon.Holders {
+		var transactionStart *string
+		if holder.TransactionStart != nil {
+			formatted := holder.TransactionStart.Format(time.RFC3339)
+			transactionStart = &formatted
+		}
+		query, truncated := truncateQuery(holder.Query)
+		resp.Holders = append(resp.Holders, xminHolderResponse{
+			Source:                holder.Source,
+			ID:                    holder.ID,
+			Status:                util.XminHolderStatus(holder.XminAge, holder.TransactionAgeSeconds, horizon.FreezeMaxAge).String(),
+			DefinesHorizon:        holder.DefinesHorizon,
+			XminAge:               holder.XminAge,
+			CatalogOnly:           holder.CatalogOnly,
+			TransactionStart:      transactionStart,
+			TransactionAgeSeconds: holder.TransactionAgeSeconds,
+			Database:              holder.Database,
+			User:                  holder.User,
+			State:                 holder.State,
+			Application:           holder.Application,
+			ClientAddr:            holder.ClientAddr,
+			Query:                 query,
+			QueryTruncated:        truncated,
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- vacuum progress ---
+
+type vacuumProgressResponse struct {
+	PID               int      `json:"pid"`
+	Database          string   `json:"database"`
+	SchemaName        string   `json:"schema_name"`
+	TableName         string   `json:"table_name"`
+	RelationID        int64    `json:"relid"`
+	Status            string   `json:"status"`
+	Phase             string   `json:"phase"`
+	IsAutovacuum      bool     `json:"is_autovacuum"`
+	IsWraparound      bool     `json:"is_wraparound"`
+	HeapBlksTotal     int64    `json:"heap_blks_total"`
+	HeapBlksScanned   int64    `json:"heap_blks_scanned"`
+	HeapBlksVacuumed  int64    `json:"heap_blks_vacuumed"`
+	ScannedPct        *float64 `json:"scanned_pct"`
+	VacuumedPct       *float64 `json:"vacuumed_pct"`
+	IndexVacuumCount  int64    `json:"index_vacuum_count"`
+	IndexesTotal      *int64   `json:"indexes_total,omitempty"`
+	IndexesProcessed  *int64   `json:"indexes_processed,omitempty"`
+	DeadTuples        *int64   `json:"num_dead_tuples,omitempty"`
+	MaxDeadTuples     *int64   `json:"max_dead_tuples,omitempty"`
+	DeadTupleBytes    *int64   `json:"dead_tuple_bytes,omitempty"`
+	MaxDeadTupleBytes *int64   `json:"max_dead_tuple_bytes,omitempty"`
+	DeadItemIDs       *int64   `json:"num_dead_item_ids,omitempty"`
+	DurationSeconds   *int64   `json:"duration_seconds"`
+}
+
+func handleCheckVacuumProgress(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	progress, err := util.FetchVacuumProgress(ctx, config.Config.DB)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]vacuumProgressResponse, 0, len(progress))
+	for _, p := range progress {
+		resp = append(resp, vacuumProgressResponse{
+			PID:               p.PID,
+			Database:          p.Database,
+			SchemaName:        p.SchemaName,
+			TableName:         p.TableName,
+			RelationID:        p.RelationID,
+			Status:            util.VacuumProgressStatus(p).String(),
+			Phase:             p.Phase,
+			IsAutovacuum:      p.IsAutovacuum,
+			IsWraparound:      p.IsWraparound,
+			HeapBlksTotal:     p.HeapBlksTotal,
+			HeapBlksScanned:   p.HeapBlksScanned,
+			HeapBlksVacuumed:  p.HeapBlksVacuumed,
+			ScannedPct:        p.ScannedPct(),
+			VacuumedPct:       p.VacuumedPct(),
+			IndexVacuumCount:  p.IndexVacuumCount,
+			IndexesTotal:      p.IndexesTotal,
+			IndexesProcessed:  p.IndexesProcessed,
+			DeadTuples:        p.DeadTuples,
+			MaxDeadTuples:     p.MaxDeadTuples,
+			DeadTupleBytes:    p.DeadTupleBytes,
+			MaxDeadTupleBytes: p.MaxDeadTupleBytes,
+			DeadItemIDs:       p.DeadItemIDs,
+			DurationSeconds:   p.DurationSeconds,
 		})
 	}
 	return respond(ctx, resp)
