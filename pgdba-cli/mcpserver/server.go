@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/liciomatos/pgdba-cli/config"
+	"github.com/liciomatos/pgdba-cli/util"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -117,20 +118,28 @@ func Serve(port int) error {
 	), handleCheckAutovacuum)
 
 	s.AddTool(mcp.NewTool("check_index_usage",
-		mcp.WithDescription("Index scan statistics sorted by scan count (ascending). Highlights invalid and unused indexes."),
+		mcp.WithDescription("Index usage ranked by wasted space: size × (1 − share of the table's index scans), invalid indexes first. Indexes backing PRIMARY KEY / UNIQUE / EXCLUDE constraints are hidden unless include_constraints is true (redundancy is still checked against them, so a duplicate of the PK is flagged). Each index has tup_read_per_scan, table_scan_share_pct, size in bytes, and redundant_with: possible redundancies with another index of the same table (duplicate = same columns, prefix = its columns lead a longer btree index, same_columns_different_order); partial and expression indexes aren't compared. status: critical when INVALID, warning when possibly redundant or never scanned and > 1 MB. Counters accumulate since meta.stats_reset.database."),
 		mcp.WithInteger("limit",
-			mcp.Description("Maximum number of rows to return"),
+			mcp.Description("Maximum number of rows to return (0 = all)"),
 			mcp.DefaultNumber(50),
+		),
+		mcp.WithBoolean("include_constraints",
+			mcp.Description("Also list indexes backing PRIMARY KEY / UNIQUE / EXCLUDE constraints"),
+			mcp.DefaultBool(false),
 		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckIndexUsage)
 
 	s.AddTool(mcp.NewTool("check_cache_hit",
-		mcp.WithDescription("Buffer cache hit ratio per table (heap and index blocks), sorted by heap blocks read descending."),
+		mcp.WithDescription("Buffer cache hit ratios: a summary with heap, index and database ratios — each labeled with its formula, the same numbers check_dashboard and check_memory_stats report — plus per-table heap/index ratios sorted by heap blocks read. Cumulative since the stats reset unless delta_seconds is set: the counters are then read twice that many seconds apart and the ratios cover only that interval. Summary status: critical < 90%, warning < 99%; per table: critical < 70%, warning < 90%."),
 		mcp.WithInteger("limit",
-			mcp.Description("Maximum number of rows to return"),
+			mcp.Description("Maximum number of tables to return (0 = all)"),
 			mcp.DefaultNumber(50),
+		),
+		mcp.WithNumber("delta_seconds",
+			mcp.Description("Measure over this many seconds instead of since the stats reset (0–60; the call waits that long)"),
+			mcp.DefaultNumber(0),
 		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -224,6 +233,36 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckVacuumProgress)
 
+	s.AddTool(mcp.NewTool("check_table_churn",
+		mcp.WithDescription("Write activity per table since the stats reset, ranked by updates: n_tup_ins/upd/del/hot_upd, hot_pct (share of HOT updates), n_tup_newpage_upd (PG16+), fillfactor from reloptions (100 when unset) and sizes in bytes. status: warning when a table has ≥ 10,000 updates and hot_pct < 50, with a hint (lower fillfactor if 100, otherwise updates likely touch indexed columns). include_bloat adds a pgstattuple_approx estimate (dead tuple and free space %) for tables whose heap is ≤ bloat_max_table_bytes — larger tables and servers without the pgstattuple extension get bloat_skipped_reason instead of a full scan."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of tables to return (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithBoolean("include_bloat",
+			mcp.Description("Estimate bloat with pgstattuple_approx (needs the pgstattuple extension and pg_stat_scan_tables or superuser)"),
+			mcp.DefaultBool(false),
+		),
+		mcp.WithNumber("bloat_max_table_bytes",
+			mcp.Description("Skip the bloat estimate for tables whose heap is larger than this (default 10 GiB)"),
+			mcp.DefaultNumber(float64(util.DefaultBloatMaxTableBytes)),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckTableChurn)
+
+	s.AddTool(mcp.NewTool("check_io",
+		mcp.WithDescription("Buffer I/O from pg_stat_io (PG16+) by backend_type, object and context: reads, writes, writebacks, extends, hits, evictions, reuses, fsyncs and bytes, plus who does the relation block writes (relation_writes_by_backend_type) — separating vacuum (context vacuum), checkpointer, background writer and client backends. status: warning when client backends do ≥ 25% of the relation writes in the normal context. On PG13–15 the result is {status: unsupported} with the server version."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckIO)
+
+	s.AddTool(mcp.NewTool("check_wal",
+		mcp.WithDescription("WAL generation from pg_stat_wal (PG14+): wal_records, wal_fpi, wal_bytes, wal_buffers_full, fpi_pct (full-page images as % of records), bytes per record and per second since the reset, with full_page_writes, wal_compression, checkpoint_timeout, max_wal_size and wal_buffers. status: warning when fpi_pct ≥ 30 (checkpoints too frequent; consider max_wal_size/checkpoint_timeout or wal_compression) or wal_buffers_full exceeds 0.1% of records. On PG13 the result is {status: unsupported}."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckWAL)
+
 	s.AddTool(mcp.NewTool("check_freeze_by_database",
 		mcp.WithDescription("XID wraparound risk for every database: age of datfrozenxid and percentage toward PostgreSQL shutdown (2.1B limit)."),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -265,7 +304,11 @@ func Serve(port int) error {
 	), handleCheckTempFiles)
 
 	s.AddTool(mcp.NewTool("check_memory_stats",
-		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers. Parts that fail are listed in warnings while the rest is still returned."),
+		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers. Parts that fail are listed in warnings while the rest is still returned. cache_hit carries the heap, index and database ratios with their formulas (same values as check_dashboard / check_cache_hit); delta_seconds measures them over an interval instead of since the stats reset."),
+		mcp.WithNumber("delta_seconds",
+			mcp.Description("Measure the cache hit ratios over this many seconds instead of since the stats reset (0–60)"),
+			mcp.DefaultNumber(0),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckMemoryStats)

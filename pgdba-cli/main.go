@@ -317,6 +317,10 @@ func (n navigator) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return n.wrapChild(util.CheckXminHorizon(dashboard)), nil
 			case "V":
 				return n.wrapChild(util.CheckVacuumProgress(dashboard)), nil
+			case "H":
+				return n.wrapChild(util.CheckTableChurn(dashboard)), nil
+			case "O":
+				return n.wrapChild(util.CheckIOWAL(dashboard)), nil
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/liciomatos/pgdba-cli/config"
 
@@ -14,19 +15,50 @@ import (
 type IndexUsageModel struct {
 	table        table.Model
 	allRows      []table.Row
+	redundancy   map[string]string // "schema.index" → full redundancy description, for the tip line
 	filterText   string
 	filterMode   bool
 	initialModel func() tea.Model
-	width        int
-	height       int
+	// includeConstraints shows PK / UNIQUE / EXCLUDE indexes too (toggled with c).
+	includeConstraints bool
+	width              int
+	height             int
 }
 
-// indexUsageNameColumns are sized to their content: Schema, Table, Index, Columns.
-var indexUsageNameColumns = []int{0, 1, 2, 3}
+// indexUsageNameColumns are sized to their content: Schema, Table, Index, Columns, Redundant.
+var indexUsageNameColumns = []int{0, 1, 2, 3, 9}
 
-// indexUsageValueColumns (Valid, Scans, Tup Read, Tup Fetch, Size) take exactly the width
+// indexUsageValueColumns (Status, Scans, Share, Tup/Scan, Size) take exactly the width
 // of their longest value — never truncated, and no wasted space taken from the names.
 var indexUsageValueColumns = []int{4, 5, 6, 7, 8}
+
+// indexStatusText spells out why IndexUsageStatus rates an index the way it does.
+func indexStatusText(idx IndexUsage) string {
+	switch {
+	case !idx.IsValid:
+		return "INVALID"
+	case len(idx.RedundantWith) > 0:
+		return "redundant"
+	case IndexUsageStatus(idx) == StatusWarning:
+		return "unused"
+	}
+	return "ok"
+}
+
+// redundancyText lists the indexes that make this one look redundant, e.g.
+// "dup of t_pkey, prefix of t_a_b_idx".
+func redundancyText(redundancies []IndexRedundancy) string {
+	labels := map[string]string{
+		RedundancyDuplicate:   "dup of",
+		RedundancyPrefix:      "prefix of",
+		RedundancySameColumns: "same cols as",
+	}
+	parts := make([]string, 0, len(redundancies))
+	for _, redundancy := range redundancies {
+		parts = append(parts, labels[redundancy.Kind]+" "+redundancy.OtherIndex)
+	}
+	return strings.Join(parts, ", ")
+}
 
 // selectedIndexTip returns the full, untruncated identity of the selected index, shown
 // above the footer because narrow terminals still have to cut long names with "…".
@@ -35,13 +67,22 @@ func (m IndexUsageModel) selectedIndexTip() string {
 	if len(row) < 4 {
 		return ""
 	}
-	return fmt.Sprintf("  %s.%s on %s.%s (%s)", row[0], row[2], row[0], row[1], row[3])
+	tip := fmt.Sprintf("  %s.%s on %s.%s (%s)", row[0], row[2], row[0], row[1], row[3])
+	if redundancy := m.redundancy[row[0]+"."+row[2]]; redundancy != "" {
+		tip += " — possibly redundant: " + redundancy
+	}
+	return tip
 }
 
 func (m IndexUsageModel) IsInputMode() bool { return m.filterMode }
 
 func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
-	indexes, err := FetchIndexUsage(context.Background(), config.Config.DB, NoRowLimit)
+	return checkIndexUsage(initialModel, false)
+}
+
+func checkIndexUsage(initialModel func() tea.Model, includeConstraints bool) tea.Model {
+	indexes, err := FetchIndexUsage(context.Background(), config.Config.DB,
+		IndexUsageOptions{Limit: NoRowLimit, IncludeConstraints: includeConstraints})
 	if err != nil {
 		return NewErrorModel(err, "Loading index usage", initialModel)
 	}
@@ -51,26 +92,36 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		{Title: "Table", Width: 20},
 		{Title: "Index", Width: 28},
 		{Title: "Columns", Width: 20},
-		{Title: "Valid", Width: 9},
+		{Title: "Status", Width: 9},
 		{Title: "Scans", Width: 8},
-		{Title: "Tup Read", Width: 10},
-		{Title: "Tup Fetch", Width: 10},
+		{Title: "Share", Width: 6},
+		{Title: "Tup/Scan", Width: 9},
 		{Title: "Size", Width: 8},
+		{Title: "Redundant", Width: 20},
 	}
 
 	var rowsData []table.Row
+	redundancy := make(map[string]string)
 	for _, idx := range indexes {
-		validStr := "yes"
-		if !idx.IsValid {
-			validStr = "INVALID"
+		share, perScan := "-", "-"
+		if idx.TableScanSharePct != nil {
+			share = fmt.Sprintf("%.0f%%", *idx.TableScanSharePct)
+		}
+		if idx.TupReadPerScan != nil {
+			perScan = fmt.Sprintf("%.1f", *idx.TupReadPerScan)
+		}
+		redundant := redundancyText(idx.RedundantWith)
+		if redundant != "" {
+			redundancy[idx.SchemaName+"."+idx.IndexName] = redundant
 		}
 		rowsData = append(rowsData, table.Row{
 			idx.SchemaName, idx.TableName, idx.IndexName, idx.IndexColumns,
-			validStr,
+			indexStatusText(idx),
 			fmt.Sprintf("%d", idx.IdxScan),
-			fmt.Sprintf("%d", idx.IdxTupRead),
-			fmt.Sprintf("%d", idx.IdxTupFetch),
+			share,
+			perScan,
 			idx.IndexSize,
+			redundant,
 		})
 	}
 
@@ -82,7 +133,10 @@ func CheckIndexUsage(initialModel func() tea.Model) tea.Model {
 		table.WithStyles(DefaultTableStyles()),
 	)
 
-	return IndexUsageModel{table: t, allRows: rowsData, initialModel: initialModel, width: 120, height: 30}
+	return IndexUsageModel{
+		table: t, allRows: rowsData, redundancy: redundancy, initialModel: initialModel,
+		includeConstraints: includeConstraints, width: 120, height: 30,
+	}
 }
 
 func (m IndexUsageModel) Init() tea.Cmd { return nil }
@@ -122,7 +176,7 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(row) >= 3 {
 				schema := row[0]
 				indexName := row[2]
-				back := func() tea.Model { return CheckIndexUsage(m.initialModel) }
+				back := func() tea.Model { return checkIndexUsage(m.initialModel, m.includeConstraints) }
 				return CheckIndexDetail(schema, indexName, back), nil
 			}
 			return m, nil
@@ -132,7 +186,9 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "esc":
 			return m.initialModel(), nil
 		case "r":
-			return CheckIndexUsage(m.initialModel), nil
+			return checkIndexUsage(m.initialModel, m.includeConstraints), nil
+		case "c":
+			return checkIndexUsage(m.initialModel, !m.includeConstraints), nil
 		}
 	}
 
@@ -144,16 +200,12 @@ func (m IndexUsageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m IndexUsageModel) View() string {
 	rules := []ColorRule{
 		{Column: 4, Colorize: func(v string) int {
-			switch v {
-			case "yes":
+			switch strings.TrimSpace(v) {
+			case "ok":
 				return 0
+			case "redundant", "unused":
+				return 1
 			case "INVALID":
-				return 2
-			}
-			return -1
-		}},
-		{Column: 5, Colorize: func(v string) int {
-			if v == "0" {
 				return 2
 			}
 			return -1
@@ -167,6 +219,10 @@ func (m IndexUsageModel) View() string {
 		tip = lipgloss.NewStyle().MaxWidth(m.width).Render(tip)
 	}
 	s += "\n" + HintStyle.Render(tip)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
+	constraintsHint := "c show PK/unique"
+	if m.includeConstraints {
+		constraintsHint = "c hide PK/unique"
+	}
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • "+constraintsHint+" • r refresh • ? help • q back")
 	return s
 }

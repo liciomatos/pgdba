@@ -81,7 +81,8 @@ func TestFetchIndexUsage_CountersMatchKnownWorkload(t *testing.T) {
 	var found *IndexUsage
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		indexes, err := FetchIndexUsage(ctx, testDB, NoRowLimit)
+		// The PK backs a constraint, which is hidden unless asked for.
+		indexes, err := FetchIndexUsage(ctx, testDB, IndexUsageOptions{IncludeConstraints: true})
 		if err != nil {
 			t.Fatal(err)
 		}

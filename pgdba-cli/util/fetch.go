@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ type DashboardResult struct {
 	SlowQueryUnavailableReason string
 	SlowThresholdMS            int
 	CacheHitRatio              *float64 // nil when no table I/O data exists
+	IndexHitRatio              *float64 // idx_blks hit ratio of user tables; nil when no index I/O
 	DeadTuples                 int64
 	InvalidIndexes             int
 	ReplicationSlots           int
@@ -134,17 +136,10 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 		}
 	}
 	run("cache hit", func() error {
-		var cacheHit sql.NullFloat64
-		if err := db.QueryRowContext(ctx, `
-			SELECT ROUND(100.0 * sum(heap_blks_hit) / NULLIF(sum(heap_blks_hit)+sum(heap_blks_read),0), 1)
-			FROM pg_statio_user_tables`,
-		).Scan(&cacheHit); err != nil {
-			return err
-		}
-		if cacheHit.Valid {
-			result.CacheHitRatio = &cacheHit.Float64
-		}
-		return nil
+		// Same source as Memory & Checkpoint Stats, so both screens show the same numbers.
+		summary, err := FetchCacheHitSummary(ctx, db)
+		result.CacheHitRatio, result.IndexHitRatio = summary.HeapHitPct, summary.IdxHitPct
+		return err
 	})
 	run("dead tuples", func() error {
 		return db.QueryRowContext(ctx, `SELECT COALESCE(sum(n_dead_tup),0) FROM pg_stat_user_tables`).Scan(&result.DeadTuples)
@@ -794,104 +789,369 @@ func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable,
 	return results, rows.Err()
 }
 
-// IndexUsage holds per-index usage statistics from pg_stat_user_indexes.
-type IndexUsage struct {
-	SchemaName   string
-	TableName    string
-	IndexName    string
-	IndexColumns string
-	IsValid      bool
-	IdxScan      int64
-	IdxTupRead   int64
-	IdxTupFetch  int64
-	IndexSize    string
+// Redundancy kinds reported in IndexRedundancy.Kind.
+const (
+	RedundancyDuplicate   = "duplicate"                    // same columns in the same order
+	RedundancyPrefix      = "prefix"                       // its columns are a leading prefix of the other index's
+	RedundancySameColumns = "same_columns_different_order" // same column set, different order
+)
+
+// IndexRedundancy says that an index looks redundant because of another index on the
+// same table. It is a *possible* redundancy: operator classes, collations and INCLUDE
+// columns aren't compared.
+type IndexRedundancy struct {
+	OtherIndex string
+	Kind       string
 }
 
-func FetchIndexUsage(ctx context.Context, db *sql.DB, limit int) ([]IndexUsage, error) {
+// IndexUsage holds per-index usage statistics from pg_stat_user_indexes.
+type IndexUsage struct {
+	SchemaName     string
+	TableName      string
+	IndexName      string
+	IndexColumns   string
+	IsValid        bool
+	IsPrimary      bool
+	IsUnique       bool
+	IsConstraint   bool // backs a PRIMARY KEY, UNIQUE or EXCLUDE constraint
+	AccessMethod   string
+	IsPartial      bool
+	HasExpressions bool
+	ColumnNumbers  []int64 // pg_index.indkey (key columns only)
+	IdxScan        int64
+	IdxTupRead     int64
+	IdxTupFetch    int64
+	IndexSize      string
+	IndexSizeBytes int64
+	// TupReadPerScan is idx_tup_read / idx_scan: how many entries a scan returns on
+	// average (high values hint at a poorly selective index). nil without scans.
+	TupReadPerScan *float64
+	// TableScanSharePct is this index's share of the scans of all indexes on its table;
+	// nil when no index of the table was ever scanned.
+	TableScanSharePct *float64
+	RedundantWith     []IndexRedundancy
+}
+
+// WasteScore ranks indexes by how much space they take for how little they're used:
+// size × (1 − share of the table's index scans). A big index that serves 7% of its
+// table's scans ranks high; a tiny unused PK ranks low.
+func (idx IndexUsage) WasteScore() float64 {
+	share := 0.0
+	if idx.TableScanSharePct != nil {
+		share = *idx.TableScanSharePct / 100
+	}
+	return float64(idx.IndexSizeBytes) * (1 - share)
+}
+
+// IndexUsageOptions controls FetchIndexUsage. A zero Limit returns every index.
+type IndexUsageOptions struct {
+	Limit int
+	// IncludeConstraints keeps indexes that back PRIMARY KEY / UNIQUE / EXCLUDE
+	// constraints; they can't be dropped on their own, so they're hidden by default.
+	IncludeConstraints bool
+}
+
+// FetchIndexUsage returns index statistics ranked by WasteScore (invalid indexes
+// first), with possible redundancies detected across all indexes of each table —
+// constraint indexes included, so a plain index duplicating the primary key is
+// flagged even when constraint indexes are hidden.
+func FetchIndexUsage(ctx context.Context, db *sql.DB, opts IndexUsageOptions) ([]IndexUsage, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			s.schemaname,
-			s.relname AS tablename,
-			s.indexrelname AS indexname,
+			s.relname,
+			s.indexrelname,
 			s.idx_scan,
 			s.idx_tup_read,
 			s.idx_tup_fetch,
-			pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size,
-			i.indisvalid AS is_valid,
+			pg_relation_size(s.indexrelid),
+			pg_size_pretty(pg_relation_size(s.indexrelid)),
+			i.indisvalid,
+			i.indisprimary,
+			i.indisunique,
+			EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = s.indexrelid AND con.contype IN ('p', 'u', 'x')),
+			am.amname,
+			i.indpred IS NOT NULL,
+			i.indexprs IS NOT NULL,
+			-- indkey lists INCLUDE columns too; only the first indnkeyatts are key columns.
+			(i.indkey::int2[])[0:i.indnkeyatts - 1]::int8[],
 			COALESCE((
 				SELECT string_agg(a.attname, ', ' ORDER BY x.ord)
-				FROM pg_index ix
-				JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ord) ON true
-				JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = x.attnum
-				WHERE ix.indexrelid = s.indexrelid AND x.attnum > 0
-			), '(expression)') AS index_columns
+				FROM unnest(i.indkey) WITH ORDINALITY AS x(attnum, ord)
+				JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = x.attnum
+				WHERE x.attnum > 0
+			), '(expression)')
 		FROM pg_stat_user_indexes s
 		JOIN pg_index i ON i.indexrelid = s.indexrelid
-		ORDER BY s.idx_scan ASC
-		LIMIT NULLIF($1::int, 0)`, limit)
+		JOIN pg_class ic ON ic.oid = s.indexrelid
+		JOIN pg_am am ON am.oid = ic.relam`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var results []IndexUsage
+	var all []IndexUsage
 	for rows.Next() {
 		var idx IndexUsage
+		var columnNumbers pq.Int64Array
 		if err := rows.Scan(
 			&idx.SchemaName, &idx.TableName, &idx.IndexName,
 			&idx.IdxScan, &idx.IdxTupRead, &idx.IdxTupFetch,
-			&idx.IndexSize, &idx.IsValid, &idx.IndexColumns,
+			&idx.IndexSizeBytes, &idx.IndexSize, &idx.IsValid, &idx.IsPrimary, &idx.IsUnique,
+			&idx.IsConstraint, &idx.AccessMethod, &idx.IsPartial, &idx.HasExpressions,
+			&columnNumbers, &idx.IndexColumns,
 		); err != nil {
 			return nil, err
 		}
-		results = append(results, idx)
+		idx.ColumnNumbers = []int64(columnNumbers)
+		if idx.IdxScan > 0 {
+			perScan := float64(idx.IdxTupRead) / float64(idx.IdxScan)
+			idx.TupReadPerScan = &perScan
+		}
+		all = append(all, idx)
 	}
-	return results, rows.Err()
-}
-
-// CacheHitTable holds buffer cache hit statistics from pg_statio_user_tables.
-type CacheHitTable struct {
-	TableName        string
-	HeapBlksRead     int64
-	HeapBlksHit      int64
-	CacheHitRatio    float64
-	IdxBlksRead      int64
-	IdxBlksHit       int64
-	IdxCacheHitRatio float64
-}
-
-func FetchCacheHit(ctx context.Context, db *sql.DB, limit int) ([]CacheHitTable, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT
-			relname,
-			heap_blks_read,
-			heap_blks_hit,
-			CASE WHEN heap_blks_hit + heap_blks_read = 0 THEN 0
-				 ELSE ROUND(100.0 * heap_blks_hit / (heap_blks_hit + heap_blks_read), 2)
-			END AS cache_hit_ratio,
-			idx_blks_read,
-			idx_blks_hit,
-			CASE WHEN idx_blks_hit + idx_blks_read = 0 THEN 0
-				 ELSE ROUND(100.0 * idx_blks_hit / (idx_blks_hit + idx_blks_read), 2)
-			END AS idx_cache_hit_ratio
-		FROM pg_statio_user_tables
-		ORDER BY heap_blks_read DESC
-		LIMIT NULLIF($1::int, 0)`, limit)
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var results []CacheHitTable
-	for rows.Next() {
-		var t CacheHitTable
-		if err := rows.Scan(
-			&t.TableName, &t.HeapBlksRead, &t.HeapBlksHit, &t.CacheHitRatio,
-			&t.IdxBlksRead, &t.IdxBlksHit, &t.IdxCacheHitRatio,
-		); err != nil {
-			return nil, err
-		}
-		results = append(results, t)
+
+	byTable := map[string][]int{}
+	for i, idx := range all {
+		key := idx.SchemaName + "." + idx.TableName
+		byTable[key] = append(byTable[key], i)
 	}
-	return results, rows.Err()
+	for _, positions := range byTable {
+		var tableScans int64
+		for _, i := range positions {
+			tableScans += all[i].IdxScan
+		}
+		if tableScans > 0 {
+			for _, i := range positions {
+				share := float64(all[i].IdxScan) / float64(tableScans) * 100
+				all[i].TableScanSharePct = &share
+			}
+		}
+		group := make([]*IndexUsage, 0, len(positions))
+		for _, i := range positions {
+			group = append(group, &all[i])
+		}
+		detectRedundantIndexes(group)
+	}
+
+	results := make([]IndexUsage, 0, len(all))
+	for _, idx := range all {
+		if opts.IncludeConstraints || !idx.IsConstraint {
+			results = append(results, idx)
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].IsValid != results[j].IsValid {
+			return !results[i].IsValid
+		}
+		if scoreI, scoreJ := results[i].WasteScore(), results[j].WasteScore(); scoreI != scoreJ {
+			return scoreI > scoreJ
+		}
+		return results[i].SchemaName+"."+results[i].IndexName < results[j].SchemaName+"."+results[j].IndexName
+	})
+	if opts.Limit > 0 && len(results) > opts.Limit {
+		results = results[:opts.Limit]
+	}
+	return results, nil
+}
+
+// detectRedundantIndexes compares every pair of indexes of one table and records
+// possible redundancies. Partial and expression indexes are skipped (their predicates
+// and expressions aren't compared), as are pairs with different access methods. A
+// unique index is never called redundant because of a non-unique one: it enforces a
+// constraint the other can't.
+func detectRedundantIndexes(indexes []*IndexUsage) {
+	for _, candidate := range indexes {
+		for _, other := range indexes {
+			if candidate == other || candidate.IsPartial || other.IsPartial ||
+				candidate.HasExpressions || other.HasExpressions ||
+				candidate.AccessMethod != other.AccessMethod ||
+				len(candidate.ColumnNumbers) == 0 || len(other.ColumnNumbers) == 0 {
+				continue
+			}
+			if candidate.IsUnique && !other.IsUnique {
+				continue
+			}
+			kind := ""
+			switch {
+			case slices.Equal(candidate.ColumnNumbers, other.ColumnNumbers):
+				kind = RedundancyDuplicate
+			case len(candidate.ColumnNumbers) < len(other.ColumnNumbers) &&
+				slices.Equal(candidate.ColumnNumbers, other.ColumnNumbers[:len(candidate.ColumnNumbers)]) &&
+				candidate.AccessMethod == "btree" && !candidate.IsUnique:
+				// Only btree can serve a search on leading columns from a longer index;
+				// a unique prefix still enforces its own, stricter uniqueness.
+				kind = RedundancyPrefix
+			case len(candidate.ColumnNumbers) == len(other.ColumnNumbers) && sameColumnSet(candidate.ColumnNumbers, other.ColumnNumbers):
+				kind = RedundancySameColumns
+			}
+			if kind != "" {
+				candidate.RedundantWith = append(candidate.RedundantWith, IndexRedundancy{OtherIndex: other.IndexName, Kind: kind})
+			}
+		}
+	}
+}
+
+func sameColumnSet(left, right []int64) bool {
+	sortedLeft, sortedRight := slices.Clone(left), slices.Clone(right)
+	slices.Sort(sortedLeft)
+	slices.Sort(sortedRight)
+	return slices.Equal(sortedLeft, sortedRight)
+}
+
+// Cache hit formulas, reported next to each ratio so two numbers for "the cache hit"
+// can't be confused again (heap-only of user tables vs every block of the database).
+const (
+	HeapHitFormula     = "sum(heap_blks_hit) / (sum(heap_blks_hit) + sum(heap_blks_read)) over pg_statio_user_tables — table data blocks of user tables in this database"
+	IndexHitFormula    = "sum(idx_blks_hit) / (sum(idx_blks_hit) + sum(idx_blks_read)) over pg_statio_user_tables — index blocks of user tables in this database"
+	DatabaseHitFormula = "blks_hit / (blks_hit + blks_read) from pg_stat_database for this database — every block read: tables, indexes, TOAST and system catalogs"
+)
+
+// CacheHitSummary is the share of block requests served from shared_buffers, split
+// by what was read. Ratios are nil when nothing was read in the period.
+type CacheHitSummary struct {
+	HeapHitPct       *float64
+	IdxHitPct        *float64
+	DatabaseHitPct   *float64
+	HeapBlksHit      int64
+	HeapBlksRead     int64
+	IdxBlksHit       int64
+	IdxBlksRead      int64
+	DatabaseBlksHit  int64
+	DatabaseBlksRead int64
+}
+
+// CacheHitTable holds buffer cache hit statistics for one user table.
+type CacheHitTable struct {
+	SchemaName   string
+	TableName    string
+	HeapBlksRead int64
+	HeapBlksHit  int64
+	HeapHitPct   *float64 // nil when the table had no heap block requests
+	IdxBlksRead  int64
+	IdxBlksHit   int64
+	IdxHitPct    *float64
+}
+
+// CacheHitReport is the summary plus per-table ratios, either cumulative since the
+// last stats reset (IntervalSeconds 0) or over a measured interval.
+type CacheHitReport struct {
+	IntervalSeconds float64
+	Summary         CacheHitSummary
+	Tables          []CacheHitTable
+}
+
+func hitPct(hit, read int64) *float64 {
+	if hit+read <= 0 {
+		return nil
+	}
+	pct := float64(hit) / float64(hit+read) * 100
+	return &pct
+}
+
+type cacheCounterSnapshot struct {
+	tables           map[int64]CacheHitTable // by relid
+	databaseBlksHit  int64
+	databaseBlksRead int64
+}
+
+func fetchCacheCounters(ctx context.Context, db *sql.DB) (cacheCounterSnapshot, error) {
+	snapshot := cacheCounterSnapshot{tables: map[int64]CacheHitTable{}}
+	if err := db.QueryRowContext(ctx,
+		`SELECT blks_hit, blks_read FROM pg_stat_database WHERE datname = current_database()`,
+	).Scan(&snapshot.databaseBlksHit, &snapshot.databaseBlksRead); err != nil {
+		return snapshot, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT relid::bigint, schemaname, relname,
+		       COALESCE(heap_blks_read, 0), COALESCE(heap_blks_hit, 0),
+		       COALESCE(idx_blks_read, 0), COALESCE(idx_blks_hit, 0)
+		FROM pg_statio_user_tables`)
+	if err != nil {
+		return snapshot, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var relid int64
+		var t CacheHitTable
+		if err := rows.Scan(&relid, &t.SchemaName, &t.TableName, &t.HeapBlksRead, &t.HeapBlksHit, &t.IdxBlksRead, &t.IdxBlksHit); err != nil {
+			return snapshot, err
+		}
+		snapshot.tables[relid] = t
+	}
+	return snapshot, rows.Err()
+}
+
+// FetchCacheHitReport returns cache hit ratios. With interval 0 they're cumulative
+// since the last stats reset; otherwise the counters are read twice, interval apart,
+// and the ratios cover only that period (tables are then ranked by blocks read in it).
+func FetchCacheHitReport(ctx context.Context, db *sql.DB, interval time.Duration, limit int) (CacheHitReport, error) {
+	report := CacheHitReport{IntervalSeconds: interval.Seconds()}
+	end, err := fetchCacheCounters(ctx, db)
+	if err != nil {
+		return report, err
+	}
+	start := cacheCounterSnapshot{tables: map[int64]CacheHitTable{}}
+	if interval > 0 {
+		start = end
+		select {
+		case <-time.After(interval):
+		case <-ctx.Done():
+			return report, ctx.Err()
+		}
+		// Each read runs in its own transaction, so PG15+'s stats_fetch_consistency =
+		// cache can't hand the first snapshot back again.
+		if end, err = fetchCacheCounters(ctx, db); err != nil {
+			return report, err
+		}
+	}
+	summary := &report.Summary
+	summary.DatabaseBlksHit = end.databaseBlksHit - start.databaseBlksHit
+	summary.DatabaseBlksRead = end.databaseBlksRead - start.databaseBlksRead
+	for relid, current := range end.tables {
+		previous := start.tables[relid]
+		t := current
+		t.HeapBlksRead -= previous.HeapBlksRead
+		t.HeapBlksHit -= previous.HeapBlksHit
+		t.IdxBlksRead -= previous.IdxBlksRead
+		t.IdxBlksHit -= previous.IdxBlksHit
+		t.HeapHitPct = hitPct(t.HeapBlksHit, t.HeapBlksRead)
+		t.IdxHitPct = hitPct(t.IdxBlksHit, t.IdxBlksRead)
+		summary.HeapBlksHit += t.HeapBlksHit
+		summary.HeapBlksRead += t.HeapBlksRead
+		summary.IdxBlksHit += t.IdxBlksHit
+		summary.IdxBlksRead += t.IdxBlksRead
+		report.Tables = append(report.Tables, t)
+	}
+	summary.HeapHitPct = hitPct(summary.HeapBlksHit, summary.HeapBlksRead)
+	summary.IdxHitPct = hitPct(summary.IdxBlksHit, summary.IdxBlksRead)
+	summary.DatabaseHitPct = hitPct(summary.DatabaseBlksHit, summary.DatabaseBlksRead)
+	sort.Slice(report.Tables, func(i, j int) bool {
+		if report.Tables[i].HeapBlksRead != report.Tables[j].HeapBlksRead {
+			return report.Tables[i].HeapBlksRead > report.Tables[j].HeapBlksRead
+		}
+		return report.Tables[i].SchemaName+"."+report.Tables[i].TableName < report.Tables[j].SchemaName+"."+report.Tables[j].TableName
+	})
+	if limit > 0 && len(report.Tables) > limit {
+		report.Tables = report.Tables[:limit]
+	}
+	return report, nil
+}
+
+// FetchCacheHitSummary returns the cumulative heap, index and database hit ratios —
+// the single source for every screen and tool that shows a cache hit ratio.
+func FetchCacheHitSummary(ctx context.Context, db *sql.DB) (CacheHitSummary, error) {
+	report, err := FetchCacheHitReport(ctx, db, 0, 0)
+	return report.Summary, err
+}
+
+// FetchCacheHit returns per-table cache hit ratios since the last stats reset,
+// ranked by heap blocks read.
+func FetchCacheHit(ctx context.Context, db *sql.DB, limit int) ([]CacheHitTable, error) {
+	report, err := FetchCacheHitReport(ctx, db, 0, limit)
+	return report.Tables, err
 }
 
 // WaitEvent is one grouped wait event from pg_stat_activity.
@@ -2639,13 +2899,13 @@ type CheckpointStats struct {
 	StatsReset          string
 }
 
-// MemoryStats aggregates memory-related config, the cluster-wide buffer cache hit ratio,
+// MemoryStats aggregates memory-related config, the buffer cache hit ratios,
 // and checkpoint/background writer activity — all derived from SQL only, so it works
 // against remote servers where OS-level CPU/RAM metrics are not reachable.
 type MemoryStats struct {
-	Configs       []MemoryConfig
-	CacheHitRatio float64
-	Checkpoint    CheckpointStats
+	Configs    []MemoryConfig
+	CacheHit   CacheHitSummary
+	Checkpoint CheckpointStats
 	// Warnings lists the parts that failed ("part: error"); their fields keep zero values.
 	Warnings []string
 }
@@ -2660,7 +2920,7 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 		fetch func(context.Context, *sql.DB, *MemoryStats) error
 	}{
 		{"memory settings", fetchMemoryConfigs},
-		{"cache hit", fetchClusterCacheHit},
+		{"cache hit", fetchMemoryCacheHit},
 		{"checkpoints", fetchCheckpointStats},
 	} {
 		if err := part.fetch(ctx, db, &stats); err != nil {
@@ -2706,18 +2966,10 @@ func fetchMemoryConfigs(ctx context.Context, db *sql.DB, stats *MemoryStats) err
 	return rows.Err()
 }
 
-func fetchClusterCacheHit(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
-	var hit, read int64
-	if err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(blks_hit), 0), COALESCE(SUM(blks_read), 0)
-		FROM pg_stat_database`,
-	).Scan(&hit, &read); err != nil {
-		return err
-	}
-	if total := hit + read; total > 0 {
-		stats.CacheHitRatio = float64(hit) / float64(total) * 100
-	}
-	return nil
+func fetchMemoryCacheHit(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
+	summary, err := FetchCacheHitSummary(ctx, db)
+	stats.CacheHit = summary
+	return err
 }
 
 func fetchCheckpointStats(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
@@ -3421,4 +3673,319 @@ func FetchReplicaIdentityIssues(ctx context.Context, db *sql.DB) ([]ReplicaIdent
 		results = append(results, issue)
 	}
 	return results, rows.Err()
+}
+
+// --- Table churn (HOT updates) ---
+
+// TableChurn is the write activity of one table since the last stats reset, with how
+// many of its updates were HOT (heap-only: no index maintenance, the old version can be
+// pruned without vacuum).
+type TableChurn struct {
+	SchemaName string
+	TableName  string
+	Inserts    int64
+	Updates    int64
+	Deletes    int64
+	HotUpdates int64
+	// NewPageUpdates are updates whose new row version went to another page (PG16+);
+	// nil before. A HOT update needs room on the same page, so a high count with a low
+	// HOT % points at full pages.
+	NewPageUpdates *int64
+	HotPct         *float64 // nil without updates
+	Fillfactor     int      // from reloptions; 100 (the heap default) when not set
+	FillfactorSet  bool
+	LiveTuples     int64
+	DeadTuples     int64
+	TableSizeBytes int64 // heap only, the part pgstattuple_approx scans
+	TotalSizeBytes int64
+	TotalSize      string
+}
+
+// FetchTableChurn returns user tables ranked by updates since the last stats reset.
+func FetchTableChurn(ctx context.Context, db *sql.DB, limit int) ([]TableChurn, error) {
+	// n_tup_newpage_upd was added in PG16.
+	newPageColumn := "NULL::bigint"
+	if pgMajorVersion() >= 16 {
+		newPageColumn = "s.n_tup_newpage_upd"
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			s.schemaname, s.relname,
+			s.n_tup_ins, s.n_tup_upd, s.n_tup_del, s.n_tup_hot_upd, `+newPageColumn+`,
+			s.n_live_tup, s.n_dead_tup,
+			COALESCE(c.reloptions, '{}'),
+			pg_relation_size(c.oid),
+			pg_total_relation_size(c.oid),
+			pg_size_pretty(pg_total_relation_size(c.oid))
+		FROM pg_stat_user_tables s
+		JOIN pg_class c ON c.oid = s.relid
+		ORDER BY s.n_tup_upd DESC, s.n_tup_ins + s.n_tup_del DESC, s.schemaname, s.relname
+		LIMIT NULLIF($1::int, 0)`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []TableChurn{}
+	for rows.Next() {
+		var t TableChurn
+		var reloptions pq.StringArray
+		if err := rows.Scan(&t.SchemaName, &t.TableName, &t.Inserts, &t.Updates, &t.Deletes, &t.HotUpdates,
+			&t.NewPageUpdates, &t.LiveTuples, &t.DeadTuples, &reloptions,
+			&t.TableSizeBytes, &t.TotalSizeBytes, &t.TotalSize); err != nil {
+			return nil, err
+		}
+		t.Fillfactor = 100
+		if raw, ok := parseReloptions(reloptions)["fillfactor"]; ok {
+			if value, err := strconv.Atoi(raw); err == nil {
+				t.Fillfactor, t.FillfactorSet = value, true
+			}
+		}
+		if t.Updates > 0 {
+			pct := float64(t.HotUpdates) / float64(t.Updates) * 100
+			t.HotPct = &pct
+		}
+		results = append(results, t)
+	}
+	return results, rows.Err()
+}
+
+// TableBloatEstimate is pgstattuple_approx's view of one table. SkippedReason is set
+// (and the numbers are zero) when the estimate wasn't taken.
+type TableBloatEstimate struct {
+	TableLenBytes   int64
+	ScannedPct      float64 // share of pages actually read; the rest is estimated from the visibility map
+	DeadTupleBytes  int64
+	DeadTuplePct    float64
+	ApproxFreeBytes int64
+	ApproxFreePct   float64
+	SkippedReason   string
+}
+
+// DefaultBloatMaxTableBytes is the largest heap FetchTableBloat estimates by default.
+const DefaultBloatMaxTableBytes = 10 << 30
+
+// FetchTableBloat estimates bloat for the given tables with pgstattuple_approx, which
+// reads only the pages the visibility map doesn't mark all-visible. Tables whose heap
+// is larger than maxTableBytes are still skipped so the call stays cheap; so is
+// everything when pgstattuple isn't installed. Per-table failures (typically missing
+// pg_stat_scan_tables privileges) become that table's SkippedReason.
+func FetchTableBloat(ctx context.Context, db *sql.DB, tables []TableChurn, maxTableBytes int64) (map[string]TableBloatEstimate, error) {
+	estimates := make(map[string]TableBloatEstimate, len(tables))
+	var installed bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgstattuple')`).Scan(&installed); err != nil {
+		return nil, err
+	}
+	for _, t := range tables {
+		key := t.SchemaName + "." + t.TableName
+		switch {
+		case !installed:
+			estimates[key] = TableBloatEstimate{SkippedReason: "pgstattuple extension not installed (CREATE EXTENSION pgstattuple)"}
+			continue
+		case maxTableBytes > 0 && t.TableSizeBytes > maxTableBytes:
+			estimates[key] = TableBloatEstimate{SkippedReason: fmt.Sprintf("heap is %d bytes, above bloat_max_table_bytes (%d)", t.TableSizeBytes, maxTableBytes)}
+			continue
+		}
+		var estimate TableBloatEstimate
+		// format('%I.%I') quotes the identifiers server-side.
+		err := db.QueryRowContext(ctx, `
+			SELECT table_len, scanned_percent, dead_tuple_len, dead_tuple_percent, approx_free_space, approx_free_percent
+			FROM pgstattuple_approx(format('%I.%I', $1::text, $2::text)::regclass)`,
+			t.SchemaName, t.TableName,
+		).Scan(&estimate.TableLenBytes, &estimate.ScannedPct, &estimate.DeadTupleBytes, &estimate.DeadTuplePct,
+			&estimate.ApproxFreeBytes, &estimate.ApproxFreePct)
+		if err != nil {
+			estimate = TableBloatEstimate{SkippedReason: err.Error()}
+		}
+		estimates[key] = estimate
+	}
+	return estimates, nil
+}
+
+// --- I/O and WAL statistics ---
+
+// UnsupportedError is returned when the connected server is too old for a view.
+type UnsupportedError struct {
+	Feature       string
+	MinVersion    int
+	ServerVersion string
+}
+
+func (e UnsupportedError) Error() string {
+	return fmt.Sprintf("%s requires PostgreSQL %d or later (server is %s)", e.Feature, e.MinVersion, e.ServerVersion)
+}
+
+// IOStatsRow is one pg_stat_io row: I/O done by one backend type, on one kind of
+// object, in one context. Byte totals are op_bytes × count on PG16–17 and the native
+// *_bytes columns on PG18+.
+type IOStatsRow struct {
+	BackendType string
+	Object      string // relation, temp relation (and wal on PG18+)
+	Context     string // normal, vacuum, bulkread, bulkwrite (and init on PG18+)
+	Reads       int64
+	ReadBytes   int64
+	Writes      int64
+	WriteBytes  int64
+	Writebacks  int64
+	Extends     int64
+	ExtendBytes int64
+	Hits        int64
+	Evictions   int64
+	Reuses      int64
+	Fsyncs      int64
+}
+
+// IOShare is one backend type's share of all relation block writes.
+type IOShare struct {
+	BackendType string
+	Writes      int64
+	Pct         float64
+}
+
+// IOStats is pg_stat_io without its all-zero rows, plus who writes relation blocks.
+type IOStats struct {
+	Rows []IOStatsRow
+	// WritesByBackend splits writes of relation blocks (object = 'relation') by backend
+	// type; a large "client backend" share means backends evict dirty buffers
+	// themselves because the background writer and checkpointer can't keep up.
+	WritesByBackend []IOShare
+	// ClientBackendWritePct is the client backends' share in the normal context —
+	// excluding their bulk-write/vacuum ring buffers, where writing is expected.
+	ClientBackendWritePct *float64
+	StatsReset            *time.Time
+}
+
+// FetchIOStats reads pg_stat_io (PG16+); older servers get an UnsupportedError.
+func FetchIOStats(ctx context.Context, db *sql.DB) (IOStats, error) {
+	var stats IOStats
+	if pgMajorVersion() < 16 {
+		return stats, UnsupportedError{Feature: "pg_stat_io", MinVersion: 16, ServerVersion: config.Config.Version}
+	}
+	// PG18 replaced op_bytes with per-operation byte columns.
+	bytesColumns := `COALESCE(reads * op_bytes, 0), COALESCE(writes * op_bytes, 0), COALESCE(extends * op_bytes, 0)`
+	if pgMajorVersion() >= 18 {
+		bytesColumns = `COALESCE(read_bytes, 0)::bigint, COALESCE(write_bytes, 0)::bigint, COALESCE(extend_bytes, 0)::bigint`
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT backend_type, object, context,
+		       COALESCE(reads, 0), COALESCE(writes, 0), COALESCE(writebacks, 0), COALESCE(extends, 0),
+		       COALESCE(hits, 0), COALESCE(evictions, 0), COALESCE(reuses, 0), COALESCE(fsyncs, 0),
+		       `+bytesColumns+`, stats_reset
+		FROM pg_stat_io
+		WHERE COALESCE(reads, 0) + COALESCE(writes, 0) + COALESCE(extends, 0) + COALESCE(hits, 0)
+		    + COALESCE(evictions, 0) + COALESCE(fsyncs, 0) + COALESCE(writebacks, 0) > 0
+		ORDER BY COALESCE(writes, 0) + COALESCE(reads, 0) DESC, backend_type, object, context`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	writesByBackend := map[string]int64{}
+	var relationWrites, clientNormalWrites, normalWrites int64
+	for rows.Next() {
+		var row IOStatsRow
+		var reset *time.Time
+		if err := rows.Scan(&row.BackendType, &row.Object, &row.Context,
+			&row.Reads, &row.Writes, &row.Writebacks, &row.Extends, &row.Hits, &row.Evictions, &row.Reuses, &row.Fsyncs,
+			&row.ReadBytes, &row.WriteBytes, &row.ExtendBytes, &reset); err != nil {
+			return stats, err
+		}
+		if reset != nil && (stats.StatsReset == nil || reset.After(*stats.StatsReset)) {
+			stats.StatsReset = reset
+		}
+		if row.Object == "relation" {
+			writesByBackend[row.BackendType] += row.Writes
+			relationWrites += row.Writes
+			if row.Context == "normal" {
+				normalWrites += row.Writes
+				if row.BackendType == "client backend" {
+					clientNormalWrites += row.Writes
+				}
+			}
+		}
+		stats.Rows = append(stats.Rows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+	for backendType, writes := range writesByBackend {
+		if writes == 0 {
+			continue
+		}
+		stats.WritesByBackend = append(stats.WritesByBackend, IOShare{
+			BackendType: backendType, Writes: writes, Pct: float64(writes) / float64(relationWrites) * 100,
+		})
+	}
+	sort.Slice(stats.WritesByBackend, func(i, j int) bool {
+		return stats.WritesByBackend[i].Writes > stats.WritesByBackend[j].Writes
+	})
+	if normalWrites > 0 {
+		pct := float64(clientNormalWrites) / float64(normalWrites) * 100
+		stats.ClientBackendWritePct = &pct
+	}
+	return stats, nil
+}
+
+// WALStats is pg_stat_wal (PG14+) with the ratios that explain WAL volume, plus the
+// settings that drive it.
+type WALStats struct {
+	Records     int64
+	FPI         int64 // full-page images: first change to a page after each checkpoint
+	Bytes       int64
+	BuffersFull int64 // times WAL had to be written because wal_buffers was full
+	StatsReset  *time.Time
+	// SecondsSinceReset is nil when the counters were never reset.
+	SecondsSinceReset *int64
+	FullPageWrites    string
+	WALCompression    string
+	CheckpointTimeout string
+	MaxWALSize        string
+	WALBuffers        string
+}
+
+// FPIPct is full-page images as a share of WAL records; nil without records.
+func (w WALStats) FPIPct() *float64 { return ratioPct(w.FPI, w.Records) }
+
+// BytesPerRecord is the average WAL record size; nil without records.
+func (w WALStats) BytesPerRecord() *float64 {
+	if w.Records <= 0 {
+		return nil
+	}
+	value := float64(w.Bytes) / float64(w.Records)
+	return &value
+}
+
+// BytesPerSecond is the average WAL rate since the last reset; nil when never reset.
+func (w WALStats) BytesPerSecond() *float64 {
+	if w.SecondsSinceReset == nil || *w.SecondsSinceReset <= 0 {
+		return nil
+	}
+	value := float64(w.Bytes) / float64(*w.SecondsSinceReset)
+	return &value
+}
+
+func ratioPct(part, total int64) *float64 {
+	if total <= 0 {
+		return nil
+	}
+	pct := float64(part) / float64(total) * 100
+	return &pct
+}
+
+// FetchWALStats reads pg_stat_wal (PG14+); PG13 gets an UnsupportedError. Only the
+// columns common to PG14–18 are used: PG18 moved wal_write/wal_sync to pg_stat_io.
+func FetchWALStats(ctx context.Context, db *sql.DB) (WALStats, error) {
+	var stats WALStats
+	if pgMajorVersion() < 14 {
+		return stats, UnsupportedError{Feature: "pg_stat_wal", MinVersion: 14, ServerVersion: config.Config.Version}
+	}
+	err := db.QueryRowContext(ctx, `
+		SELECT wal_records, wal_fpi, wal_bytes::bigint, wal_buffers_full, stats_reset,
+		       EXTRACT(EPOCH FROM (now() - stats_reset))::bigint,
+		       current_setting('full_page_writes'), current_setting('wal_compression'),
+		       current_setting('checkpoint_timeout'), current_setting('max_wal_size'),
+		       current_setting('wal_buffers')
+		FROM pg_stat_wal`,
+	).Scan(&stats.Records, &stats.FPI, &stats.Bytes, &stats.BuffersFull, &stats.StatsReset, &stats.SecondsSinceReset,
+		&stats.FullPageWrites, &stats.WALCompression, &stats.CheckpointTimeout, &stats.MaxWALSize, &stats.WALBuffers)
+	return stats, err
 }
