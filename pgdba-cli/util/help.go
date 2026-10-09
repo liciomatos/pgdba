@@ -375,12 +375,16 @@ var screenHelp = map[string]ScreenHelp{
 			{"Type", "CPU = running, not waiting (green); Lock = row/table locks (red); IO, LWLock, BufferPin = storage and internal contention (yellow); Client = waiting for the application inside a transaction."},
 			{"Event / AAS / Distribution", "specific wait event; average number of sessions in it per sample (the RDS Performance Insights unit); share of all sampled sessions. The line above the table gives the total, which equals the sum of the AAS column."},
 		},
+		Keys: []HelpItem{
+			{"enter", "the statements behind the selected event: AAS each one spent on it and its share of the event (Performance Insights' top SQL)"},
+		},
 		Reading: []string{
-			"Sessions in state 'idle' (waiting for their client's next query, Client:ClientRead) and background processes idling in their main loop (wait type Activity) are excluded — they used to dominate a single snapshot without saying anything.",
+			"Sessions in state 'idle' (waiting for their client's next query, Client:ClientRead) background processes idling in their main loop (wait type Activity) and walsenders waiting for new WAL (Client:WalSenderWaitForWal) are excluded — they used to dominate a single snapshot without saying anything.",
 			"One second of samples is still short: refresh (r) a few times, or use the MCP check_wait_events tool, which samples for 20 s by default.",
 			"Many Lock waits → Blocked Queries (4). Many IO waits → check Cache Hit (8) and Temp Files (t).",
+			"Statements are told apart by query_id (PG14+, computed when pg_stat_statements is loaded) and shown with pg_stat_statements' normalized text ($1 for literals); otherwise, or on PG13, pg_stat_activity's text is shown as is, literals included. Background processes appear as (backend type).",
 		},
-		Source: "pg_stat_activity (wait_event_type, wait_event)",
+		Source: "pg_stat_activity (wait_event_type, wait_event, query_id PG14+, query), pg_stat_statements (normalized query text)",
 	},
 	"freeze": {
 		Title:   "Freeze Monitor (key f) — transaction ID wraparound risk",
