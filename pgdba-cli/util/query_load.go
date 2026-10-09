@@ -20,8 +20,11 @@ type QueryLoadModel struct {
 	detailMode   bool
 	detailText   string
 	initialModel func() tea.Model
-	width        int
-	height       int
+	// versionWarning asks for ALTER EXTENSION ... UPDATE when pg_stat_statements is
+	// older than the server's; "" otherwise.
+	versionWarning string
+	width          int
+	height         int
 }
 
 func (m QueryLoadModel) IsInputMode() bool { return m.filterMode }
@@ -80,12 +83,13 @@ func CheckQueryLoad(initialModel func() tea.Model) tea.Model {
 	)
 
 	return QueryLoadModel{
-		table:        t,
-		allRows:      rowsData,
-		queryDetails: details,
-		initialModel: initialModel,
-		width:        120,
-		height:       30,
+		table:          t,
+		allRows:        rowsData,
+		queryDetails:   details,
+		initialModel:   initialModel,
+		versionWarning: pgStatStatementsVersionWarning(),
+		width:          120,
+		height:         30,
 	}
 }
 
@@ -98,7 +102,7 @@ func (m QueryLoadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		cols := StretchColumn(m.table.Columns(), 1, msg.Width)
 		m.table.SetColumns(cols)
-		m.table.SetHeight(TableHeight(msg.Height))
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 	case tea.KeyMsg:
 		if m.detailMode {
@@ -184,6 +188,9 @@ func (m QueryLoadModel) View() string {
 	s := RenderHeader("Query Load") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + legend
+	if m.versionWarning != "" {
+		s += "\n" + strings.TrimSuffix(RenderWarnings([]string{m.versionWarning}, m.width), "\n")
+	}
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
 	return s
 }

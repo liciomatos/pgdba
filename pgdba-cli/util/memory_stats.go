@@ -119,6 +119,9 @@ func (m MemoryStatsModel) View() string {
 			"More checkpoints happened on demand than on schedule — consider raising max_wal_size.") + "\n"
 	}
 
+	if len(m.stats.Warnings) > 0 {
+		s += "\n" + RenderWarnings(m.stats.Warnings, m.width)
+	}
 	s += "\n" + FooterStyle.Render("↑↓ navigate • r refresh • ? help • q back")
 	return s
 }

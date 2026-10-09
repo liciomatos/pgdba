@@ -112,8 +112,16 @@ Check*(initialModel) → Fetch*(ctx, db, params) → []XxxResult → table.Row �
 
 **MCP flow:**
 ```
-handleXxx(ctx, req) → Fetch*(ctx, db, params) → []XxxResult → json.Marshal → ToolResult
+handleXxx(ctx, req) → Fetch*(ctx, db, params) → []XxxResult → respond(ctx, result, warnings...) → ToolResult
 ```
+
+Every handler answers through `respond` (`mcpserver/envelope.go`), which wraps the payload in
+`{"meta": {...}, "warnings": [...], "result": ...}` — never `json.Marshal` a bare result.
+Composite `Fetch*` functions (dashboard, memory stats) read each part independently and
+collect failures in a `Warnings []string` field instead of returning the first error; pass
+those to `respond`. Anything reading `pg_stat_statements` must build its column names and
+relation from `FetchPgStatStatementsInfo` — the timing columns were renamed in 1.8 and old
+extension versions survive major upgrades.
 
 When adding a new diagnostic:
 1. Add `FetchMyThing(ctx, db, params)` to `util/fetch.go` returning a typed struct.

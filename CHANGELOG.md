@@ -5,6 +5,33 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **MCP responses use a single envelope** — every tool now returns
+  `{"meta": {host, database, server_version}, "warnings": [...], "result": ...}` instead of
+  a bare array/object. Clients that parsed the old shape must read `result`.
+- **`check_pg_config` output is small by default**: without arguments it returns only the
+  key tuning parameters (memory, autovacuum, checkpoint, WAL, planner, timeouts, logging)
+  without descriptions. New `scope` (`key`/`modified`/`all`), `only_modified`, `limit`,
+  `offset` and `include_description` parameters; responses carry `total`/`returned`.
+- **Long Running Queries lists client backends only** by default; background processes
+  (autovacuum, walsenders) are opt-in via the MCP `include_background` parameter. Responses
+  add client address, backend type and wait event.
+- **Dashboard and Memory & Checkpoint Stats tolerate partial failures**: each part is read
+  independently, and a failing one (missing extension, permission denied) is listed as a
+  warning — a yellow line in the TUI, `warnings` in the MCP — instead of failing the whole
+  screen. `slow_query_count` is `null` with `slow_query_unavailable_reason` instead of `-1`.
+
+### Fixed
+- **Slow Queries, Query Load and the dashboard failed on pg_stat_statements < 1.8**
+  (`column "total_exec_time" does not exist`), common after a major upgrade without
+  `ALTER EXTENSION ... UPDATE`. The extension version is detected and the pre-1.8
+  `total_time`/`mean_time` columns are used; a warning suggests the update when the
+  extension is older than the server's. The view is also schema-qualified, so an extension
+  installed outside the `search_path` works.
+- **`check_long_running_queries` / Blocked Queries crashed on NULL user names**
+  (`converting NULL to string is unsupported`) when a background process such as an
+  autovacuum worker was involved.
+
 ## [0.7.0] - 2026-10-03
 
 ### Added

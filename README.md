@@ -140,6 +140,29 @@ database sizes, temp file usage, memory & checkpoint stats, pub/sub monitoring, 
 Every tool only runs `SELECT` queries and is annotated `readOnlyHint`/non-destructive,
 so MCP clients don't need to treat calls as risky.
 
+Every tool answers with the same envelope:
+
+```json
+{
+  "meta":     {"host": "db1", "database": "app", "server_version": "16.4"},
+  "warnings": ["pg_stat_statements 1.7 is older than the 1.10 this server ships; run ALTER EXTENSION pg_stat_statements UPDATE;"],
+  "result":   { "...": "tool-specific payload" }
+}
+```
+
+`warnings` lists the parts that failed without aborting the call (composite tools such as
+`check_dashboard` read each part independently) and things that need attention. Notable
+parameters:
+
+| Tool | Parameter | Default | Effect |
+|---|---|---|---|
+| `check_pg_config` | `scope` | `key` (no filter) / `all` (with `filter`) | `key` = curated tuning parameters; `modified` = changed from the built-in default; `all` |
+| `check_pg_config` | `limit` / `offset` / `include_description` | `100` / `0` / `false` | paging; `short_desc` per parameter |
+| `check_long_running_queries` | `include_background` | `false` | also list autovacuum workers, walsenders and other background processes |
+
+Tools that read `pg_stat_statements` work with every extension version (the timing columns
+were renamed in 1.8) and report `pg_stat_statements_version`.
+
 ## Screenshots
 
 ### Dashboard
@@ -255,7 +278,7 @@ From the main dashboard, open each screen with its shortcut key:
 | Key | Screen | Description | Actions |
 |---|---|---|---|
 | `1` | **Slow Queries** | Top queries by average execution time¹ | — |
-| `2` | **Long Running Queries** | Active queries running longer than 5 seconds | `k` kill session |
+| `2` | **Long Running Queries** | Client sessions whose query runs longer than 5 seconds | `k` kill session |
 | `3` | **Replication Slots** | Slots, plugin, WAL lag, and safe WAL size | `d` drop slot, `s` streaming standbys, `p` replication config |
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
 | `5` | **Connections** | Connections by state with % of limit used | — |

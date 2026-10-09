@@ -30,7 +30,7 @@ type LongRunningQueriesModel struct {
 func (m LongRunningQueriesModel) IsInputMode() bool { return m.filterMode }
 
 func CheckLongRunningQueries(initialModel func() tea.Model) tea.Model {
-	queries, err := FetchLongRunningQueries(context.Background(), config.Config.DB, 5, NoRowLimit)
+	queries, err := FetchLongRunningQueries(context.Background(), config.Config.DB, 5, NoRowLimit, false)
 	if err != nil {
 		return NewErrorModel(err, "Loading long running queries", initialModel)
 	}

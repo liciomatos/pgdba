@@ -21,8 +21,11 @@ type SlowQueriesModel struct {
 	detailMode   bool
 	detailText   string
 	initialModel func() tea.Model
-	width        int
-	height       int
+	// versionWarning asks for ALTER EXTENSION ... UPDATE when pg_stat_statements is
+	// older than the server's; "" otherwise.
+	versionWarning string
+	width          int
+	height         int
 }
 
 func (m SlowQueriesModel) IsInputMode() bool { return m.filterMode }
@@ -80,13 +83,25 @@ func IdentifySlowQueries(initialModel func() tea.Model) tea.Model {
 	)
 
 	return SlowQueriesModel{
-		table:        t,
-		allRows:      rowsData,
-		queryDetails: details,
-		initialModel: initialModel,
-		width:        120,
-		height:       30,
+		table:          t,
+		allRows:        rowsData,
+		queryDetails:   details,
+		initialModel:   initialModel,
+		versionWarning: pgStatStatementsVersionWarning(),
+		width:          120,
+		height:         30,
 	}
+}
+
+// pgStatStatementsVersionWarning returns the ALTER EXTENSION hint for an outdated
+// pg_stat_statements, or "" (also when the version can't be read — the screen's own
+// query already reports real failures).
+func pgStatStatementsVersionWarning() string {
+	info, err := FetchPgStatStatementsInfo(context.Background(), config.Config.DB)
+	if err != nil {
+		return ""
+	}
+	return info.UpdateHint()
 }
 
 func (m SlowQueriesModel) Init() tea.Cmd { return nil }
@@ -98,7 +113,7 @@ func (m SlowQueriesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		cols := StretchColumn(m.table.Columns(), 1, msg.Width)
 		m.table.SetColumns(cols)
-		m.table.SetHeight(TableHeight(msg.Height))
+		FitTableHeight(&m.table, TableHeight(msg.Height), msg.Height, func() string { return m.View() })
 		return m, nil
 	case tea.KeyMsg:
 		if m.detailMode {
@@ -177,6 +192,9 @@ func (m SlowQueriesModel) View() string {
 	}
 	s := RenderHeader("Slow Queries") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
+	if m.versionWarning != "" {
+		s += "\n" + strings.TrimSuffix(RenderWarnings([]string{m.versionWarning}, m.width), "\n")
+	}
 	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • r refresh • ? help • q back")
 	return s
 }

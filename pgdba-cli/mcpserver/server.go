@@ -12,6 +12,9 @@ import (
 // Serve registers all diagnostic tools and starts the SSE server on the given port.
 // The caller is responsible for ensuring config.Config.DB is connected before calling.
 //
+// Every response uses the same envelope: {"meta": {host, database, server_version},
+// "warnings": [parts that failed or need attention], "result": <tool-specific>}.
+//
 // Every tool is annotated read-only/non-destructive: all handlers only run SELECT
 // queries via Fetch*, never Exec or DDL. Without these hints, MCP clients assume
 // the worst and treat every tool as potentially destructive.
@@ -22,7 +25,7 @@ func Serve(port int) error {
 
 	// --- tools without parameters ---
 	s.AddTool(mcp.NewTool("check_dashboard",
-		mcp.WithDescription("PostgreSQL health summary: connections, active/blocked queries, cache hit ratio, dead tuples, invalid indexes, replication slots."),
+		mcp.WithDescription("PostgreSQL health summary: connections, active/blocked queries, cache hit ratio, dead tuples, invalid indexes, replication slots. Each part runs independently: a failing part (e.g. pg_stat_statements missing) is listed in warnings and the rest is still returned; slow_query_count is null with slow_query_unavailable_reason when pg_stat_statements can't be read."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckDashboard)
@@ -71,7 +74,7 @@ func Serve(port int) error {
 
 	// --- tools with optional parameters ---
 	s.AddTool(mcp.NewTool("check_slow_queries",
-		mcp.WithDescription("Top queries by mean execution time from pg_stat_statements. Requires the pg_stat_statements extension."),
+		mcp.WithDescription("Top queries by mean execution time from pg_stat_statements. Requires the pg_stat_statements extension; works with every extension version (pre-1.8 total_time/mean_time columns included) and reports pg_stat_statements_version, with a warning when ALTER EXTENSION pg_stat_statements UPDATE is due."),
 		mcp.WithNumber("threshold_ms",
 			mcp.Description("Minimum mean execution time in ms to include a query"),
 			mcp.DefaultNumber(1000.0),
@@ -85,10 +88,14 @@ func Serve(port int) error {
 	), handleCheckSlowQueries)
 
 	s.AddTool(mcp.NewTool("check_long_running_queries",
-		mcp.WithDescription("Active queries running longer than the given threshold."),
+		mcp.WithDescription("Non-idle sessions whose current query runs longer than the given threshold, with user, application, client address, backend type and wait event. Client backends only unless include_background is true (autovacuum workers, walsenders, … have no user)."),
 		mcp.WithInteger("min_duration_seconds",
 			mcp.Description("Minimum query duration in seconds"),
 			mcp.DefaultNumber(5),
+		),
+		mcp.WithBoolean("include_background",
+			mcp.Description("Also include background processes (autovacuum workers, walsenders, parallel workers, …)"),
+			mcp.DefaultBool(false),
 		),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
@@ -129,7 +136,7 @@ func Serve(port int) error {
 	), handleCheckCacheHit)
 
 	s.AddTool(mcp.NewTool("check_query_load",
-		mcp.WithDescription("Top queries by total execution time from pg_stat_statements, with load percentage and buffer/temp usage. Requires pg_stat_statements."),
+		mcp.WithDescription("Top queries by total execution time from pg_stat_statements, with load percentage and buffer/temp usage. Requires pg_stat_statements (any version; pre-1.8 column names handled) and reports pg_stat_statements_version."),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
@@ -139,10 +146,30 @@ func Serve(port int) error {
 	), handleCheckQueryLoad)
 
 	s.AddTool(mcp.NewTool("check_pg_config",
-		mcp.WithDescription("PostgreSQL runtime parameters from pg_settings. Optionally filter by name or category substring."),
+		mcp.WithDescription("PostgreSQL runtime parameters from pg_settings (name, setting, unit, source, category, pending_restart). Without arguments returns only the key tuning parameters (memory, autovacuum, checkpoint, WAL, planner, timeouts, logging) without descriptions, so the output stays small. Paged with limit/offset; total tells how many rows matched."),
 		mcp.WithString("filter",
-			mcp.Description("Substring to match against parameter name or category (case-insensitive). Empty returns all."),
+			mcp.Description("Substring to match against parameter name or category (case-insensitive). When set, scope defaults to all."),
 			mcp.DefaultString(""),
+		),
+		mcp.WithString("scope",
+			mcp.Description("key = curated tuning parameters (default without filter); modified = changed from the built-in default (source not default/override/client); all = every parameter (default with a filter)"),
+			mcp.Enum("key", "modified", "all"),
+		),
+		mcp.WithBoolean("only_modified",
+			mcp.Description("Shortcut for scope=modified"),
+			mcp.DefaultBool(false),
+		),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of settings to return (0 = no limit)"),
+			mcp.DefaultNumber(100),
+		),
+		mcp.WithInteger("offset",
+			mcp.Description("Number of matching settings to skip, for paging"),
+			mcp.DefaultNumber(0),
+		),
+		mcp.WithBoolean("include_description",
+			mcp.Description("Include pg_settings.short_desc for each parameter"),
+			mcp.DefaultBool(false),
 		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -219,7 +246,7 @@ func Serve(port int) error {
 	), handleCheckTempFiles)
 
 	s.AddTool(mcp.NewTool("check_memory_stats",
-		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers."),
+		mcp.WithDescription("Memory-related config (shared_buffers, work_mem, ...), cluster-wide buffer cache hit ratio, and checkpoint/background writer activity. SQL-only, works against remote servers. Parts that fail are listed in warnings while the rest is still returned."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckMemoryStats)

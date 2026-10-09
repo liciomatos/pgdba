@@ -96,16 +96,16 @@ func CheckDashboard() tea.Model {
 
 	slowLabel := fmt.Sprintf("Slow queries (>%dms)", threshold)
 	var slowMetric dashboardMetric
-	if data.SlowQueryCount == -1 {
+	if data.SlowQueryCount == nil {
 		slowMetric = dashboardMetric{slowLabel, "N/A", 1}
 	} else {
 		slowLevel := 0
-		if data.SlowQueryCount > 20 {
+		if *data.SlowQueryCount > 20 {
 			slowLevel = 2
-		} else if data.SlowQueryCount > 5 {
+		} else if *data.SlowQueryCount > 5 {
 			slowLevel = 1
 		}
-		slowMetric = dashboardMetric{slowLabel, fmt.Sprintf("%d", data.SlowQueryCount), slowLevel}
+		slowMetric = dashboardMetric{slowLabel, fmt.Sprintf("%d", *data.SlowQueryCount), slowLevel}
 	}
 
 	var commitMetric dashboardMetric
@@ -192,6 +192,31 @@ func CheckDashboard() tea.Model {
 	sections := []metricSection{activitySection, storageSection, walReplicationSection()}
 	if len(serverSection.pairs) > 0 {
 		sections = append(sections, serverSection)
+	}
+	// Parts that failed are listed instead of failing the whole dashboard; the
+	// pg_stat_statements reason explains the N/A slow-query count.
+	warnings := data.Warnings
+	if data.SlowQueryCount == nil && data.SlowQueryUnavailableReason != "" {
+		warnings = append([]string{"slow queries: " + data.SlowQueryUnavailableReason}, warnings...)
+	}
+	if len(warnings) > 0 {
+		warningSection := metricSection{name: "Warnings"}
+		for _, warning := range warnings {
+			part, message, found := strings.Cut(warning, ": ")
+			if !found {
+				part, message = "", warning
+			}
+			// Keep each warning on one line; the full text is in the MCP check_dashboard output.
+			if runes := []rune(strings.ReplaceAll(message, "\n", " ")); len(runes) > 90 {
+				message = string(runes[:89]) + "…"
+			} else {
+				message = string(runes)
+			}
+			warningSection.pairs = append(warningSection.pairs, metricPair{
+				left: dashboardMetric{part, message, 1},
+			})
+		}
+		sections = append(sections, warningSection)
 	}
 
 	return DashboardModel{

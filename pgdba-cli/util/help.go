@@ -51,7 +51,7 @@ var screenHelp = map[string]ScreenHelp{
 			{"Active / Wait events", "sessions running a query now; sessions waiting on something (lock, I/O, …) — yellow ≥ 5, red ≥ 20."},
 			{"Blocked queries", "sessions waiting on a lock held by another session — red when > 0 (key 4)."},
 			{"Long-running (>60s)", "non-idle sessions running for more than a minute; yellow ≥ 1, red ≥ 5 (key 2)."},
-			{"Slow queries", "pg_stat_statements entries whose mean time exceeds --slow-ms; yellow > 5, red > 20 (key 1). N/A without pg_stat_statements."},
+			{"Slow queries", "pg_stat_statements entries whose mean time exceeds --slow-ms; yellow > 5, red > 20 (key 1). N/A without pg_stat_statements — the reason is listed under Warnings."},
 			{"Dead tuples", "total across user tables; yellow > 10k, red > 100k (key 6)."},
 			{"Temp files / Invalid indexes / DB size", "temp spill since stats reset (key t); indexes left INVALID by a failed CREATE INDEX CONCURRENTLY (key 7); database size (key S)."},
 			{"Slot WAL retained", "WAL kept by the slot that retains the most vs max_slot_wal_keep_size — yellow ≥ 50%, red ≥ 80%; yellow when the limit is -1 (unlimited: a stalled slot can fill the disk) (key 3)."},
@@ -60,6 +60,7 @@ var screenHelp = map[string]ScreenHelp{
 			{"Replication", "worst lag of physical standbys and of logical subscribers fed by this server — yellow > 64 MB / 10 s, red > 1 GB / 60 s; this server's subscriptions with apply/sync errors (PG15+) and conflicts (PG18+), yellow when > 0."},
 			{"Freeze", "oldest database's XID age toward the 2.1B wraparound limit — yellow > 7.1%, red > 8.6% (key f)."},
 			{"up …", "server uptime, on the connection line."},
+			{"Warnings", "parts of the dashboard that could not be read (missing extension, permission denied on a view, outdated pg_stat_statements). Each part is read on its own, so one failure never hides the rest."},
 		},
 		Keys: []HelpItem{
 			{"1-0", "slow queries, long running, replication slots, blocked queries, connections, autovacuum, index usage, cache hit, users, roles"},
@@ -91,13 +92,14 @@ var screenHelp = map[string]ScreenHelp{
 		Reading: []string{
 			"Mean (ms) is yellow above the threshold and red above twice the threshold.",
 			"Slow ≠ expensive: a 2 s query run twice a day matters less than a 50 ms query run a million times — use Query Load (L) for total cost.",
-			"Requires the pg_stat_statements extension (shared_preload_libraries + CREATE EXTENSION).",
+			"Requires the pg_stat_statements extension (shared_preload_libraries + CREATE EXTENSION). Any extension version works: before 1.8 the columns are total_time/mean_time.",
+			"A yellow ⚠ line means the extension is older than the version this server ships (common after a major upgrade): run ALTER EXTENSION pg_stat_statements UPDATE.",
 		},
-		Source: "pg_stat_statements (mean_exec_time > --slow-ms)",
+		Source: "pg_stat_statements (mean_exec_time, or mean_time before 1.8, > --slow-ms)",
 	},
 	"long_running": {
 		Title:   "Long Running Queries (key 2) — sessions busy for too long",
-		Purpose: "Shows non-idle sessions whose current statement started more than 5 seconds ago: stuck queries, runaway reports, and 'idle in transaction' sessions that hold locks and block vacuum.",
+		Purpose: "Shows client sessions whose current statement started more than 5 seconds ago: stuck queries, runaway reports, and 'idle in transaction' sessions that hold locks and block vacuum. Background processes (autovacuum, walsenders) are left out.",
 		Columns: []HelpItem{
 			{"PID", "backend process id (use it with pg_cancel_backend / pg_terminate_backend)."},
 			{"User / Application", "who is running it and from which client (application_name)."},
@@ -114,7 +116,7 @@ var screenHelp = map[string]ScreenHelp{
 			"Terminating rolls back the session's open transaction. Prefer asking the owner first; there is no 'cancel only' action here.",
 			"Long 'idle in transaction' sessions prevent vacuum from removing dead rows everywhere, not just in the tables they touched.",
 		},
-		Source: "pg_stat_activity (state <> 'idle' and now() - query_start > 5 s)",
+		Source: "pg_stat_activity (backend_type = 'client backend', state <> 'idle' and now() - query_start > 5 s)",
 	},
 	"replication_slots": {
 		Title:   "Replication Slots (key 3) — WAL retained by physical and logical slots",
@@ -350,7 +352,8 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Reading: []string{
 			"A cheap query called very often can top this list: caching or batching it may beat any index.",
-			"Requires pg_stat_statements; counters accumulate since pg_stat_statements_reset().",
+			"Requires pg_stat_statements (any version; before 1.8 the column is total_time); counters accumulate since pg_stat_statements_reset().",
+			"A yellow ⚠ line means the extension is outdated for this server: run ALTER EXTENSION pg_stat_statements UPDATE.",
 		},
 		Source: "pg_stat_statements",
 	},
@@ -411,7 +414,10 @@ var screenHelp = map[string]ScreenHelp{
 			{"Checkpoints timed vs requested", "requested checkpoints are forced by WAL volume; many of them mean max_wal_size is too small."},
 			{"Buffers backend", "PG ≤ 16: pages written by backends themselves — high values mean the background writer can't keep up (not available on PG17+)."},
 		},
-		Reading: []string{"PG17+ reads checkpoint counters from pg_stat_checkpointer instead of pg_stat_bgwriter."},
+		Reading: []string{
+			"PG17+ reads checkpoint counters from pg_stat_checkpointer instead of pg_stat_bgwriter.",
+			"Settings, cache hit and checkpoints are read independently; a part that fails is shown as a yellow ⚠ line and the rest still loads.",
+		},
 		Source:  "pg_settings, pg_stat_database, pg_stat_bgwriter, pg_stat_checkpointer (PG17+)",
 	},
 	"pub_sub": {
