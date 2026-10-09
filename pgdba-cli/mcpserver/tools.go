@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,15 +9,6 @@ import (
 	"github.com/liciomatos/pgdba-cli/util"
 	"github.com/mark3labs/mcp-go/mcp"
 )
-
-// jsonResult serializes v as a JSON tool result.
-func jsonResult(v any) (*mcp.CallToolResult, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
-}
 
 // intParam reads an integer parameter from the request with a default fallback.
 func intParam(req mcp.CallToolRequest, key string, def int) int {
@@ -41,19 +31,22 @@ func formatTime(t *time.Time) string {
 // --- dashboard ---
 
 type dashboardResponse struct {
-	Host             string   `json:"host"`
-	Database         string   `json:"database"`
-	UsedConnections  int      `json:"used_connections"`
-	MaxConnections   int      `json:"max_connections"`
-	ConnectionPct    float64  `json:"connection_pct"`
-	ActiveQueries    int      `json:"active_queries"`
-	BlockedQueries   int      `json:"blocked_queries"`
-	SlowQueryCount   int      `json:"slow_query_count"`
-	SlowThresholdMS  int      `json:"slow_threshold_ms"`
-	CacheHitRatio    *float64 `json:"cache_hit_ratio"`
-	DeadTuples       int64    `json:"dead_tuples"`
-	InvalidIndexes   int      `json:"invalid_indexes"`
-	ReplicationSlots int      `json:"replication_slots"`
+	Host            string  `json:"host"`
+	Database        string  `json:"database"`
+	UsedConnections int     `json:"used_connections"`
+	MaxConnections  int     `json:"max_connections"`
+	ConnectionPct   float64 `json:"connection_pct"`
+	ActiveQueries   int     `json:"active_queries"`
+	BlockedQueries  int     `json:"blocked_queries"`
+	// SlowQueryCount is null when pg_stat_statements can't be queried; the reason is
+	// in SlowQueryUnavailableReason.
+	SlowQueryCount             *int     `json:"slow_query_count"`
+	SlowQueryUnavailableReason string   `json:"slow_query_unavailable_reason,omitempty"`
+	SlowThresholdMS            int      `json:"slow_threshold_ms"`
+	CacheHitRatio              *float64 `json:"cache_hit_ratio"`
+	DeadTuples                 int64    `json:"dead_tuples"`
+	InvalidIndexes             int      `json:"invalid_indexes"`
+	ReplicationSlots           int      `json:"replication_slots"`
 }
 
 func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -65,21 +58,22 @@ func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return jsonResult(dashboardResponse{
-		Host:             data.Host,
-		Database:         data.Database,
-		UsedConnections:  data.UsedConnections,
-		MaxConnections:   data.MaxConnections,
-		ConnectionPct:    data.ConnectionPct,
-		ActiveQueries:    data.ActiveQueries,
-		BlockedQueries:   data.BlockedQueries,
-		SlowQueryCount:   data.SlowQueryCount,
-		SlowThresholdMS:  data.SlowThresholdMS,
-		CacheHitRatio:    data.CacheHitRatio,
-		DeadTuples:       data.DeadTuples,
-		InvalidIndexes:   data.InvalidIndexes,
-		ReplicationSlots: data.ReplicationSlots,
-	})
+	return respond(ctx, dashboardResponse{
+		Host:                       data.Host,
+		Database:                   data.Database,
+		UsedConnections:            data.UsedConnections,
+		MaxConnections:             data.MaxConnections,
+		ConnectionPct:              data.ConnectionPct,
+		ActiveQueries:              data.ActiveQueries,
+		BlockedQueries:             data.BlockedQueries,
+		SlowQueryCount:             data.SlowQueryCount,
+		SlowQueryUnavailableReason: data.SlowQueryUnavailableReason,
+		SlowThresholdMS:            data.SlowThresholdMS,
+		CacheHitRatio:              data.CacheHitRatio,
+		DeadTuples:                 data.DeadTuples,
+		InvalidIndexes:             data.InvalidIndexes,
+		ReplicationSlots:           data.ReplicationSlots,
+	}, data.Warnings...)
 }
 
 // --- slow queries ---
@@ -92,6 +86,23 @@ type slowQueryResponse struct {
 	MeanExecTimeMS   float64 `json:"mean_exec_time_ms"`
 	StddevExecTimeMS float64 `json:"stddev_exec_time_ms"`
 	Rows             int     `json:"rows"`
+}
+
+// pgStatStatementsResult wraps rows read from pg_stat_statements with the extension
+// version they were read with (column names differ before 1.8).
+type pgStatStatementsResult struct {
+	PgStatStatementsVersion string `json:"pg_stat_statements_version"`
+	Queries                 any    `json:"queries"`
+}
+
+// pgStatStatementsVersion returns the installed extension version and, when it is
+// older than the server's, the ALTER EXTENSION warning.
+func pgStatStatementsVersion(ctx context.Context) (string, string) {
+	info, err := util.FetchPgStatStatementsInfo(ctx, config.Config.DB)
+	if err != nil {
+		return "", "reading pg_stat_statements version: " + err.Error()
+	}
+	return info.Version, info.UpdateHint()
 }
 
 func handleCheckSlowQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -113,7 +124,8 @@ func handleCheckSlowQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			Rows:             q.Rows,
 		})
 	}
-	return jsonResult(resp)
+	version, warning := pgStatStatementsVersion(ctx)
+	return respond(ctx, pgStatStatementsResult{PgStatStatementsVersion: version, Queries: resp}, warning)
 }
 
 // --- long running queries ---
@@ -122,7 +134,11 @@ type longRunningQueryResponse struct {
 	PID             int     `json:"pid"`
 	Username        string  `json:"username"`
 	ApplicationName string  `json:"application_name"`
+	ClientAddr      string  `json:"client_addr"`
+	BackendType     string  `json:"backend_type"`
 	State           string  `json:"state"`
+	WaitEventType   string  `json:"wait_event_type"`
+	WaitEvent       string  `json:"wait_event"`
 	DurationSeconds float64 `json:"duration_seconds"`
 	Query           string  `json:"query"`
 }
@@ -130,7 +146,8 @@ type longRunningQueryResponse struct {
 func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	minDuration := intParam(req, "min_duration_seconds", 5)
 	limit := intParam(req, "limit", 20)
-	queries, err := util.FetchLongRunningQueries(ctx, config.Config.DB, minDuration, limit)
+	includeBackground := req.GetBool("include_background", false)
+	queries, err := util.FetchLongRunningQueries(ctx, config.Config.DB, minDuration, limit, includeBackground)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -140,12 +157,16 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 			PID:             q.PID,
 			Username:        q.Username,
 			ApplicationName: q.ApplicationName,
+			ClientAddr:      q.ClientAddr,
+			BackendType:     q.BackendType,
 			State:           q.State,
+			WaitEventType:   q.WaitEventType,
+			WaitEvent:       q.WaitEvent,
 			DurationSeconds: q.DurationSeconds,
 			Query:           q.Query,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- blocked queries ---
@@ -179,7 +200,7 @@ func handleCheckBlockedQueries(ctx context.Context, req mcp.CallToolRequest) (*m
 			BlockingApplication: b.BlockingApplication,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- connections ---
@@ -205,7 +226,7 @@ func handleCheckConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	for _, s := range result.States {
 		states = append(states, connectionStateResponse{State: s.State, Count: s.Count})
 	}
-	return jsonResult(connectionsResponse{
+	return respond(ctx, connectionsResponse{
 		States:     states,
 		TotalUsed:  result.TotalUsed,
 		MaxAllowed: result.MaxAllowed,
@@ -251,7 +272,7 @@ func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			AutovacuumCount: t.AutovacuumCount,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- index usage ---
@@ -288,7 +309,7 @@ func handleCheckIndexUsage(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			IndexSize:    idx.IndexSize,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- cache hit ---
@@ -321,7 +342,7 @@ func handleCheckCacheHit(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 			IdxCacheHitRatio: t.IdxCacheHitRatio,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- wait events ---
@@ -347,7 +368,7 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			Pct:       e.Pct,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- query load ---
@@ -382,7 +403,8 @@ func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 			LoadPct:  q.LoadPct,
 		})
 	}
-	return jsonResult(resp)
+	version, warning := pgStatStatementsVersion(ctx)
+	return respond(ctx, pgStatStatementsResult{PgStatStatementsVersion: version, Queries: resp}, warning)
 }
 
 // --- replication slots ---
@@ -424,7 +446,7 @@ func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (
 			InactiveSince: s.InactiveSince,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- users ---
@@ -458,7 +480,7 @@ func handleCheckUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 			MemberOf:    u.MemberOf,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- roles ---
@@ -488,7 +510,7 @@ func handleCheckRoles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 			Members:    r.Members,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- extensions ---
@@ -514,38 +536,84 @@ func handleCheckExtensions(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			Description: e.Description,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- pg_config ---
 
 type pgSettingResponse struct {
-	Name        string `json:"name"`
-	Setting     string `json:"setting"`
-	Unit        string `json:"unit"`
-	Category    string `json:"category"`
-	Source      string `json:"source"`
-	Description string `json:"description"`
+	Name           string `json:"name"`
+	Setting        string `json:"setting"`
+	Unit           string `json:"unit"`
+	Category       string `json:"category"`
+	Source         string `json:"source"`
+	PendingRestart bool   `json:"pending_restart"`
+	Description    string `json:"description,omitempty"`
 }
 
+type pgConfigResponse struct {
+	Scope    string              `json:"scope"`
+	Total    int                 `json:"total"`
+	Returned int                 `json:"returned"`
+	Offset   int                 `json:"offset"`
+	Settings []pgSettingResponse `json:"settings"`
+}
+
+// handleCheckPgConfig defaults to the curated key parameters without descriptions:
+// the full pg_settings with short_desc is ~80 KB, past most MCP clients' output limit.
 func handleCheckPgConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	filter := strParam(req, "filter", "")
-	settings, err := util.FetchPgConfig(ctx, config.Config.DB, filter)
+	defaultScope := util.PgConfigScopeKey
+	if filter != "" {
+		defaultScope = util.PgConfigScopeAll
+	}
+	scope := util.PgConfigScope(strParam(req, "scope", string(defaultScope)))
+	if req.GetBool("only_modified", false) {
+		scope = util.PgConfigScopeModified
+	}
+	switch scope {
+	case util.PgConfigScopeAll, util.PgConfigScopeKey, util.PgConfigScopeModified:
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("invalid scope %q: use key, modified or all", scope)), nil
+	}
+	opts := util.PgConfigOptions{
+		Filter: filter,
+		Scope:  scope,
+		Limit:  intParam(req, "limit", 100),
+		Offset: intParam(req, "offset", 0),
+	}
+	includeDescription := req.GetBool("include_description", false)
+	result, err := util.FetchPgConfig(ctx, config.Config.DB, opts)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]pgSettingResponse, 0, len(settings))
-	for _, s := range settings {
-		resp = append(resp, pgSettingResponse{
-			Name:        s.Name,
-			Setting:     s.Setting,
-			Unit:        s.Unit,
-			Category:    s.Category,
-			Source:      s.Source,
-			Description: s.Description,
-		})
+	settings := make([]pgSettingResponse, 0, len(result.Settings))
+	for _, s := range result.Settings {
+		setting := pgSettingResponse{
+			Name:           s.Name,
+			Setting:        s.Setting,
+			Unit:           s.Unit,
+			Category:       s.Category,
+			Source:         s.Source,
+			PendingRestart: s.PendingRestart,
+		}
+		if includeDescription {
+			setting.Description = s.Description
+		}
+		settings = append(settings, setting)
 	}
-	return jsonResult(resp)
+	var warnings []string
+	if returnedUpTo := opts.Offset + len(settings); returnedUpTo < result.Total {
+		warnings = append(warnings, fmt.Sprintf("%d of %d settings returned; call again with offset=%d for more",
+			len(settings), result.Total, returnedUpTo))
+	}
+	return respond(ctx, pgConfigResponse{
+		Scope:    string(scope),
+		Total:    result.Total,
+		Returned: len(settings),
+		Offset:   opts.Offset,
+		Settings: settings,
+	}, warnings...)
 }
 
 // --- schema ---
@@ -592,7 +660,7 @@ func handleCheckSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 			Columns:    cols,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- autovacuum detail ---
@@ -755,7 +823,7 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 			Unit:        p.Unit,
 		})
 	}
-	return jsonResult(autovacuumDetailResult{
+	return respond(ctx, autovacuumDetailResult{
 		Stats: autovacuumDetailResponse{
 			SchemaName:        stats.SchemaName,
 			TableName:         stats.TableName,
@@ -811,7 +879,7 @@ func handleCheckFreezeByDatabase(ctx context.Context, req mcp.CallToolRequest) (
 			Status:            statusLabel,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- freeze by table ---
@@ -853,7 +921,7 @@ func handleCheckFreezeByTable(ctx context.Context, req mcp.CallToolRequest) (*mc
 			Status:          statusLabel,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- streaming standbys ---
@@ -897,7 +965,7 @@ func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) 
 			PID:             s.PID,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- replication config ---
@@ -936,7 +1004,7 @@ func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) 
 			HintLevel: p.HintLevel,
 		})
 	}
-	return jsonResult(replicationConfigResponse{
+	return respond(ctx, replicationConfigResponse{
 		Params:        paramResp,
 		ActiveSenders: counts.ActiveSenders,
 		TotalSlots:    counts.TotalSlots,
@@ -992,7 +1060,7 @@ func handleCheckDatabaseSizes(ctx context.Context, req mcp.CallToolRequest) (*mc
 			SizePretty: t.SizePretty,
 		})
 	}
-	return jsonResult(databaseSizeReportResponse{
+	return respond(ctx, databaseSizeReportResponse{
 		Databases:   databases,
 		Tablespaces: tablespaces,
 		TotalBytes:  report.TotalBytes,
@@ -1025,7 +1093,7 @@ func handleCheckTempFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 			StatsReset: u.StatsReset,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }
 
 // --- memory & checkpoint stats ---
@@ -1069,7 +1137,7 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			ShortDesc: c.ShortDesc,
 		})
 	}
-	return jsonResult(memoryStatsResponse{
+	return respond(ctx, memoryStatsResponse{
 		Configs:       configs,
 		CacheHitRatio: stats.CacheHitRatio,
 		Checkpoint: checkpointStatsResponse{
@@ -1083,7 +1151,7 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			BuffersAlloc:        stats.Checkpoint.BuffersAlloc,
 			StatsReset:          stats.Checkpoint.StatsReset,
 		},
-	})
+	}, stats.Warnings...)
 }
 
 // --- publications ---
@@ -1119,7 +1187,7 @@ func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp
 			TableCount: pub.TableCount,
 		}
 	}
-	return jsonResult(out)
+	return respond(ctx, out)
 }
 
 // --- subscriptions ---
@@ -1174,7 +1242,7 @@ func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) 
 			LastVacuum: t.LastVacuum,
 		}
 	}
-	return jsonResult(out)
+	return respond(ctx, out)
 }
 
 type subscriptionTableResponse struct {
@@ -1212,7 +1280,7 @@ func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest)
 			DelRows:    t.DelRows,
 		}
 	}
-	return jsonResult(out)
+	return respond(ctx, out)
 }
 
 func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1254,7 +1322,7 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			ToastColumns:    tt.ToastColumns,
 		}
 	}
-	return jsonResult(out)
+	return respond(ctx, out)
 }
 
 func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1279,7 +1347,7 @@ func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mc
 			Failover:        sub.Failover,
 		}
 	}
-	return jsonResult(out)
+	return respond(ctx, out)
 }
 
 // --- replica identity ---
@@ -1325,5 +1393,5 @@ func handleCheckReplicaIdentity(ctx context.Context, req mcp.CallToolRequest) (*
 			Status:                status,
 		})
 	}
-	return jsonResult(resp)
+	return respond(ctx, resp)
 }

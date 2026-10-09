@@ -30,30 +30,37 @@ func pgMajorVersion() int {
 
 // DashboardResult holds all metrics shown on the main dashboard.
 type DashboardResult struct {
-	Host             string
-	Database         string
-	UsedConnections  int
-	MaxConnections   int
-	ConnectionPct    float64
-	ActiveQueries    int
-	BlockedQueries   int
-	SlowQueryCount   int      // -1 when pg_stat_statements is unavailable
-	SlowThresholdMS  int
-	CacheHitRatio    *float64 // nil when no table I/O data exists
-	DeadTuples       int64
-	InvalidIndexes   int
-	ReplicationSlots    int
-	FreezeOldestDB      string
-	FreezeOldestDBAge   int64
-	FreezePctToward     float64
-	LongRunningCount int      // queries running > 60 seconds
-	WaitEventCount   int      // non-idle queries with an active wait event
-	TempFilesBytes   int64    // temp_bytes from pg_stat_database for current db
-	DBSizePretty     string   // pg_size_pretty(pg_database_size(current_database()))
-	CommitPct        *float64 // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
-	UptimeSeconds    int64    // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
+	Host                       string
+	Database                   string
+	UsedConnections            int
+	MaxConnections             int
+	ConnectionPct              float64
+	ActiveQueries              int
+	BlockedQueries             int
+	SlowQueryCount             *int // nil when pg_stat_statements is unavailable (see SlowQueryUnavailableReason)
+	SlowQueryUnavailableReason string
+	SlowThresholdMS            int
+	CacheHitRatio              *float64 // nil when no table I/O data exists
+	DeadTuples                 int64
+	InvalidIndexes             int
+	ReplicationSlots           int
+	FreezeOldestDB             string
+	FreezeOldestDBAge          int64
+	FreezePctToward            float64
+	LongRunningCount           int      // queries running > 60 seconds
+	WaitEventCount             int      // non-idle queries with an active wait event
+	TempFilesBytes             int64    // temp_bytes from pg_stat_database for current db
+	DBSizePretty               string   // pg_size_pretty(pg_database_size(current_database()))
+	CommitPct                  *float64 // 100*xact_commit/(xact_commit+xact_rollback), nil if no activity
+	UptimeSeconds              int64    // EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))
+	// Warnings lists the parts that failed ("part: error"); their fields keep zero values.
+	Warnings []string
 }
 
+// FetchDashboard runs every metric independently: one failing part (a missing
+// extension, a permission error on one view) becomes a warning instead of hiding the
+// rest of the dashboard. It only returns an error when every part failed, which means
+// the connection itself is unusable.
 func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (DashboardResult, error) {
 	threshold := slowThresholdMS
 	if threshold <= 0 {
@@ -64,87 +71,236 @@ func FetchDashboard(ctx context.Context, db *sql.DB, slowThresholdMS int) (Dashb
 		Database:        config.Config.DBName,
 		SlowThresholdMS: threshold,
 	}
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity`).Scan(&result.UsedConnections); err != nil {
-		return result, err
+	parts, failed := 0, 0
+	var firstErr error
+	run := func(part string, fetch func() error) {
+		parts++
+		if err := fetch(); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			result.Warnings = append(result.Warnings, part+": "+err.Error())
+		}
 	}
-	if err := db.QueryRowContext(ctx, `SELECT setting::int FROM pg_settings WHERE name='max_connections'`).Scan(&result.MaxConnections); err != nil {
-		return result, err
-	}
+
+	run("connections", func() error {
+		return db.QueryRowContext(ctx, `
+			SELECT count(*), (SELECT setting::int FROM pg_settings WHERE name = 'max_connections')
+			FROM pg_stat_activity`,
+		).Scan(&result.UsedConnections, &result.MaxConnections)
+	})
 	if result.MaxConnections > 0 {
 		result.ConnectionPct = float64(result.UsedConnections) / float64(result.MaxConnections) * 100
 	}
-	if err := db.QueryRowContext(ctx, `
-		SELECT
-			count(*) FILTER (WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'),
-			count(*) FILTER (WHERE wait_event_type = 'Lock'),
-			count(*) FILTER (WHERE state = 'active'
-			                 AND query_start < NOW() - INTERVAL '60 seconds'
-			                 AND pid <> pg_backend_pid()),
-			count(*) FILTER (WHERE wait_event_type IS NOT NULL
-			                 AND state != 'idle'
-			                 AND pid <> pg_backend_pid())
-		FROM pg_stat_activity`,
-	).Scan(&result.ActiveQueries, &result.BlockedQueries, &result.LongRunningCount, &result.WaitEventCount); err != nil {
-		return result, err
+	run("activity", func() error {
+		return db.QueryRowContext(ctx, `
+			SELECT
+				count(*) FILTER (WHERE state = 'active' AND query NOT LIKE '%pg_stat_activity%'),
+				count(*) FILTER (WHERE wait_event_type = 'Lock'),
+				count(*) FILTER (WHERE state = 'active'
+				                 AND query_start < NOW() - INTERVAL '60 seconds'
+				                 AND pid <> pg_backend_pid()),
+				count(*) FILTER (WHERE wait_event_type IS NOT NULL
+				                 AND state != 'idle'
+				                 AND pid <> pg_backend_pid())
+			FROM pg_stat_activity`,
+		).Scan(&result.ActiveQueries, &result.BlockedQueries, &result.LongRunningCount, &result.WaitEventCount)
+	})
+	// A missing pg_stat_statements is a normal setup, not a failure: it is reported
+	// through SlowQueryUnavailableReason rather than as a warning.
+	pgss, pgssErr := FetchPgStatStatementsInfo(ctx, db)
+	switch {
+	case pgssErr != nil:
+		result.SlowQueryUnavailableReason = pgssErr.Error()
+	case !pgss.Installed:
+		result.SlowQueryUnavailableReason = "pg_stat_statements is not installed in this database"
+	default:
+		run("pg_stat_statements", func() error {
+			var slowCount int
+			if err := db.QueryRowContext(ctx, fmt.Sprintf(
+				`SELECT count(*) FROM %s WHERE %s > $1`, pgss.Relation, pgss.MeanTimeColumn), threshold,
+			).Scan(&slowCount); err != nil {
+				result.SlowQueryUnavailableReason = err.Error()
+				return err
+			}
+			result.SlowQueryCount = &slowCount
+			return nil
+		})
+		if hint := pgss.UpdateHint(); hint != "" {
+			result.Warnings = append(result.Warnings, hint)
+		}
 	}
-	var slowCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pg_stat_statements WHERE mean_exec_time > $1`, threshold,
-	).Scan(&slowCount); err != nil {
-		result.SlowQueryCount = -1
-	} else {
-		result.SlowQueryCount = slowCount
-	}
-	var cacheHit sql.NullFloat64
-	_ = db.QueryRowContext(ctx, `
-		SELECT ROUND(100.0 * sum(heap_blks_hit) / NULLIF(sum(heap_blks_hit)+sum(heap_blks_read),0), 1)
-		FROM pg_statio_user_tables`,
-	).Scan(&cacheHit)
-	if cacheHit.Valid {
-		result.CacheHitRatio = &cacheHit.Float64
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(sum(n_dead_tup),0) FROM pg_stat_user_tables`).Scan(&result.DeadTuples); err != nil {
-		return result, err
-	}
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_index WHERE NOT indisvalid`).Scan(&result.InvalidIndexes); err != nil {
-		return result, err
-	}
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_replication_slots`).Scan(&result.ReplicationSlots); err != nil {
-		return result, err
-	}
-	// Non-fatal: freeze status is informational; ignore errors on older setups.
-	_ = db.QueryRowContext(ctx, `
-		SELECT datname, age(datfrozenxid),
-		       round(age(datfrozenxid)::numeric / 2100000000 * 100, 2)
-		FROM pg_database
-		WHERE datallowconn
-		ORDER BY age(datfrozenxid) DESC
-		LIMIT 1
-	`).Scan(&result.FreezeOldestDB, &result.FreezeOldestDBAge, &result.FreezePctToward)
+	run("cache hit", func() error {
+		var cacheHit sql.NullFloat64
+		if err := db.QueryRowContext(ctx, `
+			SELECT ROUND(100.0 * sum(heap_blks_hit) / NULLIF(sum(heap_blks_hit)+sum(heap_blks_read),0), 1)
+			FROM pg_statio_user_tables`,
+		).Scan(&cacheHit); err != nil {
+			return err
+		}
+		if cacheHit.Valid {
+			result.CacheHitRatio = &cacheHit.Float64
+		}
+		return nil
+	})
+	run("dead tuples", func() error {
+		return db.QueryRowContext(ctx, `SELECT COALESCE(sum(n_dead_tup),0) FROM pg_stat_user_tables`).Scan(&result.DeadTuples)
+	})
+	run("invalid indexes", func() error {
+		return db.QueryRowContext(ctx, `SELECT count(*) FROM pg_index WHERE NOT indisvalid`).Scan(&result.InvalidIndexes)
+	})
+	run("replication slots", func() error {
+		return db.QueryRowContext(ctx, `SELECT count(*) FROM pg_replication_slots`).Scan(&result.ReplicationSlots)
+	})
+	run("freeze", func() error {
+		return db.QueryRowContext(ctx, `
+			SELECT datname, age(datfrozenxid),
+			       round(age(datfrozenxid)::numeric / 2100000000 * 100, 2)
+			FROM pg_database
+			WHERE datallowconn
+			ORDER BY age(datfrozenxid) DESC
+			LIMIT 1
+		`).Scan(&result.FreezeOldestDB, &result.FreezeOldestDBAge, &result.FreezePctToward)
+	})
+	run("database stats", func() error {
+		var commitPct sql.NullFloat64
+		if err := db.QueryRowContext(ctx, `
+			SELECT COALESCE(temp_bytes, 0),
+			       ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1)
+			FROM pg_stat_database WHERE datname = current_database()`,
+		).Scan(&result.TempFilesBytes, &commitPct); err != nil {
+			return err
+		}
+		if commitPct.Valid {
+			result.CommitPct = &commitPct.Float64
+		}
+		return nil
+	})
+	run("database size", func() error {
+		return db.QueryRowContext(ctx,
+			`SELECT pg_size_pretty(pg_database_size(current_database()))`,
+		).Scan(&result.DBSizePretty)
+	})
+	run("uptime", func() error {
+		return db.QueryRowContext(ctx,
+			`SELECT EXTRACT(EPOCH FROM (NOW() - pg_postmaster_start_time()))::bigint`,
+		).Scan(&result.UptimeSeconds)
+	})
 
-	// Non-fatal supplemental metrics — errors leave fields at zero/empty.
-	_ = db.QueryRowContext(ctx,
-		`SELECT COALESCE(temp_bytes, 0) FROM pg_stat_database WHERE datname = current_database()`,
-	).Scan(&result.TempFilesBytes)
-
-	_ = db.QueryRowContext(ctx,
-		`SELECT pg_size_pretty(pg_database_size(current_database()))`,
-	).Scan(&result.DBSizePretty)
-
-	var commitPct sql.NullFloat64
-	_ = db.QueryRowContext(ctx, `
-		SELECT ROUND(100.0 * xact_commit / NULLIF(xact_commit + xact_rollback, 0), 1)
-		FROM pg_stat_database WHERE datname = current_database()`,
-	).Scan(&commitPct)
-	if commitPct.Valid {
-		result.CommitPct = &commitPct.Float64
+	if failed == parts {
+		return result, firstErr
 	}
-
-	_ = db.QueryRowContext(ctx,
-		`SELECT EXTRACT(EPOCH FROM (NOW() - pg_postmaster_start_time()))::bigint`,
-	).Scan(&result.UptimeSeconds)
-
 	return result, nil
+}
+
+// PgStatStatementsInfo describes the pg_stat_statements extension installed in the
+// current database and which timing columns its version exposes.
+//
+// The extension's SQL version is independent of the server version: a database that
+// was upgraded (pg_upgrade, RDS major upgrade) keeps the old extension version until
+// someone runs ALTER EXTENSION ... UPDATE. Version 1.8 (shipped with PG13) renamed
+// total_time/mean_time/stddev_time to total_exec_time/mean_exec_time/stddev_exec_time,
+// so a PG16 server can still expose the pre-1.8 column names.
+type PgStatStatementsInfo struct {
+	Installed bool
+	Version   string
+	// DefaultVersion is what CREATE/ALTER EXTENSION would install on this server
+	// (pg_available_extensions.default_version); "" when unknown.
+	DefaultVersion string
+	// Relation is the schema-qualified, quoted pg_stat_statements view — the extension
+	// may live in a schema that isn't on the search_path.
+	Relation         string
+	TotalTimeColumn  string
+	MeanTimeColumn   string
+	StddevTimeColumn string
+}
+
+// Outdated reports whether the installed extension is older than the version this
+// server ships, i.e. ALTER EXTENSION pg_stat_statements UPDATE would upgrade it.
+func (info PgStatStatementsInfo) Outdated() bool {
+	return info.Installed && info.DefaultVersion != "" && compareExtensionVersions(info.Version, info.DefaultVersion) < 0
+}
+
+// UpdateHint is the warning shown when the extension is outdated; "" otherwise.
+func (info PgStatStatementsInfo) UpdateHint() string {
+	if !info.Outdated() {
+		return ""
+	}
+	return fmt.Sprintf("pg_stat_statements %s is older than the %s this server ships; run ALTER EXTENSION pg_stat_statements UPDATE;",
+		info.Version, info.DefaultVersion)
+}
+
+// ErrPgStatStatementsMissing is returned by Fetch* functions that need pg_stat_statements
+// when the extension isn't installed in the current database.
+var ErrPgStatStatementsMissing = fmt.Errorf("pg_stat_statements is not installed in this database " +
+	"(CREATE EXTENSION pg_stat_statements; it also requires shared_preload_libraries = 'pg_stat_statements')")
+
+// compareExtensionVersions compares dotted extension versions numerically ("1.7" < "1.10").
+// Non-numeric parts compare as 0.
+func compareExtensionVersions(left, right string) int {
+	leftParts, rightParts := strings.Split(left, "."), strings.Split(right, ".")
+	for i := 0; i < max(len(leftParts), len(rightParts)); i++ {
+		var leftNumber, rightNumber int
+		if i < len(leftParts) {
+			leftNumber, _ = strconv.Atoi(leftParts[i])
+		}
+		if i < len(rightParts) {
+			rightNumber, _ = strconv.Atoi(rightParts[i])
+		}
+		if leftNumber != rightNumber {
+			if leftNumber < rightNumber {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// pgStatStatementsColumns returns the total/mean/stddev timing column names for an
+// extension version: the *_exec_time names exist from 1.8 on.
+func pgStatStatementsColumns(version string) (total, mean, stddev string) {
+	if compareExtensionVersions(version, "1.8") < 0 {
+		return "total_time", "mean_time", "stddev_time"
+	}
+	return "total_exec_time", "mean_exec_time", "stddev_exec_time"
+}
+
+// FetchPgStatStatementsInfo reads the installed pg_stat_statements version. A missing
+// extension is not an error: Installed is false.
+func FetchPgStatStatementsInfo(ctx context.Context, db *sql.DB) (PgStatStatementsInfo, error) {
+	var info PgStatStatementsInfo
+	var schema string
+	err := db.QueryRowContext(ctx, `
+		SELECT e.extversion, n.nspname, COALESCE(a.default_version, '')
+		FROM pg_extension e
+		JOIN pg_namespace n ON n.oid = e.extnamespace
+		LEFT JOIN pg_available_extensions a ON a.name = e.extname
+		WHERE e.extname = 'pg_stat_statements'`,
+	).Scan(&info.Version, &schema, &info.DefaultVersion)
+	if err == sql.ErrNoRows {
+		return info, nil
+	}
+	if err != nil {
+		return info, err
+	}
+	info.Installed = true
+	info.Relation = pq.QuoteIdentifier(schema) + ".pg_stat_statements"
+	info.TotalTimeColumn, info.MeanTimeColumn, info.StddevTimeColumn = pgStatStatementsColumns(info.Version)
+	return info, nil
+}
+
+// requirePgStatStatements returns the extension info or ErrPgStatStatementsMissing.
+func requirePgStatStatements(ctx context.Context, db *sql.DB) (PgStatStatementsInfo, error) {
+	info, err := FetchPgStatStatementsInfo(ctx, db)
+	if err != nil {
+		return info, err
+	}
+	if !info.Installed {
+		return info, ErrPgStatStatementsMissing
+	}
+	return info, nil
 }
 
 // SlowQuery is one row from pg_stat_statements sorted by mean execution time.
@@ -159,12 +315,19 @@ type SlowQuery struct {
 }
 
 func FetchSlowQueries(ctx context.Context, db *sql.DB, thresholdMS, limit int) ([]SlowQuery, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT queryid, query, calls, total_exec_time, mean_exec_time, stddev_exec_time, rows
-		FROM pg_stat_statements
-		WHERE mean_exec_time > $1
-		ORDER BY mean_exec_time DESC
-		LIMIT NULLIF($2::int, 0)`, thresholdMS, limit)
+	pgss, err := requirePgStatStatements(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	// Column names come from pgStatStatementsColumns (fixed identifiers), never user input.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT queryid, query, calls, %[1]s, %[2]s, %[3]s, rows
+		FROM %[4]s
+		WHERE %[2]s > $1
+		ORDER BY %[2]s DESC
+		LIMIT NULLIF($2::int, 0)`,
+		pgss.TotalTimeColumn, pgss.MeanTimeColumn, pgss.StddevTimeColumn, pgss.Relation),
+		thresholdMS, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -180,31 +343,47 @@ func FetchSlowQueries(ctx context.Context, db *sql.DB, thresholdMS, limit int) (
 	return results, rows.Err()
 }
 
-// LongRunningQuery is an active session whose query has exceeded the minimum duration.
+// LongRunningQuery is a non-idle session whose current query has exceeded the minimum duration.
 type LongRunningQuery struct {
 	PID             int
-	Username        string
+	Username        string // "" for background processes, which have no user
 	ApplicationName string
+	ClientAddr      string // "" for unix-socket and background connections
+	BackendType     string
 	State           string
+	WaitEventType   string
+	WaitEvent       string
 	DurationSeconds float64
 	Query           string
 }
 
-func FetchLongRunningQueries(ctx context.Context, db *sql.DB, minDurationSeconds, limit int) ([]LongRunningQuery, error) {
+// FetchLongRunningQueries lists sessions whose current query has run longer than
+// minDurationSeconds. Only client backends are returned unless includeBackground is
+// set: autovacuum workers, walsenders and other background processes have no user and
+// would otherwise crowd the list (autovacuum is covered by FetchVacuumProgress).
+func FetchLongRunningQueries(ctx context.Context, db *sql.DB, minDurationSeconds, limit int, includeBackground bool) ([]LongRunningQuery, error) {
+	// Every text column can be NULL for background processes (usename, client_addr,
+	// state, wait_event…), so each one is COALESCEd before scanning into a string.
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			pid,
-			usename,
-			application_name,
-			state,
+			COALESCE(usename, ''),
+			COALESCE(application_name, ''),
+			COALESCE(client_addr::text, ''),
+			COALESCE(backend_type, ''),
+			COALESCE(state, ''),
+			COALESCE(wait_event_type, ''),
+			COALESCE(wait_event, ''),
 			ROUND(EXTRACT(EPOCH FROM (now() - query_start))::numeric, 1) AS duration_seconds,
 			COALESCE(query, '') AS query
 		FROM pg_stat_activity
-		WHERE state != 'idle'
+		WHERE state IS DISTINCT FROM 'idle'
 		  AND query_start IS NOT NULL
 		  AND now() - query_start > ($1 * interval '1 second')
+		  AND pid <> pg_backend_pid()
+		  AND ($3 OR backend_type = 'client backend')
 		ORDER BY duration_seconds DESC
-		LIMIT NULLIF($2::int, 0)`, minDurationSeconds, limit)
+		LIMIT NULLIF($2::int, 0)`, minDurationSeconds, limit, includeBackground)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +391,8 @@ func FetchLongRunningQueries(ctx context.Context, db *sql.DB, minDurationSeconds
 	var results []LongRunningQuery
 	for rows.Next() {
 		var q LongRunningQuery
-		if err := rows.Scan(&q.PID, &q.Username, &q.ApplicationName, &q.State, &q.DurationSeconds, &q.Query); err != nil {
+		if err := rows.Scan(&q.PID, &q.Username, &q.ApplicationName, &q.ClientAddr, &q.BackendType,
+			&q.State, &q.WaitEventType, &q.WaitEvent, &q.DurationSeconds, &q.Query); err != nil {
 			return nil, err
 		}
 		results = append(results, q)
@@ -236,13 +416,14 @@ func FetchBlockedQueries(ctx context.Context, db *sql.DB) ([]BlockedQuery, error
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			blocked_locks.pid,
-			blocked_activity.usename,
+			COALESCE(blocked_activity.usename, ''),
 			blocking_locks.pid,
-			blocking_activity.usename,
-			blocked_activity.query,
-			blocking_activity.query,
-			blocked_activity.application_name,
-			blocking_activity.application_name
+			-- the blocker can be a background process (e.g. autovacuum) with no user
+			COALESCE(blocking_activity.usename, ''),
+			COALESCE(blocked_activity.query, ''),
+			COALESCE(blocking_activity.query, ''),
+			COALESCE(blocked_activity.application_name, ''),
+			COALESCE(blocking_activity.application_name, '')
 		FROM pg_catalog.pg_locks blocked_locks
 		JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
 		JOIN pg_catalog.pg_locks blocking_locks
@@ -327,17 +508,17 @@ func FetchConnections(ctx context.Context, db *sql.DB) (ConnectionsResult, error
 
 // AutovacuumTable holds per-table vacuum statistics from pg_stat_user_tables.
 type AutovacuumTable struct {
-	SchemaName       string
-	TableName        string
-	DeadTuples       int64
-	LiveTuples       int64
-	DeadPct          *float64
-	TotalSize        string
-	LastVacuum       *time.Time
-	LastAnalyze      *time.Time
-	LastAutovacuum   *time.Time
-	LastAutoanalyze  *time.Time
-	AutovacuumCount  int64
+	SchemaName      string
+	TableName       string
+	DeadTuples      int64
+	LiveTuples      int64
+	DeadPct         *float64
+	TotalSize       string
+	LastVacuum      *time.Time
+	LastAnalyze     *time.Time
+	LastAutovacuum  *time.Time
+	LastAutoanalyze *time.Time
+	AutovacuumCount int64
 }
 
 func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTable, error) {
@@ -388,16 +569,16 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 type ToastTable struct {
 	SchemaName      string
 	TableName       string
-	ToastRelname    string     // e.g. "pg_toast_16384" — used for VACUUM, not displayed
+	ToastRelname    string // e.g. "pg_toast_16384" — used for VACUUM, not displayed
 	ToastSizeBytes  int64
 	ToastSizePretty string
-	ToastPct        float64    // 100 * toast_size / total_size; 0 if total == 0
+	ToastPct        float64 // 100 * toast_size / total_size; 0 if total == 0
 	ToastDeadTuples int64
 	BlksRead        int64
 	BlksHit         int64
-	CacheHitPct     *float64   // nil when no I/O has occurred yet
+	CacheHitPct     *float64 // nil when no I/O has occurred yet
 	LastAutovacuum  *time.Time
-	ToastColumns    string     // comma-separated columns with TOAST-eligible storage (EXTENDED/EXTERNAL/MAIN)
+	ToastColumns    string // comma-separated columns with TOAST-eligible storage (EXTENDED/EXTERNAL/MAIN)
 }
 
 func FetchToastTables(ctx context.Context, db *sql.DB, limit int) ([]ToastTable, error) {
@@ -617,22 +798,28 @@ type QueryLoad struct {
 }
 
 func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, error) {
-	rows, err := db.QueryContext(ctx, `
+	pgss, err := requirePgStatStatements(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	// Column names come from pgStatStatementsColumns (fixed identifiers), never user input.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			queryid::text,
 			query,
 			calls,
-			ROUND(total_exec_time::numeric) AS total_ms,
-			ROUND(mean_exec_time::numeric, 2) AS mean_ms,
+			ROUND(%[1]s::numeric) AS total_ms,
+			ROUND(%[2]s::numeric, 2) AS mean_ms,
 			ROUND(((shared_blks_hit + shared_blks_read) * 8.0 / 1024)::numeric, 1) AS buffer_mb,
 			ROUND((temp_blks_written * 8.0 / 1024)::numeric, 1) AS temp_mb,
 			COALESCE(
-				ROUND((100.0 * total_exec_time / NULLIF(SUM(total_exec_time) OVER(), 0))::numeric, 1),
+				ROUND((100.0 * %[1]s / NULLIF(SUM(%[1]s) OVER(), 0))::numeric, 1),
 				0
 			) AS load_pct
-		FROM pg_stat_statements
-		ORDER BY total_exec_time DESC
-		LIMIT NULLIF($1::int, 0)`, limit)
+		FROM %[3]s
+		ORDER BY %[1]s DESC
+		LIMIT NULLIF($1::int, 0)`,
+		pgss.TotalTimeColumn, pgss.MeanTimeColumn, pgss.Relation), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -857,40 +1044,116 @@ func FetchExtensions(ctx context.Context, db *sql.DB) ([]Extension, error) {
 
 // PgSetting holds one row from pg_settings.
 type PgSetting struct {
-	Name        string
-	Setting     string
-	Unit        string
-	Category    string
-	Source      string
-	Description string
+	Name           string
+	Setting        string
+	Unit           string
+	Category       string
+	Source         string
+	Description    string
+	PendingRestart bool
 }
 
-// FetchPgConfig returns all (or filtered) rows from pg_settings.
-// Pass an empty string for filter to return all settings.
-func FetchPgConfig(ctx context.Context, db *sql.DB, filter string) ([]PgSetting, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT name,
-			   setting,
-			   COALESCE(unit, '') AS unit,
-			   category,
-			   source,
-			   COALESCE(short_desc, '') AS description
-		FROM pg_settings
-		WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR category ILIKE '%' || $1 || '%')
-		ORDER BY category, name`, filter)
+// PgConfigScope selects which pg_settings rows FetchPgConfig returns.
+type PgConfigScope string
+
+const (
+	PgConfigScopeAll      PgConfigScope = "all"
+	PgConfigScopeKey      PgConfigScope = "key"      // keyPgSettings only
+	PgConfigScopeModified PgConfigScope = "modified" // changed from the built-in default
+)
+
+// keyPgSettings are the parameters a tuning review looks at first: memory, autovacuum,
+// checkpoints/WAL, planner costs, timeouts and logging. Names that don't exist on the
+// connected version are simply not matched.
+var keyPgSettings = []string{
+	// memory
+	"max_connections", "shared_buffers", "effective_cache_size", "work_mem", "maintenance_work_mem",
+	"autovacuum_work_mem", "temp_buffers", "wal_buffers", "huge_pages", "hash_mem_multiplier",
+	// autovacuum
+	"autovacuum", "autovacuum_max_workers", "autovacuum_naptime",
+	"autovacuum_vacuum_threshold", "autovacuum_vacuum_scale_factor", "autovacuum_vacuum_max_threshold",
+	"autovacuum_vacuum_insert_threshold", "autovacuum_vacuum_insert_scale_factor",
+	"autovacuum_analyze_threshold", "autovacuum_analyze_scale_factor",
+	"autovacuum_vacuum_cost_delay", "autovacuum_vacuum_cost_limit", "vacuum_cost_delay", "vacuum_cost_limit",
+	"autovacuum_freeze_max_age", "autovacuum_multixact_freeze_max_age", "vacuum_freeze_min_age",
+	"vacuum_freeze_table_age", "vacuum_failsafe_age",
+	// checkpoints and WAL
+	"checkpoint_timeout", "checkpoint_completion_target", "max_wal_size", "min_wal_size",
+	"wal_level", "wal_compression", "full_page_writes", "synchronous_commit", "wal_writer_delay",
+	"max_wal_senders", "max_replication_slots", "max_slot_wal_keep_size", "wal_keep_size",
+	"hot_standby_feedback", "archive_mode",
+	// planner and parallelism
+	"random_page_cost", "seq_page_cost", "effective_io_concurrency", "maintenance_io_concurrency",
+	"default_statistics_target", "jit", "max_worker_processes", "max_parallel_workers",
+	"max_parallel_workers_per_gather", "max_parallel_maintenance_workers",
+	// timeouts
+	"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "idle_session_timeout",
+	"transaction_timeout", "deadlock_timeout",
+	// logging and statistics
+	"log_min_duration_statement", "log_autovacuum_min_duration", "log_checkpoints", "log_lock_waits",
+	"log_temp_files", "track_io_timing", "track_activity_query_size", "shared_preload_libraries",
+	"pg_stat_statements.max", "pg_stat_statements.track",
+}
+
+// PgConfigOptions filters and pages FetchPgConfig. A zero Scope means all, a zero Limit no limit.
+type PgConfigOptions struct {
+	Filter string // case-insensitive substring of the name or category
+	Scope  PgConfigScope
+	Limit  int
+	Offset int
+}
+
+// PgConfigResult is one page of settings plus the number of rows matching the filters.
+type PgConfigResult struct {
+	Settings []PgSetting
+	Total    int
+}
+
+// FetchPgConfig returns the pg_settings rows matching opts.
+func FetchPgConfig(ctx context.Context, db *sql.DB, opts PgConfigOptions) (PgConfigResult, error) {
+	var result PgConfigResult
+	scope := opts.Scope
+	if scope == "" {
+		scope = PgConfigScopeAll
+	}
+	// "modified" excludes sources that aren't a DBA's choice: 'override' (computed by
+	// the server, e.g. wal_buffers=-1) and 'client' (sent by this very connection).
+	const matching = `
+		WITH matching AS (
+			SELECT name, setting, COALESCE(unit, '') AS unit, category, source,
+			       COALESCE(short_desc, '') AS description, pending_restart
+			FROM pg_settings
+			WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR category ILIKE '%' || $1 || '%')
+			  AND ($2 <> 'key' OR name = ANY($3))
+			  AND ($2 <> 'modified' OR source NOT IN ('default', 'override', 'client'))
+		)`
+	args := []any{opts.Filter, string(scope), pq.Array(keyPgSettings)}
+	rows, err := db.QueryContext(ctx, matching+`
+		SELECT m.*, (SELECT count(*) FROM matching)
+		FROM matching m
+		ORDER BY category, name
+		LIMIT NULLIF($4::int, 0) OFFSET $5`,
+		append(args, opts.Limit, max(opts.Offset, 0))...)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	defer rows.Close()
-	var results []PgSetting
 	for rows.Next() {
 		var s PgSetting
-		if err := rows.Scan(&s.Name, &s.Setting, &s.Unit, &s.Category, &s.Source, &s.Description); err != nil {
-			return nil, err
+		if err := rows.Scan(&s.Name, &s.Setting, &s.Unit, &s.Category, &s.Source, &s.Description,
+			&s.PendingRestart, &result.Total); err != nil {
+			return result, err
 		}
-		results = append(results, s)
+		result.Settings = append(result.Settings, s)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return result, err
+	}
+	// An offset past the last row returns no rows, so the total has to be counted apart.
+	if len(result.Settings) == 0 && opts.Offset > 0 {
+		err = db.QueryRowContext(ctx, matching+` SELECT count(*) FROM matching`, args...).Scan(&result.Total)
+	}
+	return result, err
 }
 
 // SchemaColumn holds one column from information_schema.columns.
@@ -2005,11 +2268,35 @@ type MemoryStats struct {
 	Configs       []MemoryConfig
 	CacheHitRatio float64
 	Checkpoint    CheckpointStats
+	// Warnings lists the parts that failed ("part: error"); their fields keep zero values.
+	Warnings []string
 }
 
+// FetchMemoryStats runs its three parts (config, cache hit, checkpoints) independently;
+// a failing part becomes a warning. It only returns an error when all of them failed.
 func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 	var stats MemoryStats
+	var errs []error
+	for _, part := range []struct {
+		name  string
+		fetch func(context.Context, *sql.DB, *MemoryStats) error
+	}{
+		{"memory settings", fetchMemoryConfigs},
+		{"cache hit", fetchClusterCacheHit},
+		{"checkpoints", fetchCheckpointStats},
+	} {
+		if err := part.fetch(ctx, db, &stats); err != nil {
+			errs = append(errs, err)
+			stats.Warnings = append(stats.Warnings, part.name+": "+err.Error())
+		}
+	}
+	if len(errs) == 3 {
+		return stats, errs[0]
+	}
+	return stats, nil
+}
 
+func fetchMemoryConfigs(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
 	rows, err := db.QueryContext(ctx, `
 		SELECT name, setting, COALESCE(unit, ''), COALESCE(short_desc, '')
 		FROM pg_settings
@@ -2028,31 +2315,34 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 				ELSE 99
 			END`)
 	if err != nil {
-		return stats, err
+		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var c MemoryConfig
 		if err := rows.Scan(&c.Name, &c.Setting, &c.Unit, &c.ShortDesc); err != nil {
-			return stats, err
+			return err
 		}
 		stats.Configs = append(stats.Configs, c)
 	}
-	if err := rows.Err(); err != nil {
-		return stats, err
-	}
+	return rows.Err()
+}
 
+func fetchClusterCacheHit(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
 	var hit, read int64
 	if err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(blks_hit), 0), COALESCE(SUM(blks_read), 0)
 		FROM pg_stat_database`,
 	).Scan(&hit, &read); err != nil {
-		return stats, err
+		return err
 	}
 	if total := hit + read; total > 0 {
 		stats.CacheHitRatio = float64(hit) / float64(total) * 100
 	}
+	return nil
+}
 
+func fetchCheckpointStats(ctx context.Context, db *sql.DB, stats *MemoryStats) error {
 	// pg_stat_checkpointer was split out of pg_stat_bgwriter in PostgreSQL 17; checkpoint
 	// counters live there now, while buffers_backend/buffers_backend_fsync have no
 	// replacement in either view (see pg_stat_io for backend-level I/O on 17+).
@@ -2069,7 +2359,7 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 			&stats.Checkpoint.BuffersClean, &stats.Checkpoint.MaxwrittenClean, &stats.Checkpoint.BuffersAlloc,
 			&stats.Checkpoint.StatsReset,
 		); err != nil {
-			return stats, err
+			return err
 		}
 	} else {
 		var buffersBackend, buffersBackendFsync int64
@@ -2086,13 +2376,12 @@ func FetchMemoryStats(ctx context.Context, db *sql.DB) (MemoryStats, error) {
 			&buffersBackend, &buffersBackendFsync, &stats.Checkpoint.BuffersAlloc,
 			&stats.Checkpoint.StatsReset,
 		); err != nil {
-			return stats, err
+			return err
 		}
 		stats.Checkpoint.BuffersBackend = &buffersBackend
 		stats.Checkpoint.BuffersBackendFsync = &buffersBackendFsync
 	}
-
-	return stats, nil
+	return nil
 }
 
 // Publication represents a row from pg_publication with the table count from pg_publication_tables.
@@ -2116,8 +2405,8 @@ type Subscription struct {
 	SubName         string
 	Enabled         bool
 	SlotName        string
-	Publications    string  // array_to_string(subpublications, ', ')
-	WorkerPID       *int    // nil when subscription worker is not running
+	Publications    string // array_to_string(subpublications, ', ')
+	WorkerPID       *int   // nil when subscription worker is not running
 	ReceivedLSN     string
 	LastReceiveTime *string // formatted timestamp; nil when never received
 	ApplyErrorCount *int64  // PG15+; nil on PG13–14

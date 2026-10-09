@@ -22,7 +22,7 @@ type PgConfigModel struct {
 func (m PgConfigModel) IsInputMode() bool { return m.filterMode }
 
 func CheckPgConfig(initialModel func() tea.Model) tea.Model {
-	settings, err := FetchPgConfig(context.Background(), config.Config.DB, "")
+	settings, err := FetchPgConfig(context.Background(), config.Config.DB, PgConfigOptions{Scope: PgConfigScopeAll})
 	if err != nil {
 		return NewErrorModel(err, "Loading pg_settings", initialModel)
 	}
@@ -37,7 +37,7 @@ func CheckPgConfig(initialModel func() tea.Model) tea.Model {
 	}
 
 	var rowsData []table.Row
-	for _, s := range settings {
+	for _, s := range settings.Settings {
 		rowsData = append(rowsData, table.Row{s.Name, s.Setting, s.Unit, s.Category, s.Source, s.Description})
 	}
 

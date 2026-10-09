@@ -117,6 +117,21 @@ func RenderHeader(screenName string) string {
 	return fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
 }
 
+// RenderWarnings renders one yellow "⚠ …" line per warning, each cut to the terminal
+// width so a long driver error can't wrap and push the footer off screen. Returns ""
+// when there is nothing to warn about; otherwise the result ends with a newline.
+func RenderWarnings(warnings []string, width int) string {
+	var s string
+	style := lipgloss.NewStyle().Foreground(ColorYellow)
+	if width > 0 {
+		style = style.MaxWidth(width)
+	}
+	for _, warning := range warnings {
+		s += style.Render("  ⚠ "+strings.ReplaceAll(warning, "\n", " ")) + "\n"
+	}
+	return s
+}
+
 // SeverityColor colors text by severity level:
 // 0=green (ok), 1=yellow (warn), 2=red (critical), 3=gray (muted).
 // Level -1 or out of range returns plain text.
