@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/liciomatos/pgdba-cli/config"
@@ -71,13 +72,16 @@ func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	if threshold <= 0 {
 		threshold = 1000
 	}
-	data, err := util.FetchDashboard(ctx, config.Config.DB, threshold)
+	data, err := util.FetchDashboard(ctx, targetDB(ctx), threshold)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	// FetchDashboard fills host/database from the main connection's flags; report the
+	// server actually queried.
+	target := targetFromContext(ctx)
 	return respond(ctx, dashboardResponse{
-		Host:                       data.Host,
-		Database:                   data.Database,
+		Host:                       target.Host,
+		Database:                   target.DBName,
 		UsedConnections:            data.UsedConnections,
 		MaxConnections:             data.MaxConnections,
 		ConnectionPct:              data.ConnectionPct,
@@ -118,7 +122,7 @@ type pgStatStatementsResult struct {
 // pgStatStatementsVersion returns the installed extension version and, when it is
 // older than the server's, the ALTER EXTENSION warning.
 func pgStatStatementsVersion(ctx context.Context) (string, string) {
-	info, err := util.FetchPgStatStatementsInfo(ctx, config.Config.DB)
+	info, err := util.FetchPgStatStatementsInfo(ctx, targetDB(ctx))
 	if err != nil {
 		return "", "reading pg_stat_statements version: " + err.Error()
 	}
@@ -128,7 +132,7 @@ func pgStatStatementsVersion(ctx context.Context) (string, string) {
 func handleCheckSlowQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	threshold := int(req.GetFloat("threshold_ms", 1000))
 	limit := intParam(req, "limit", 20)
-	queries, err := util.FetchSlowQueries(ctx, config.Config.DB, threshold, limit)
+	queries, err := util.FetchSlowQueries(ctx, targetDB(ctx), threshold, limit)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -167,7 +171,7 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 	minDuration := intParam(req, "min_duration_seconds", 5)
 	limit := intParam(req, "limit", 20)
 	includeBackground := req.GetBool("include_background", false)
-	queries, err := util.FetchLongRunningQueries(ctx, config.Config.DB, minDuration, limit, includeBackground)
+	queries, err := util.FetchLongRunningQueries(ctx, targetDB(ctx), minDuration, limit, includeBackground)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -203,7 +207,7 @@ type blockedQueryResponse struct {
 }
 
 func handleCheckBlockedQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	blocked, err := util.FetchBlockedQueries(ctx, config.Config.DB)
+	blocked, err := util.FetchBlockedQueries(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -238,7 +242,7 @@ type connectionsResponse struct {
 }
 
 func handleCheckConnections(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	result, err := util.FetchConnections(ctx, config.Config.DB)
+	result, err := util.FetchConnections(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -296,7 +300,7 @@ type autovacuumTableResponse struct {
 
 func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := intParam(req, "limit", 20)
-	tables, err := util.FetchAutovacuum(ctx, config.Config.DB, limit)
+	tables, err := util.FetchAutovacuum(ctx, targetDB(ctx), limit)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -377,7 +381,7 @@ type xminHorizonResponse struct {
 }
 
 func handleCheckXminHorizon(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	horizon, err := util.FetchXminHorizon(ctx, config.Config.DB)
+	horizon, err := util.FetchXminHorizon(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -447,7 +451,7 @@ type vacuumProgressResponse struct {
 }
 
 func handleCheckVacuumProgress(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	progress, err := util.FetchVacuumProgress(ctx, config.Config.DB)
+	progress, err := util.FetchVacuumProgress(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -546,7 +550,10 @@ func handleCheckIndexUsage(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		Limit:              intParam(req, "limit", 50),
 		IncludeConstraints: req.GetBool("include_constraints", false),
 	}
-	indexes, err := util.FetchIndexUsage(ctx, config.Config.DB, opts)
+	if req.GetBool("compare", false) {
+		return compareIndexUsage(ctx, opts)
+	}
+	indexes, err := util.FetchIndexUsage(ctx, targetDB(ctx), opts)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -555,6 +562,101 @@ func handleCheckIndexUsage(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		resp = append(resp, toIndexUsageResponse(idx))
 	}
 	return respond(ctx, resp)
+}
+
+// indexTargetUsage is one index's counters on one server.
+type indexTargetUsage struct {
+	IdxScan           int64    `json:"idx_scan"`
+	IdxTupRead        int64    `json:"idx_tup_read"`
+	IdxTupFetch       int64    `json:"idx_tup_fetch"`
+	TableScanSharePct *float64 `json:"table_scan_share_pct"`
+}
+
+type indexComparisonResponse struct {
+	SchemaName     string                    `json:"schema_name"`
+	TableName      string                    `json:"table_name"`
+	IndexName      string                    `json:"index_name"`
+	IndexColumns   string                    `json:"index_columns"`
+	IndexSizeBytes int64                     `json:"index_size_bytes"`
+	IndexSize      string                    `json:"index_size_pretty"`
+	IsConstraint   bool                      `json:"is_constraint"`
+	IsValid        bool                      `json:"is_valid"`
+	RedundantWith  []indexRedundancyResponse `json:"redundant_with"`
+	// PerTarget has the counters of every server that answered; a missing key means
+	// the index doesn't exist there (or that target failed — see warnings).
+	PerTarget        map[string]indexTargetUsage `json:"per_target"`
+	TotalScans       int64                       `json:"total_scans"`
+	UnusedEverywhere bool                        `json:"unused_everywhere"`
+	Status           string                      `json:"status"`
+	// primary is the first server's row, rated with the scans of every server.
+	primary util.IndexUsage
+}
+
+// compareIndexUsage runs check_index_usage on the primary and every replica and joins
+// the counters by index, because a standby keeps its own idx_scan: an index unused on
+// the primary may serve the read traffic of a replica. Size, redundancy and validity
+// come from the primary. A failing replica becomes a warning.
+func compareIndexUsage(ctx context.Context, opts util.IndexUsageOptions) (*mcp.CallToolResult, error) {
+	limit := opts.Limit
+	opts.Limit = 0 // rank after joining, not per server
+	targets := allTargets()
+	var warnings []string
+	if len(targets) == 1 {
+		warnings = append(warnings, "no --replica configured: compare shows the primary only")
+	}
+	byIndex := map[string]*indexComparisonResponse{}
+	var order []string
+	for _, target := range targets {
+		indexes, err := util.FetchIndexUsage(ctx, target.DB, opts)
+		if err != nil {
+			if target.Name == primaryTargetName {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			warnings = append(warnings, fmt.Sprintf("target %s: %v", target.Name, err))
+			continue
+		}
+		for _, idx := range indexes {
+			key := idx.SchemaName + "." + idx.IndexName
+			comparison, seen := byIndex[key]
+			if !seen {
+				primary := toIndexUsageResponse(idx)
+				comparison = &indexComparisonResponse{
+					SchemaName: idx.SchemaName, TableName: idx.TableName, IndexName: idx.IndexName,
+					IndexColumns: idx.IndexColumns, IndexSizeBytes: idx.IndexSizeBytes, IndexSize: idx.IndexSize,
+					IsConstraint: idx.IsConstraint, IsValid: idx.IsValid, RedundantWith: primary.RedundantWith,
+					PerTarget: map[string]indexTargetUsage{}, primary: idx,
+				}
+				byIndex[key] = comparison
+				order = append(order, key)
+			}
+			comparison.PerTarget[target.Name] = indexTargetUsage{
+				IdxScan: idx.IdxScan, IdxTupRead: idx.IdxTupRead, IdxTupFetch: idx.IdxTupFetch,
+				TableScanSharePct: idx.TableScanSharePct,
+			}
+			comparison.TotalScans += idx.IdxScan
+		}
+	}
+	resp := make([]indexComparisonResponse, 0, len(order))
+	for _, key := range order {
+		comparison := byIndex[key]
+		comparison.UnusedEverywhere = comparison.TotalScans == 0
+		// "Unused" must mean unused on every server, so rate it with the summed scans.
+		combined := comparison.primary
+		combined.IdxScan = comparison.TotalScans
+		comparison.Status = util.IndexUsageStatus(combined).String()
+		resp = append(resp, *comparison)
+	}
+	// Indexes no server uses come first, biggest first; then the least used overall.
+	sort.SliceStable(resp, func(i, j int) bool {
+		if resp[i].TotalScans != resp[j].TotalScans {
+			return resp[i].TotalScans < resp[j].TotalScans
+		}
+		return resp[i].IndexSizeBytes > resp[j].IndexSizeBytes
+	})
+	if limit > 0 && len(resp) > limit {
+		resp = resp[:limit]
+	}
+	return respond(ctx, resp, warnings...)
 }
 
 // --- cache hit ---
@@ -621,7 +723,7 @@ func handleCheckCacheHit(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	report, err := util.FetchCacheHitReport(ctx, config.Config.DB, interval, intParam(req, "limit", 50))
+	report, err := util.FetchCacheHitReport(ctx, targetDB(ctx), interval, intParam(req, "limit", 50))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -655,7 +757,7 @@ type waitEventResponse struct {
 }
 
 func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	events, err := util.FetchWaitEvents(ctx, config.Config.DB)
+	events, err := util.FetchWaitEvents(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -686,7 +788,7 @@ type queryLoadResponse struct {
 
 func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := intParam(req, "limit", 20)
-	queries, err := util.FetchQueryLoad(ctx, config.Config.DB, limit)
+	queries, err := util.FetchQueryLoad(ctx, targetDB(ctx), limit)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -725,7 +827,7 @@ type replicationSlotResponse struct {
 }
 
 func handleCheckReplicationSlots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	slots, err := util.FetchReplicationSlots(ctx, config.Config.DB)
+	slots, err := util.FetchReplicationSlots(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -763,7 +865,7 @@ type userResponse struct {
 }
 
 func handleCheckUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	users, err := util.FetchUsers(ctx, config.Config.DB)
+	users, err := util.FetchUsers(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -795,7 +897,7 @@ type roleResponse struct {
 }
 
 func handleCheckRoles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	roles, err := util.FetchRoles(ctx, config.Config.DB)
+	roles, err := util.FetchRoles(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -823,7 +925,7 @@ type extensionResponse struct {
 }
 
 func handleCheckExtensions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	exts, err := util.FetchExtensions(ctx, config.Config.DB)
+	exts, err := util.FetchExtensions(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -883,7 +985,7 @@ func handleCheckPgConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		Offset: intParam(req, "offset", 0),
 	}
 	includeDescription := req.GetBool("include_description", false)
-	result, err := util.FetchPgConfig(ctx, config.Config.DB, opts)
+	result, err := util.FetchPgConfig(ctx, targetDB(ctx), opts)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -936,7 +1038,7 @@ type schemaTableResponse struct {
 
 func handleCheckSchema(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	schema := strParam(req, "schema", "public")
-	tables, err := util.FetchSchema(ctx, config.Config.DB, schema)
+	tables, err := util.FetchSchema(ctx, targetDB(ctx), schema)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1104,13 +1206,13 @@ func handleCheckAutovacuumDetail(ctx context.Context, req mcp.CallToolRequest) (
 	if table == "" {
 		return mcp.NewToolResultError("table parameter is required"), nil
 	}
-	stats, err := util.FetchAutovacuumDetail(ctx, config.Config.DB, schema, table)
+	stats, err := util.FetchAutovacuumDetail(ctx, targetDB(ctx), schema, table)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	params, _ := util.FetchAutovacuumParams(ctx, config.Config.DB, schema, table)
+	params, _ := util.FetchAutovacuumParams(ctx, targetDB(ctx), schema, table)
 	var thresholdsResp *autovacuumThresholdsResponse
-	if thresholds, err := util.FetchAutovacuumThresholds(ctx, config.Config.DB, schema, table); err == nil {
+	if thresholds, err := util.FetchAutovacuumThresholds(ctx, targetDB(ctx), schema, table); err == nil {
 		computed := toThresholdsResponse(thresholds)
 		thresholdsResp = &computed
 	}
@@ -1160,7 +1262,7 @@ type freezeDatabaseResponse struct {
 }
 
 func handleCheckFreezeByDatabase(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	dbs, err := util.FetchFreezeByDatabase(ctx, config.Config.DB)
+	dbs, err := util.FetchFreezeByDatabase(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1198,7 +1300,7 @@ type freezeTableResponse struct {
 
 func handleCheckFreezeByTable(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := intParam(req, "limit", 50)
-	tables, err := util.FetchFreezeByTable(ctx, config.Config.DB, limit)
+	tables, err := util.FetchFreezeByTable(ctx, targetDB(ctx), limit)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1243,7 +1345,7 @@ type streamingStandbyResponse struct {
 }
 
 func handleCheckStreamingStandbys(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	standbys, err := util.FetchStreamingStandbys(ctx, config.Config.DB)
+	standbys, err := util.FetchStreamingStandbys(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1288,7 +1390,7 @@ type replicationConfigResponse struct {
 }
 
 func handleCheckReplicationConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	params, counts, err := util.FetchReplicationConfig(ctx, config.Config.DB)
+	params, counts, err := util.FetchReplicationConfig(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1337,7 +1439,7 @@ type databaseSizeReportResponse struct {
 }
 
 func handleCheckDatabaseSizes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	report, err := util.FetchDatabaseSizes(ctx, config.Config.DB)
+	report, err := util.FetchDatabaseSizes(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1379,7 +1481,7 @@ type tempFileUsageResponse struct {
 }
 
 func handleCheckTempFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	usage, err := util.FetchTempFileUsage(ctx, config.Config.DB)
+	usage, err := util.FetchTempFileUsage(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1428,13 +1530,13 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	stats, err := util.FetchMemoryStats(ctx, config.Config.DB)
+	stats, err := util.FetchMemoryStats(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	cacheHit := toCacheHitSummaryResponse(stats.CacheHit, 0)
 	if interval > 0 {
-		report, err := util.FetchCacheHitReport(ctx, config.Config.DB, interval, 0)
+		report, err := util.FetchCacheHitReport(ctx, targetDB(ctx), interval, 0)
 		if err != nil {
 			stats.Warnings = append(stats.Warnings, "cache hit delta: "+err.Error())
 		} else {
@@ -1482,7 +1584,7 @@ type publicationResponse struct {
 }
 
 func handleCheckPublications(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	pubs, err := util.FetchPublications(ctx, config.Config.DB)
+	pubs, err := util.FetchPublications(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1537,7 +1639,7 @@ func handleCheckPublicationTables(ctx context.Context, req mcp.CallToolRequest) 
 	if pubname == "" {
 		return mcp.NewToolResultError("name parameter is required"), nil
 	}
-	tables, err := util.FetchPublicationTables(ctx, config.Config.DB, pubname)
+	tables, err := util.FetchPublicationTables(ctx, targetDB(ctx), pubname)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1575,7 +1677,7 @@ func handleCheckSubscriptionTables(ctx context.Context, req mcp.CallToolRequest)
 	if subname == "" {
 		return mcp.NewToolResultError("name parameter is required"), nil
 	}
-	tables, err := util.FetchSubscriptionTables(ctx, config.Config.DB, subname)
+	tables, err := util.FetchSubscriptionTables(ctx, targetDB(ctx), subname)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1610,7 +1712,7 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		LastAutovacuum  *string  `json:"last_autovacuum"`
 		ToastColumns    string   `json:"toast_columns"`
 	}
-	tables, err := util.FetchToastTables(ctx, config.Config.DB, 50)
+	tables, err := util.FetchToastTables(ctx, targetDB(ctx), 50)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1639,7 +1741,7 @@ func handleCheckToastTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func handleCheckSubscriptions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	subs, err := util.FetchSubscriptions(ctx, config.Config.DB)
+	subs, err := util.FetchSubscriptions(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1681,7 +1783,7 @@ type replicaIdentityResponse struct {
 }
 
 func handleCheckReplicaIdentity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	issues, err := util.FetchReplicaIdentityIssues(ctx, config.Config.DB)
+	issues, err := util.FetchReplicaIdentityIssues(ctx, targetDB(ctx))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1743,7 +1845,7 @@ type tableChurnResponse struct {
 }
 
 func handleCheckTableChurn(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	tables, err := util.FetchTableChurn(ctx, config.Config.DB, intParam(req, "limit", 20))
+	tables, err := util.FetchTableChurn(ctx, targetDB(ctx), intParam(req, "limit", 20))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -1751,7 +1853,7 @@ func handleCheckTableChurn(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	var warnings []string
 	if req.GetBool("include_bloat", false) {
 		maxBytes := int64(req.GetFloat("bloat_max_table_bytes", util.DefaultBloatMaxTableBytes))
-		if bloat, err = util.FetchTableBloat(ctx, config.Config.DB, tables, maxBytes); err != nil {
+		if bloat, err = util.FetchTableBloat(ctx, targetDB(ctx), tables, maxBytes); err != nil {
 			warnings = append(warnings, "bloat estimate: "+err.Error())
 		}
 	}
@@ -1847,7 +1949,7 @@ type ioResponse struct {
 }
 
 func handleCheckIO(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	stats, err := util.FetchIOStats(ctx, config.Config.DB)
+	stats, err := util.FetchIOStats(ctx, targetDB(ctx))
 	if result, unsupported := unsupportedResult(ctx, err); unsupported {
 		return result, nil
 	}
@@ -1892,7 +1994,7 @@ type walResponse struct {
 }
 
 func handleCheckWAL(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	stats, err := util.FetchWALStats(ctx, config.Config.DB)
+	stats, err := util.FetchWALStats(ctx, targetDB(ctx))
 	if result, unsupported := unsupportedResult(ctx, err); unsupported {
 		return result, nil
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/liciomatos/pgdba-cli/config"
 	"github.com/liciomatos/pgdba-cli/util"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -16,6 +15,7 @@ import (
 // in context. Fields after server_version come from FetchServerMeta and are omitted
 // when it fails (the failure is reported in warnings).
 type responseMeta struct {
+	Target                  string                        `json:"target"` // "primary" or a --replica name
 	Host                    string                        `json:"host"`
 	Database                string                        `json:"database"`
 	ServerVersion           string                        `json:"server_version"`
@@ -57,15 +57,17 @@ type envelope struct {
 // buildMeta returns the meta block and, when the server metadata can't be read, a
 // warning saying so (the identity fields are always present).
 func buildMeta(ctx context.Context) (responseMeta, string) {
+	target := targetFromContext(ctx)
 	meta := responseMeta{
-		Host:          config.Config.Host,
-		Database:      config.Config.DBName,
-		ServerVersion: config.Config.Version,
+		Target:        target.Name,
+		Host:          target.Host,
+		Database:      target.DBName,
+		ServerVersion: target.Version,
 	}
-	if config.Config.DB == nil {
+	if target.DB == nil {
 		return meta, ""
 	}
-	server, err := util.FetchServerMeta(ctx, config.Config.DB)
+	server, err := util.FetchServerMeta(ctx, target.DB)
 	if err != nil {
 		return meta, "server metadata: " + err.Error()
 	}

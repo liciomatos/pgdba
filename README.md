@@ -165,6 +165,23 @@ parameters:
 | `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
 | `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
 
+### Querying replicas
+
+Index usage, cache hit and table statistics are kept per instance: a standby has its own
+counters. Give the MCP server the replicas too and every tool accepts a `target`
+argument (`primary` by default):
+
+```bash
+pgdba-cli --mcp --url "postgres://user:pass@primary/db" \
+  --replica "replica1=postgres://user:pass@standby1/db" \
+  --replica-vault "replica2=standby2-entry"     # URI stored in the vault
+```
+
+`check_index_usage` with `compare: true` runs on the primary and every replica and lists
+each index's scans per server (`per_target`) with `unused_everywhere`, so an index that
+only serves replica reads isn't mistaken for an unused one. Replicas must run the same
+major version as the primary; `meta.target` and `meta.role` say which server answered.
+
 Tools that read `pg_stat_statements` work with every extension version (the timing columns
 were renamed in 1.8) and report `pg_stat_statements_version`.
 

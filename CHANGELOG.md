@@ -6,6 +6,11 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Query replicas from the MCP server**: `--replica name=URL` / `--replica-vault
+  name=entry` (repeatable) add servers, and every tool accepts `target` (`primary` by
+  default); `meta.target`/`meta.role` tell which server answered. `check_index_usage`
+  gains `compare: true`, listing each index's scans on the primary and on every replica
+  side by side with `unused_everywhere`. Replicas must run the primary's major version.
 - **Table Churn screen (`H`) and `check_table_churn` MCP tool**: inserts, updates, deletes
   and HOT updates per table with `hot_pct`, `n_tup_newpage_upd` (PG16+) and fillfactor;
   update-heavy tables (≥ 10k updates) with < 50% HOT get a warning and a fix hint. The MCP
