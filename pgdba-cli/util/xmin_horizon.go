@@ -201,6 +201,6 @@ func (m XminHorizonModel) View() string {
 	s := RenderHeader("Xmin Horizon") + "\n"
 	s += summary + "\n\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter query • / filter • r refresh • ? help • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter query • r refresh • ? help • q back")
 	return s
 }

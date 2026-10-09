@@ -90,6 +90,13 @@ All notable changes to pgdba-cli are documented here. Format follows
   screen. `slow_query_count` is `null` with `slow_query_unavailable_reason` instead of `-1`.
 
 ### Fixed
+- **Consistent screen footers**: Table Churn and Xmin Horizon no longer show "/ filter"
+  twice; Query Detail and the help page use the same "q back" style as every other
+  screen; the Schema Browser column view says "q back to tables" (q already went back to
+  the table list, while the footer suggested it left the screen); Autovacuum and TOAST
+  show "↑↓ navigate" like the other table screens.
+- **Dashboard shortcuts wrapped on 80-column terminals** after the new X/V/H/O keys:
+  they now span four rows of at most 80 columns, so the header stays on screen.
 - **Slow Queries, Query Load and the dashboard failed on pg_stat_statements < 1.8**
   (`column "total_exec_time" does not exist`), common after a major upgrade without
   `ALTER EXTENSION ... UPDATE`. The extension version is detected and the pre-1.8

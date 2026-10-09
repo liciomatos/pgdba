@@ -391,9 +391,9 @@ func (m DashboardModel) View() string {
 	// Measure instead of hand-counting lines: sections vary (freeze line, WAL rows).
 	// On short terminals drop the blank separators so the footer stays on screen —
 	// bubbletea would otherwise cut the header off the top.
-	// divider + 3 shortcut rows; the blank line above the divider is the body's
+	// divider + 4 shortcut rows; the blank line above the divider is the body's
 	// trailing newline, which lipgloss.Height already counts.
-	const footerLines = 4
+	const footerLines = 5
 	body := m.renderBody(false)
 	if m.height > 0 && lipgloss.Height(header+body)+footerLines > m.height {
 		body = m.renderBody(true)
@@ -415,6 +415,8 @@ func (m DashboardModel) View() string {
 		renderKey("6") + " " + renderLabel("autovac") + "  " +
 		renderKey("7") + " " + renderLabel("index") + "  " +
 		renderKey("8") + " " + renderLabel("cache")
+	// Four rows of at most 80 columns: a longer row wraps on an
+	// 80-column terminal and pushes the header off screen.
 	shortcutRow2 := renderKey("9") + " " + renderLabel("users") + "  " +
 		renderKey("0") + " " + renderLabel("roles") + "  " +
 		renderKey("p") + " " + renderLabel("config") + "  " +
@@ -422,15 +424,15 @@ func (m DashboardModel) View() string {
 		renderKey("e") + " " + renderLabel("ext") + "  " +
 		renderKey("D") + " " + renderLabel("switch-db") + "  " +
 		renderKey("L") + " " + renderLabel("load") + "  " +
-		renderKey("w") + " " + renderLabel("waits") + "  " +
-		renderKey("f") + " " + renderLabel("freeze")
-	shortcutRow3 := renderKey("S") + " " + renderLabel("db-size") + "  " +
+		renderKey("w") + " " + renderLabel("waits")
+	shortcutRow3 := renderKey("f") + " " + renderLabel("freeze") + "  " +
+		renderKey("S") + " " + renderLabel("db-size") + "  " +
 		renderKey("t") + " " + renderLabel("temp-files") + "  " +
 		renderKey("m") + " " + renderLabel("memory") + "  " +
 		renderKey("R") + " " + renderLabel("pub/sub") + "  " +
 		renderKey("T") + " " + renderLabel("toast") + "  " +
-		renderKey("I") + " " + renderLabel("replica-id") + "  " +
-		renderKey("X") + " " + renderLabel("xmin") + "  " +
+		renderKey("I") + " " + renderLabel("replica-id")
+	shortcutRow4 := renderKey("X") + " " + renderLabel("xmin") + "  " +
 		renderKey("V") + " " + renderLabel("vacuum") + "  " +
 		renderKey("H") + " " + renderLabel("hot") + "  " +
 		renderKey("O") + " " + renderLabel("io/wal") + "  " +
@@ -438,7 +440,7 @@ func (m DashboardModel) View() string {
 		renderKey("?") + " " + renderLabel("help") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 
-	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3
+	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3 + "\n" + shortcutRow4
 	return s
 }
 
