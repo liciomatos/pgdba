@@ -76,7 +76,7 @@ func RenderQueryDetail(screenName, text string, width int) string {
 	wrapped := lipgloss.NewStyle().Foreground(ColorWhite).Width(w).Render(wrapText(text, w))
 	return RenderHeader(screenName+" — Query Detail") + "\n" +
 		wrapped + "\n\n" +
-		FooterStyle.Render("esc / enter / q  close")
+		FooterStyle.Render("q back")
 }
 
 // FilterFooter returns the footer string based on current filter state.

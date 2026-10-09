@@ -323,7 +323,7 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Keys: []HelpItem{
 			{"enter", "describe the selected table"},
-			{"esc / r", "from the column view, back to the table list"},
+			{"q esc r", "from the column view, back to the table list"},
 			{"/", "filter rows by text"},
 		},
 		Source: "information_schema.tables, information_schema.columns, pg_class (size, reltuples)",
@@ -669,7 +669,7 @@ func (m HelpModel) View() string {
 		scroll = fmt.Sprintf(" • %d%%", int(m.viewport.ScrollPercent()*100))
 	}
 	return m.header() + "\n" + m.viewport.View() + "\n\n" +
-		FooterStyle.Render("↑↓ pgup pgdn scroll • q / esc / ? close"+scroll)
+		FooterStyle.Render("↑↓ pgup pgdn scroll • q back"+scroll)
 }
 
 func screenHelpOrFallback(topic string) ScreenHelp {

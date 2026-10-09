@@ -328,7 +328,7 @@ func (m AutovacuumModel) View() string {
 	if m.confirmVacuum {
 		s += fmt.Sprintf("\nVACUUM ANALYZE %s.%s? (y/n)\n", m.schemaName, m.tableName)
 	} else {
-		s += "\n" + FilterFooter(m.filterMode, m.filterText, "enter detail • v vacuum analyze • r refresh • ? help • q back")
+		s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • enter detail • v vacuum analyze • r refresh • ? help • q back")
 	}
 	return s
 }

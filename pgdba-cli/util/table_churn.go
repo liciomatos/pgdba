@@ -164,6 +164,6 @@ func (m TableChurnModel) View() string {
 	s := RenderHeader("Table Churn (HOT updates)") + "\n"
 	s += ColorizeTable(m.table.View(), m.table.Columns(), rules)
 	s += "\n" + lipgloss.NewStyle().Foreground(ColorYellow).Inherit(tipStyle).Render(tip)
-	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • / filter • r refresh • ? help • q back")
+	s += "\n" + FilterFooter(m.filterMode, m.filterText, "↑↓ navigate • r refresh • ? help • q back")
 	return s
 }
