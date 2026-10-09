@@ -47,6 +47,8 @@ var screenModels = map[string]tea.Model{
 	"ReplicationConfigModel":   ReplicationConfigModel{},
 	"ReplicationStandbysModel": ReplicationStandbysModel{},
 	"ReplicaIdentityModel":     ReplicaIdentityModel{},
+	"XminHorizonModel":         XminHorizonModel{},
+	"VacuumProgressModel":      VacuumProgressModel{},
 	"VersionModel":             VersionModel{},
 }
 

@@ -5,6 +5,29 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Xmin Horizon screen (`X`) and `check_xmin_horizon` MCP tool**: everything holding back
+  the xmin horizon — sessions with an open snapshot or XID, standbys via
+  `hot_standby_feedback`, replication slots (`xmin` / `catalog_xmin`) and prepared
+  transactions — oldest first, marking the holder that defines the horizon. Catalog-only
+  slots are flagged and don't count for user tables. Status is relative to
+  `autovacuum_freeze_max_age` (warning ≥ 5% or a transaction open > 1 h, critical ≥ 25%).
+- **Vacuum Progress screen (`V`) and `check_vacuum_progress` MCP tool**: every running
+  VACUUM/autovacuum in the cluster with phase, % of heap scanned/vacuumed, index passes,
+  dead-tuple memory (tuples up to PG16, bytes on PG17+), duration, and anti-wraparound
+  vacuums flagged.
+- **`check_server_info` MCP tool** and a richer `meta` block in every MCP response: role,
+  postmaster start time, uptime, `stats_reset` of the database / bgwriter / checkpointer
+  (PG17+) counters with seconds since each reset (a `note` explains a never-reset `null`),
+  and the pg_stat_statements version. The dashboard shows "stats since …" on its
+  connection line.
+- **Autovacuum screen: Trigger and Throttle columns** — dead tuples as a share of the
+  table's autovacuum trigger, and per-table cost overrides with how many times slower than
+  the global settings they make its vacuum. `check_autovacuum` returns the overrides, the
+  effective `cost_delay`/`cost_limit` (with the `-1` fallback to `vacuum_cost_*`
+  resolved), throughput in cost units/s and max uncached read MB/s, `slowdown_factor`,
+  `trigger_ratio`, `mod_since_analyze`, size in bytes and a `status`.
+
 ### Changed
 - **MCP responses use a single envelope** — every tool now returns
   `{"meta": {host, database, server_version}, "warnings": [...], "result": ...}` instead of

@@ -24,7 +24,7 @@ func TestRespond_WrapsResultInEnvelope(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
 		t.Fatalf("invalid JSON %q: %v", text, err)
 	}
-	if decoded.Meta != (responseMeta{Host: "db1", Database: "app", ServerVersion: "16.4"}) {
+	if meta := decoded.Meta; meta.Host != "db1" || meta.Database != "app" || meta.ServerVersion != "16.4" {
 		t.Errorf("unexpected meta %+v", decoded.Meta)
 	}
 	if len(decoded.Warnings) != 1 || decoded.Warnings[0] != "something failed" {

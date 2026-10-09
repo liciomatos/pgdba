@@ -59,13 +59,14 @@ var screenHelp = map[string]ScreenHelp{
 			{"Archiving", "pg_stat_archiver: ok, off, or FAILING (red) — while archiving fails, WAL can't leave pg_wal."},
 			{"Replication", "worst lag of physical standbys and of logical subscribers fed by this server — yellow > 64 MB / 10 s, red > 1 GB / 60 s; this server's subscriptions with apply/sync errors (PG15+) and conflicts (PG18+), yellow when > 0."},
 			{"Freeze", "oldest database's XID age toward the 2.1B wraparound limit — yellow > 7.1%, red > 8.6% (key f)."},
-			{"up …", "server uptime, on the connection line."},
+			{"up … • stats since …", "server uptime and when this database's cumulative statistics were last reset, on the connection line — every counter on this screen accumulates since then (\"never reset\": since the cluster was created or its last crash recovery)."},
 			{"Warnings", "parts of the dashboard that could not be read (missing extension, permission denied on a view, outdated pg_stat_statements). Each part is read on its own, so one failure never hides the rest."},
 		},
 		Keys: []HelpItem{
 			{"1-0", "slow queries, long running, replication slots, blocked queries, connections, autovacuum, index usage, cache hit, users, roles"},
 			{"p s e D L w f", "config, schema browser, extensions, switch database, query load, wait events, freeze monitor"},
 			{"S t m R T I", "database sizes, temp files, memory, pub/sub, TOAST tables, replica identity"},
+			{"X V", "xmin horizon (who holds back vacuum), vacuum progress"},
 			{"q ctrl+c", "quit pgdba"},
 		},
 		Reading: []string{
@@ -181,8 +182,10 @@ var screenHelp = map[string]ScreenHelp{
 		Columns: []HelpItem{
 			{"Status", "auto vacuum / manual vacuum = a vacuum is running on the table right now; idle = nothing running."},
 			{"Dead Tuples / Dead %", "rows deleted or updated but not yet vacuumed; Dead % yellow > 10, red > 30."},
+			{"Trigger", "dead tuples as a share of the autovacuum trigger (autovacuum_vacuum_threshold + scale_factor × reltuples, with the table's overrides): ≥ 100% = a vacuum is due (yellow), ≥ 200% = overdue (red)."},
 			{"Size", "total size including indexes and TOAST."},
-			{"Last Autovacuum / Autovac Count", "when autovacuum last finished on it and how many times since stats reset."},
+			{"Throttle", "global = the table uses the global cost settings; otherwise its override as cost_limit/cost_delay, plus xN when that makes its vacuum N times slower than the global settings (yellow; red from x10 or when the global setting is unthrottled)."},
+			{"Last Autovacuum / Autovacs", "when autovacuum last finished on it and how many times since stats reset."},
 			{"Workers bar", "running autovacuum workers vs autovacuum_max_workers; all busy = tables are waiting their turn."},
 		},
 		Keys: []HelpItem{
@@ -193,8 +196,10 @@ var screenHelp = map[string]ScreenHelp{
 		Reading: []string{
 			"High Dead % with an old Last Autovacuum means autovacuum isn't keeping up: open the detail to see the table's thresholds.",
 			"Dead tuples are estimates from the statistics collector; use 'b' in the detail for an exact pgstattuple measurement.",
+			"Autovacuum's speed limit is cost_limit / cost_delay: with the PG14+ vacuum_cost_page_miss of 2, 200/20ms allows ~39 MB/s of uncached reads, 600/2ms ~1.1 GB/s. The global autovacuum_vacuum_cost_* settings fall back to vacuum_cost_* when -1.",
+			"Tables with their own cost settings are left out of the cost balancing between workers, so a slow override stays slow even when it's the only vacuum running.",
 		},
-		Source: "pg_stat_user_tables, pg_stat_progress_vacuum, pg_stat_activity",
+		Source: "pg_stat_user_tables, pg_class (reloptions, reltuples), pg_settings, pg_stat_progress_vacuum, pg_stat_activity",
 	},
 	"autovacuum_detail": {
 		Title:   "Autovacuum Detail — one table's vacuum triggers and freeze status",
@@ -406,6 +411,45 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Source: "pg_stat_database (temp_files, temp_bytes, stats_reset)",
 	},
+	"xmin_horizon": {
+		Title:   "Xmin Horizon (key X) — what keeps vacuum from cleaning up",
+		Purpose: "Lists everything holding back the xmin horizon, oldest first: sessions with an open snapshot or transaction, standbys with hot_standby_feedback, replication slots and prepared transactions. Vacuum can't remove rows deleted after the horizon, and freezing can't advance past it — the usual cause of bloat that vacuum doesn't fix and of freeze ages that keep growing.",
+		Columns: []HelpItem{
+			{"Source", "session (a backend), replica (a standby's hot_standby_feedback, via its walsender), slot (replication slot xmin / catalog_xmin), prepared (two-phase transaction waiting for COMMIT/ROLLBACK PREPARED)."},
+			{"ID", "pid, standby application name, slot name, or prepared transaction gid."},
+			{"Xmin Age", "transactions since the holder's xmin (or its own XID); the oldest row defines the horizon, shown in the summary line."},
+			{"Xact Age", "time since the transaction started (sessions and prepared transactions)."},
+			{"State", "session state; slots show active/inactive, (catalog only) when the slot only holds catalog_xmin — that blocks cleanup of system catalogs, not user tables."},
+		},
+		Keys: []HelpItem{
+			{"enter", "show the session's full query"},
+			{"/", "filter rows by text"},
+		},
+		Reading: []string{
+			"Status is relative to autovacuum_freeze_max_age: warning from 5% of it (10M XIDs at the 200M default) or a transaction open for more than an hour, critical from 25% (50M).",
+			"Fix by source: end or terminate the session (Long Running Queries, key 2); for a replica, end its long queries or turn hot_standby_feedback off; drop or advance an unused slot (key 3); COMMIT PREPARED / ROLLBACK PREPARED a forgotten prepared transaction.",
+			"Walsenders are listed once, as replica, not again as sessions. The horizon is per cluster: holders in other databases affect this one too.",
+		},
+		Source: "pg_stat_activity (backend_xmin, backend_xid), pg_stat_replication (backend_xmin), pg_replication_slots (xmin, catalog_xmin), pg_prepared_xacts",
+	},
+	"vacuum_progress": {
+		Title:   "Vacuum Progress (key V) — VACUUMs running right now",
+		Purpose: "Every manual VACUUM and autovacuum running in the cluster, with its phase and progress, to answer 'is vacuum working on that table, and how far is it?'.",
+		Columns: []HelpItem{
+			{"Kind", "manual, auto, or wraparound — an autovacuum started to prevent XID wraparound: it can't be skipped, doesn't yield to lock requests, and means freezing fell behind (red)."},
+			{"Phase", "scanning heap → vacuuming indexes → vacuuming heap → cleaning up indexes → truncating heap → performing final cleanup."},
+			{"Scanned / Vacuumed", "share of the table's heap blocks scanned / vacuumed so far."},
+			{"Idx Passes", "index vacuum passes so far (PG17+: indexes processed / total in this pass). More than 1 means the dead-tuple memory filled up and every index had to be scanned again — raise maintenance_work_mem / autovacuum_work_mem."},
+			{"Dead Memory", "dead tuples collected / capacity (PG ≤ 16, in tuples) or dead-tuple memory used / available (PG17+, in bytes)."},
+			{"Duration", "time since the vacuum's transaction started."},
+		},
+		Reading: []string{
+			"Status is warning for anti-wraparound vacuums and for more than one index pass.",
+			"Vacuums in other databases are listed too; their table shows as (oid N) because it can only be resolved from inside that database.",
+			"A vacuum that stays in the same phase for long is usually throttled by its cost settings — see the Throttle column of the Autovacuum screen (key 6).",
+		},
+		Source: "pg_stat_progress_vacuum, pg_stat_activity",
+	},
 	"memory_stats": {
 		Title:   "Memory & Checkpoint Stats (key m) — buffers and write activity",
 		Purpose: "Memory-related settings, the cluster-wide cache hit ratio and checkpoint / background writer counters — SQL-only, so it works against remote servers.",
@@ -418,7 +462,7 @@ var screenHelp = map[string]ScreenHelp{
 			"PG17+ reads checkpoint counters from pg_stat_checkpointer instead of pg_stat_bgwriter.",
 			"Settings, cache hit and checkpoints are read independently; a part that fails is shown as a yellow ⚠ line and the rest still loads.",
 		},
-		Source:  "pg_settings, pg_stat_database, pg_stat_bgwriter, pg_stat_checkpointer (PG17+)",
+		Source: "pg_settings, pg_stat_database, pg_stat_bgwriter, pg_stat_checkpointer (PG17+)",
 	},
 	"pub_sub": {
 		Title:   "Pub/Sub (key R) — logical replication publications and subscriptions",
@@ -678,4 +722,6 @@ func (m ToastTablesModel) HelpTopic() string         { return "toast_tables" }
 func (m ReplicationConfigModel) HelpTopic() string   { return "replication_config" }
 func (m ReplicationStandbysModel) HelpTopic() string { return "replication_standbys" }
 func (m ReplicaIdentityModel) HelpTopic() string     { return "replica_identity" }
+func (m XminHorizonModel) HelpTopic() string         { return "xmin_horizon" }
+func (m VacuumProgressModel) HelpTopic() string      { return "vacuum_progress" }
 func (m VersionModel) HelpTopic() string             { return "version" }

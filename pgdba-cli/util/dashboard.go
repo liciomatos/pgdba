@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/liciomatos/pgdba-cli/config"
 )
 
@@ -32,6 +32,7 @@ type metricSection struct {
 type DashboardModel struct {
 	sections   []metricSection
 	uptime     string // shown on the connection line
+	statsSince string // "stats since <date> (<age>)" or "stats never reset", on the connection line
 	connPct    float64
 	connUsed   int
 	connMax    int
@@ -51,7 +52,7 @@ func CheckDashboard() tea.Model {
 	if err != nil {
 		return DashboardModel{
 			sections: []metricSection{{
-				name: "Error",
+				name:  "Error",
 				pairs: []metricPair{{left: dashboardMetric{"Error loading dashboard", err.Error(), 2}}},
 			}},
 			width: 80, height: 24,
@@ -222,6 +223,7 @@ func CheckDashboard() tea.Model {
 	return DashboardModel{
 		sections:   sections,
 		uptime:     formatUptime(data.UptimeSeconds),
+		statsSince: formatStatsSince(data.StatsReset),
 		connPct:    data.ConnectionPct,
 		connUsed:   data.UsedConnections,
 		connMax:    data.MaxConnections,
@@ -381,10 +383,15 @@ func (m DashboardModel) View() string {
 	logo := lipgloss.NewStyle().Bold(true).Foreground(ColorBlue).Render("pgdba")
 	sep := lipgloss.NewStyle().Foreground(ColorGray).Render(" › ")
 	name := lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Render("Dashboard")
-	conn := lipgloss.NewStyle().Faint(true).Render(
-		fmt.Sprintf("%s@%s:%d/%s  (v%s)  •  up %s",
+	connStyle := lipgloss.NewStyle().Faint(true)
+	if m.width > 0 {
+		// Cut instead of wrapping: a wrapped line would push the footer off screen.
+		connStyle = connStyle.MaxWidth(m.width)
+	}
+	conn := connStyle.Render(
+		fmt.Sprintf("%s@%s:%d/%s  (v%s)  •  up %s  •  %s",
 			config.Config.User, config.Config.Host, config.Config.Port,
-			config.Config.DBName, config.Config.Version, m.uptime),
+			config.Config.DBName, config.Config.Version, m.uptime, m.statsSince),
 	)
 	header := fmt.Sprintf("%s%s%s\n%s\n", logo, sep, name, conn)
 
@@ -403,7 +410,7 @@ func (m DashboardModel) View() string {
 		s += strings.Repeat("\n", padding)
 	}
 
-	renderKey   := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
+	renderKey := lipgloss.NewStyle().Foreground(ColorBlue).Bold(true).Render
 	renderLabel := lipgloss.NewStyle().Foreground(ColorGray).Render
 
 	divider := lipgloss.NewStyle().Foreground(ColorGray).Render("─────────────────────────────────────────────────────────────────")
@@ -430,12 +437,22 @@ func (m DashboardModel) View() string {
 		renderKey("R") + " " + renderLabel("pub/sub") + "  " +
 		renderKey("T") + " " + renderLabel("toast") + "  " +
 		renderKey("I") + " " + renderLabel("replica-id") + "  " +
+		renderKey("X") + " " + renderLabel("xmin") + "  " +
+		renderKey("V") + " " + renderLabel("vacuum") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("?") + " " + renderLabel("help") + "  " +
 		renderKey("q") + " " + renderLabel("quit")
 
 	s += "\n" + divider + "\n" + shortcutRow1 + "\n" + shortcutRow2 + "\n" + shortcutRow3
 	return s
+}
+
+// formatStatsSince tells since when the database's cumulative counters accumulate.
+func formatStatsSince(reset *time.Time) string {
+	if reset == nil {
+		return "stats never reset"
+	}
+	return fmt.Sprintf("stats since %s (%s)", reset.Format("2006-01-02"), formatAge(int64(time.Since(*reset).Seconds())))
 }
 
 // formatAge renders a duration in seconds compactly: 45s, 12m, 3h 5m, 2d 4h 1m.
