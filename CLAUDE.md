@@ -127,7 +127,7 @@ When adding a new diagnostic:
 1. Add `FetchMyThing(ctx, db, params)` to `util/fetch.go` returning a typed struct.
 2. Create `util/my_thing.go` with `CheckMyThing` calling `FetchMyThing`, converting to `table.Row`.
 3. Add `handleCheckMyThing` to `mcpserver/tools.go` calling `FetchMyThing`, marshaling to JSON.
-4. Register the tool in `mcpserver/server.go` with `s.AddTool(...)`, including
+4. Register the tool in `mcpserver/server.go` with `addTool(s, mcp.NewTool(...), handler)` (not `s.AddTool`: it adds the `target` argument), including
    `mcp.WithReadOnlyHintAnnotation(true)` and `mcp.WithDestructiveHintAnnotation(false)`
    unless the tool actually mutates data (none do today — every handler only calls
    `Fetch*`, never `Exec`/DDL). Without these hints, MCP clients treat the tool as
@@ -165,7 +165,7 @@ mcpserver/       → MCP server registration (server.go) and tool handlers (tool
    is already used by another screen for a screen-local action, that screen needs
    `ConsumesKey` — see "Global key conflicts" below (this was missed once already: adding
    global `S` for Database Sizes silently broke Replication Slots' own local `S` shortcut).
-5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `s.AddTool` in
+5. Add `handleCheckMyScreen` in `mcpserver/tools.go` and register with `addTool` in
    `mcpserver/server.go`, including the read-only annotations described above.
 6. Write its `?` help page: add a `ScreenHelp` entry to `screenHelp` in `util/help.go`
    (purpose, columns, screen-specific keys, how to read the values — the real thresholds
@@ -299,6 +299,13 @@ Flags take priority; env vars are used as defaults:
 `--vault NAME` loads a connection URI from the encrypted vault (`vault/` package,
 `pgdba-cli vault add|list|remove|path` subcommand in `vault_cmd.go`) and sets `--url` from it.
 `-W` prompts for the password after the URL is parsed and overrides every other source.
+
+`--replica NAME=URL` / `--replica-vault NAME=ENTRY` (repeatable, MCP mode, `replicas.go`) add
+servers to `config.Config.Replicas`. Every MCP tool is registered through `addTool`
+(`mcpserver/targets.go`), which adds an optional `target` argument and puts the chosen
+`*config.Target` in the context — handlers must use `targetDB(ctx)`, never
+`config.Config.DB`. Replicas must share the primary's major version because
+`pgMajorVersion()` reads the primary's version.
 
 If password is still empty after flag parsing, `~/.pgpass` is consulted (`hostname:port:database:username:password`, wildcards `*` supported).
 

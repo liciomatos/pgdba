@@ -144,6 +144,9 @@ func main() {
 	flag.BoolVar(&promptPassword, "W", false, "force password prompt (like psql -W)")
 	flag.BoolVar(&promptPassword, "password-prompt", false, "force password prompt (same as -W)")
 	flag.StringVar(&vaultName, "vault", "", "connect using a connection stored in the vault (see: pgdba-cli vault help)")
+	var replicas []replicaSpec
+	flag.Var(replicaFlags{specs: &replicas}, "replica", "MCP mode: extra server queryable with target=NAME, as NAME=postgres://... (repeatable)")
+	flag.Var(replicaFlags{specs: &replicas, fromVault: true}, "replica-vault", "MCP mode: like --replica, as NAME=VAULT_ENTRY (repeatable)")
 	flag.Parse()
 
 	if vaultName != "" {
@@ -198,6 +201,10 @@ func main() {
 	}
 
 	if serveMCP {
+		if config.Config.Replicas, err = connectReplicas(replicas, config.Config.Version); err != nil {
+			fmt.Fprintf(os.Stderr, "pgdba-cli: %v\n", err)
+			os.Exit(1)
+		}
 		if err := mcpserver.Serve(mcpPort); err != nil {
 			fmt.Fprintf(os.Stderr, "pgdba-cli: MCP server error: %v\n", err)
 			os.Exit(1)
