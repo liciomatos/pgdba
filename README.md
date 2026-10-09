@@ -161,6 +161,9 @@ parameters:
 | `check_pg_config` | `scope` | `key` (no filter) / `all` (with `filter`) | `key` = curated tuning parameters; `modified` = changed from the built-in default; `all` |
 | `check_pg_config` | `limit` / `offset` / `include_description` | `100` / `0` / `false` | paging; `short_desc` per parameter |
 | `check_long_running_queries` | `include_background` | `false` | also list autovacuum workers, walsenders and other background processes |
+| `check_index_usage` | `include_constraints` | `false` | also list indexes backing PK / UNIQUE / EXCLUDE constraints |
+| `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
+| `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
 
 Tools that read `pg_stat_statements` work with every extension version (the timing columns
 were renamed in 1.8) and report `pg_stat_statements_version`.
@@ -286,7 +289,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `4` | **Blocked Queries** | Blocked sessions and their blockers | `t` terminate session, `a` terminate all |
 | `5` | **Connections** | Connections by state with % of limit used | — |
 | `6` | **Autovacuum** | Tables ranked by dead tuples, with a Status column flagging what's vacuuming right now, dead tuples vs. the autovacuum trigger (Trigger %), per-table cost overrides and how many times slower than the global settings they make the table's vacuum (Throttle), and a worker-saturation bar vs. `autovacuum_max_workers` | `enter` detail view, `v` VACUUM ANALYZE |
-| `7` | **Index Usage** | Indexes sorted by scan count | `enter` index detail |
+| `7` | **Index Usage** | Indexes ranked by wasted space (size × low share of the table's scans), with share of scans, tuples per scan, and possible redundancies (duplicate, prefix, same columns in another order); PK/unique indexes hidden by default | `enter` index detail, `c` show/hide PK/unique |
 | `8` | **Cache Hit Ratio** | Buffer cache hit ratio per table | — |
 | `9` | **Users** | Login roles and their privileges | — |
 | `0` | **Roles** | Group roles and members | — |
@@ -304,6 +307,8 @@ From the main dashboard, open each screen with its shortcut key:
 | `T` | **TOAST Tables** | Tables with TOAST heap data — size, dead tuples, cache hit ratio, and the columns causing TOAST storage | `v` vacuum TOAST heap, `enter` parent detail |
 | `X` | **Xmin Horizon** | Everything holding back the xmin horizon — sessions, standbys (`hot_standby_feedback`), replication slots, prepared transactions — oldest first, flagging the one that defines it | `enter` full query, `/` filter |
 | `V` | **Vacuum Progress** | Every VACUUM/autovacuum running now: phase, % scanned/vacuumed, index passes, dead-tuple memory, anti-wraparound flag | — |
+| `H` | **Table Churn** | Inserts/updates/deletes per table with HOT update %, new-page updates (PG16+) and fillfactor, with a fix hint for update-heavy tables with few HOT updates | `/` filter |
+| `O` | **I/O & WAL** | WAL volume, full-page-image share and buffers-full (`pg_stat_wal`, PG14+) and buffer I/O by backend type and context (`pg_stat_io`, PG16+), with who writes relation blocks | — |
 | `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 
 Press `?` on any screen for its help page — a man-page style description of what the

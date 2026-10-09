@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,7 +57,10 @@ type dashboardResponse struct {
 	SlowQueryCount             *int     `json:"slow_query_count"`
 	SlowQueryUnavailableReason string   `json:"slow_query_unavailable_reason,omitempty"`
 	SlowThresholdMS            int      `json:"slow_threshold_ms"`
-	CacheHitRatio              *float64 `json:"cache_hit_ratio"`
+	HeapHitPct                 *float64 `json:"heap_hit_pct"`
+	IdxHitPct                  *float64 `json:"idx_hit_pct"`
+	CacheHitStatus             string   `json:"cache_hit_status"`
+	HeapHitFormula             string   `json:"heap_hit_formula"`
 	DeadTuples                 int64    `json:"dead_tuples"`
 	InvalidIndexes             int      `json:"invalid_indexes"`
 	ReplicationSlots           int      `json:"replication_slots"`
@@ -82,7 +86,10 @@ func handleCheckDashboard(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		SlowQueryCount:             data.SlowQueryCount,
 		SlowQueryUnavailableReason: data.SlowQueryUnavailableReason,
 		SlowThresholdMS:            data.SlowThresholdMS,
-		CacheHitRatio:              data.CacheHitRatio,
+		HeapHitPct:                 data.CacheHitRatio,
+		IdxHitPct:                  data.IndexHitRatio,
+		CacheHitStatus:             util.CacheHitStatus(data.CacheHitRatio).String(),
+		HeapHitFormula:             util.HeapHitFormula,
 		DeadTuples:                 data.DeadTuples,
 		InvalidIndexes:             data.InvalidIndexes,
 		ReplicationSlots:           data.ReplicationSlots,
@@ -477,72 +484,165 @@ func handleCheckVacuumProgress(ctx context.Context, req mcp.CallToolRequest) (*m
 
 // --- index usage ---
 
+type indexRedundancyResponse struct {
+	Index string `json:"index"`
+	Kind  string `json:"kind"` // duplicate, prefix, same_columns_different_order
+}
+
 type indexUsageResponse struct {
-	SchemaName   string `json:"schema_name"`
-	TableName    string `json:"table_name"`
-	IndexName    string `json:"index_name"`
-	IndexColumns string `json:"index_columns"`
-	IsValid      bool   `json:"is_valid"`
-	IdxScan      int64  `json:"idx_scan"`
-	IdxTupRead   int64  `json:"idx_tup_read"`
-	IdxTupFetch  int64  `json:"idx_tup_fetch"`
-	IndexSize    string `json:"index_size"`
+	SchemaName        string                    `json:"schema_name"`
+	TableName         string                    `json:"table_name"`
+	IndexName         string                    `json:"index_name"`
+	IndexColumns      string                    `json:"index_columns"`
+	Status            string                    `json:"status"`
+	IsValid           bool                      `json:"is_valid"`
+	IsPrimary         bool                      `json:"is_primary"`
+	IsUnique          bool                      `json:"is_unique"`
+	IsConstraint      bool                      `json:"is_constraint"`
+	AccessMethod      string                    `json:"access_method"`
+	IsPartial         bool                      `json:"is_partial"`
+	IdxScan           int64                     `json:"idx_scan"`
+	IdxTupRead        int64                     `json:"idx_tup_read"`
+	IdxTupFetch       int64                     `json:"idx_tup_fetch"`
+	TupReadPerScan    *float64                  `json:"tup_read_per_scan"`
+	TableScanSharePct *float64                  `json:"table_scan_share_pct"`
+	IndexSizeBytes    int64                     `json:"index_size_bytes"`
+	IndexSize         string                    `json:"index_size_pretty"`
+	WasteScoreBytes   float64                   `json:"waste_score_bytes"`
+	RedundantWith     []indexRedundancyResponse `json:"redundant_with"`
+}
+
+func toIndexUsageResponse(idx util.IndexUsage) indexUsageResponse {
+	redundancies := make([]indexRedundancyResponse, 0, len(idx.RedundantWith))
+	for _, redundancy := range idx.RedundantWith {
+		redundancies = append(redundancies, indexRedundancyResponse{Index: redundancy.OtherIndex, Kind: redundancy.Kind})
+	}
+	return indexUsageResponse{
+		SchemaName:        idx.SchemaName,
+		TableName:         idx.TableName,
+		IndexName:         idx.IndexName,
+		IndexColumns:      idx.IndexColumns,
+		Status:            util.IndexUsageStatus(idx).String(),
+		IsValid:           idx.IsValid,
+		IsPrimary:         idx.IsPrimary,
+		IsUnique:          idx.IsUnique,
+		IsConstraint:      idx.IsConstraint,
+		AccessMethod:      idx.AccessMethod,
+		IsPartial:         idx.IsPartial,
+		IdxScan:           idx.IdxScan,
+		IdxTupRead:        idx.IdxTupRead,
+		IdxTupFetch:       idx.IdxTupFetch,
+		TupReadPerScan:    idx.TupReadPerScan,
+		TableScanSharePct: idx.TableScanSharePct,
+		IndexSizeBytes:    idx.IndexSizeBytes,
+		IndexSize:         idx.IndexSize,
+		WasteScoreBytes:   idx.WasteScore(),
+		RedundantWith:     redundancies,
+	}
 }
 
 func handleCheckIndexUsage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	limit := intParam(req, "limit", 50)
-	indexes, err := util.FetchIndexUsage(ctx, config.Config.DB, limit)
+	opts := util.IndexUsageOptions{
+		Limit:              intParam(req, "limit", 50),
+		IncludeConstraints: req.GetBool("include_constraints", false),
+	}
+	indexes, err := util.FetchIndexUsage(ctx, config.Config.DB, opts)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	resp := make([]indexUsageResponse, 0, len(indexes))
 	for _, idx := range indexes {
-		resp = append(resp, indexUsageResponse{
-			SchemaName:   idx.SchemaName,
-			TableName:    idx.TableName,
-			IndexName:    idx.IndexName,
-			IndexColumns: idx.IndexColumns,
-			IsValid:      idx.IsValid,
-			IdxScan:      idx.IdxScan,
-			IdxTupRead:   idx.IdxTupRead,
-			IdxTupFetch:  idx.IdxTupFetch,
-			IndexSize:    idx.IndexSize,
-		})
+		resp = append(resp, toIndexUsageResponse(idx))
 	}
 	return respond(ctx, resp)
 }
 
 // --- cache hit ---
 
+// maxDeltaSeconds caps delta_seconds: the tool sleeps that long, and MCP clients time
+// out long calls.
+const maxDeltaSeconds = 60
+
+// deltaInterval reads delta_seconds (0 = cumulative since the stats reset).
+func deltaInterval(req mcp.CallToolRequest) (time.Duration, error) {
+	seconds := req.GetFloat("delta_seconds", 0)
+	if seconds < 0 || seconds > maxDeltaSeconds {
+		return 0, fmt.Errorf("delta_seconds must be between 0 and %d", maxDeltaSeconds)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+type cacheHitRatioResponse struct {
+	Pct     *float64 `json:"pct"`
+	Status  string   `json:"status"`
+	Hits    int64    `json:"blks_hit"`
+	Reads   int64    `json:"blks_read"`
+	Formula string   `json:"formula"`
+}
+
+type cacheHitSummaryResponse struct {
+	IntervalSeconds float64               `json:"interval_seconds"` // 0 = cumulative since stats reset
+	Heap            cacheHitRatioResponse `json:"heap"`
+	Index           cacheHitRatioResponse `json:"index"`
+	Database        cacheHitRatioResponse `json:"database"`
+}
+
+func toCacheHitSummaryResponse(summary util.CacheHitSummary, intervalSeconds float64) cacheHitSummaryResponse {
+	ratio := func(pct *float64, hits, reads int64, formula string) cacheHitRatioResponse {
+		return cacheHitRatioResponse{Pct: pct, Status: util.CacheHitStatus(pct).String(), Hits: hits, Reads: reads, Formula: formula}
+	}
+	return cacheHitSummaryResponse{
+		IntervalSeconds: intervalSeconds,
+		Heap:            ratio(summary.HeapHitPct, summary.HeapBlksHit, summary.HeapBlksRead, util.HeapHitFormula),
+		Index:           ratio(summary.IdxHitPct, summary.IdxBlksHit, summary.IdxBlksRead, util.IndexHitFormula),
+		Database:        ratio(summary.DatabaseHitPct, summary.DatabaseBlksHit, summary.DatabaseBlksRead, util.DatabaseHitFormula),
+	}
+}
+
 type cacheHitTableResponse struct {
-	TableName        string  `json:"table_name"`
-	HeapBlksRead     int64   `json:"heap_blks_read"`
-	HeapBlksHit      int64   `json:"heap_blks_hit"`
-	CacheHitRatio    float64 `json:"cache_hit_ratio"`
-	IdxBlksRead      int64   `json:"idx_blks_read"`
-	IdxBlksHit       int64   `json:"idx_blks_hit"`
-	IdxCacheHitRatio float64 `json:"idx_cache_hit_ratio"`
+	SchemaName   string   `json:"schema_name"`
+	TableName    string   `json:"table_name"`
+	Status       string   `json:"status"`
+	HeapBlksRead int64    `json:"heap_blks_read"`
+	HeapBlksHit  int64    `json:"heap_blks_hit"`
+	HeapHitPct   *float64 `json:"heap_hit_pct"`
+	IdxBlksRead  int64    `json:"idx_blks_read"`
+	IdxBlksHit   int64    `json:"idx_blks_hit"`
+	IdxHitPct    *float64 `json:"idx_hit_pct"`
+}
+
+type cacheHitResponse struct {
+	Summary cacheHitSummaryResponse `json:"summary"`
+	Tables  []cacheHitTableResponse `json:"tables"`
 }
 
 func handleCheckCacheHit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	limit := intParam(req, "limit", 50)
-	tables, err := util.FetchCacheHit(ctx, config.Config.DB, limit)
+	interval, err := deltaInterval(req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]cacheHitTableResponse, 0, len(tables))
-	for _, t := range tables {
-		resp = append(resp, cacheHitTableResponse{
-			TableName:        t.TableName,
-			HeapBlksRead:     t.HeapBlksRead,
-			HeapBlksHit:      t.HeapBlksHit,
-			CacheHitRatio:    t.CacheHitRatio,
-			IdxBlksRead:      t.IdxBlksRead,
-			IdxBlksHit:       t.IdxBlksHit,
-			IdxCacheHitRatio: t.IdxCacheHitRatio,
+	report, err := util.FetchCacheHitReport(ctx, config.Config.DB, interval, intParam(req, "limit", 50))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	tables := make([]cacheHitTableResponse, 0, len(report.Tables))
+	for _, t := range report.Tables {
+		tables = append(tables, cacheHitTableResponse{
+			SchemaName:   t.SchemaName,
+			TableName:    t.TableName,
+			Status:       util.TableCacheHitStatus(t.HeapHitPct).String(),
+			HeapBlksRead: t.HeapBlksRead,
+			HeapBlksHit:  t.HeapBlksHit,
+			HeapHitPct:   t.HeapHitPct,
+			IdxBlksRead:  t.IdxBlksRead,
+			IdxBlksHit:   t.IdxBlksHit,
+			IdxHitPct:    t.IdxHitPct,
 		})
 	}
-	return respond(ctx, resp)
+	return respond(ctx, cacheHitResponse{
+		Summary: toCacheHitSummaryResponse(report.Summary, report.IntervalSeconds),
+		Tables:  tables,
+	})
 }
 
 // --- wait events ---
@@ -1318,15 +1418,28 @@ type checkpointStatsResponse struct {
 }
 
 type memoryStatsResponse struct {
-	Configs       []memoryConfigResponse  `json:"configs"`
-	CacheHitRatio float64                 `json:"cache_hit_ratio"`
-	Checkpoint    checkpointStatsResponse `json:"checkpoint"`
+	Configs    []memoryConfigResponse  `json:"configs"`
+	CacheHit   cacheHitSummaryResponse `json:"cache_hit"`
+	Checkpoint checkpointStatsResponse `json:"checkpoint"`
 }
 
 func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	interval, err := deltaInterval(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	stats, err := util.FetchMemoryStats(ctx, config.Config.DB)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	cacheHit := toCacheHitSummaryResponse(stats.CacheHit, 0)
+	if interval > 0 {
+		report, err := util.FetchCacheHitReport(ctx, config.Config.DB, interval, 0)
+		if err != nil {
+			stats.Warnings = append(stats.Warnings, "cache hit delta: "+err.Error())
+		} else {
+			cacheHit = toCacheHitSummaryResponse(report.Summary, report.IntervalSeconds)
+		}
 	}
 	configs := make([]memoryConfigResponse, 0, len(stats.Configs))
 	for _, c := range stats.Configs {
@@ -1338,8 +1451,8 @@ func handleCheckMemoryStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		})
 	}
 	return respond(ctx, memoryStatsResponse{
-		Configs:       configs,
-		CacheHitRatio: stats.CacheHitRatio,
+		Configs:  configs,
+		CacheHit: cacheHit,
 		Checkpoint: checkpointStatsResponse{
 			CheckpointsTimed:    stats.Checkpoint.CheckpointsTimed,
 			CheckpointsReq:      stats.Checkpoint.CheckpointsReq,
@@ -1592,6 +1705,219 @@ func handleCheckReplicaIdentity(ctx context.Context, req mcp.CallToolRequest) (*
 			TotalSize:             issue.TotalSize,
 			Status:                status,
 		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- table churn ---
+
+type tableBloatResponse struct {
+	TableLenBytes   int64   `json:"table_len_bytes"`
+	ScannedPct      float64 `json:"scanned_pct"`
+	DeadTupleBytes  int64   `json:"dead_tuple_bytes"`
+	DeadTuplePct    float64 `json:"dead_tuple_pct"`
+	ApproxFreeBytes int64   `json:"approx_free_bytes"`
+	ApproxFreePct   float64 `json:"approx_free_pct"`
+}
+
+type tableChurnResponse struct {
+	SchemaName         string              `json:"schema_name"`
+	TableName          string              `json:"table_name"`
+	Status             string              `json:"status"`
+	Hint               string              `json:"hint,omitempty"`
+	Inserts            int64               `json:"n_tup_ins"`
+	Updates            int64               `json:"n_tup_upd"`
+	Deletes            int64               `json:"n_tup_del"`
+	HotUpdates         int64               `json:"n_tup_hot_upd"`
+	NewPageUpdates     *int64              `json:"n_tup_newpage_upd,omitempty"` // PG16+
+	HotPct             *float64            `json:"hot_pct"`
+	Fillfactor         int                 `json:"fillfactor"`
+	FillfactorSet      bool                `json:"fillfactor_set"`
+	LiveTuples         int64               `json:"live_tuples"`
+	DeadTuples         int64               `json:"dead_tuples"`
+	TableSizeBytes     int64               `json:"table_size_bytes"`
+	TotalSizeBytes     int64               `json:"total_size_bytes"`
+	TotalSize          string              `json:"total_size_pretty"`
+	Bloat              *tableBloatResponse `json:"bloat,omitempty"`
+	BloatSkippedReason string              `json:"bloat_skipped_reason,omitempty"`
+}
+
+func handleCheckTableChurn(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	tables, err := util.FetchTableChurn(ctx, config.Config.DB, intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var bloat map[string]util.TableBloatEstimate
+	var warnings []string
+	if req.GetBool("include_bloat", false) {
+		maxBytes := int64(req.GetFloat("bloat_max_table_bytes", util.DefaultBloatMaxTableBytes))
+		if bloat, err = util.FetchTableBloat(ctx, config.Config.DB, tables, maxBytes); err != nil {
+			warnings = append(warnings, "bloat estimate: "+err.Error())
+		}
+	}
+	resp := make([]tableChurnResponse, 0, len(tables))
+	for _, t := range tables {
+		row := tableChurnResponse{
+			SchemaName:     t.SchemaName,
+			TableName:      t.TableName,
+			Status:         util.TableChurnStatus(t).String(),
+			Hint:           util.TableChurnHint(t),
+			Inserts:        t.Inserts,
+			Updates:        t.Updates,
+			Deletes:        t.Deletes,
+			HotUpdates:     t.HotUpdates,
+			NewPageUpdates: t.NewPageUpdates,
+			HotPct:         t.HotPct,
+			Fillfactor:     t.Fillfactor,
+			FillfactorSet:  t.FillfactorSet,
+			LiveTuples:     t.LiveTuples,
+			DeadTuples:     t.DeadTuples,
+			TableSizeBytes: t.TableSizeBytes,
+			TotalSizeBytes: t.TotalSizeBytes,
+			TotalSize:      t.TotalSize,
+		}
+		if estimate, ok := bloat[t.SchemaName+"."+t.TableName]; ok {
+			if estimate.SkippedReason != "" {
+				row.BloatSkippedReason = estimate.SkippedReason
+			} else {
+				row.Bloat = &tableBloatResponse{
+					TableLenBytes:   estimate.TableLenBytes,
+					ScannedPct:      estimate.ScannedPct,
+					DeadTupleBytes:  estimate.DeadTupleBytes,
+					DeadTuplePct:    estimate.DeadTuplePct,
+					ApproxFreeBytes: estimate.ApproxFreeBytes,
+					ApproxFreePct:   estimate.ApproxFreePct,
+				}
+			}
+		}
+		resp = append(resp, row)
+	}
+	return respond(ctx, resp, warnings...)
+}
+
+// --- I/O and WAL ---
+
+// unsupportedResponse answers a tool whose view doesn't exist on this server version:
+// a normal result, not an error, so the client can tell "unavailable" from "failed".
+type unsupportedResponse struct {
+	Status        string `json:"status"` // always "unsupported"
+	Reason        string `json:"reason"`
+	ServerVersion string `json:"server_version"`
+}
+
+// unsupportedResult returns the unsupported response when err is an UnsupportedError.
+func unsupportedResult(ctx context.Context, err error) (*mcp.CallToolResult, bool) {
+	var unsupported util.UnsupportedError
+	if !errors.As(err, &unsupported) {
+		return nil, false
+	}
+	result, _ := respond(ctx, unsupportedResponse{Status: "unsupported", Reason: unsupported.Error(), ServerVersion: unsupported.ServerVersion})
+	return result, true
+}
+
+type ioRowResponse struct {
+	BackendType string `json:"backend_type"`
+	Object      string `json:"object"`
+	Context     string `json:"context"`
+	Reads       int64  `json:"reads"`
+	ReadBytes   int64  `json:"read_bytes"`
+	Writes      int64  `json:"writes"`
+	WriteBytes  int64  `json:"write_bytes"`
+	Writebacks  int64  `json:"writebacks"`
+	Extends     int64  `json:"extends"`
+	ExtendBytes int64  `json:"extend_bytes"`
+	Hits        int64  `json:"hits"`
+	Evictions   int64  `json:"evictions"`
+	Reuses      int64  `json:"reuses"`
+	Fsyncs      int64  `json:"fsyncs"`
+}
+
+type ioShareResponse struct {
+	BackendType string  `json:"backend_type"`
+	Writes      int64   `json:"writes"`
+	Pct         float64 `json:"pct"`
+}
+
+type ioResponse struct {
+	Status                string            `json:"status"`
+	StatsReset            *string           `json:"stats_reset"`
+	ClientBackendWritePct *float64          `json:"client_backend_normal_write_pct"`
+	RelationWritesBy      []ioShareResponse `json:"relation_writes_by_backend_type"`
+	Rows                  []ioRowResponse   `json:"rows"`
+}
+
+func handleCheckIO(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	stats, err := util.FetchIOStats(ctx, config.Config.DB)
+	if result, unsupported := unsupportedResult(ctx, err); unsupported {
+		return result, nil
+	}
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := ioResponse{
+		Status:                util.IOStatsStatus(stats).String(),
+		ClientBackendWritePct: stats.ClientBackendWritePct,
+		RelationWritesBy:      make([]ioShareResponse, 0, len(stats.WritesByBackend)),
+		Rows:                  make([]ioRowResponse, 0, len(stats.Rows)),
+	}
+	if stats.StatsReset != nil {
+		formatted := stats.StatsReset.Format(time.RFC3339)
+		resp.StatsReset = &formatted
+	}
+	for _, share := range stats.WritesByBackend {
+		resp.RelationWritesBy = append(resp.RelationWritesBy, ioShareResponse{BackendType: share.BackendType, Writes: share.Writes, Pct: share.Pct})
+	}
+	for _, row := range stats.Rows {
+		resp.Rows = append(resp.Rows, ioRowResponse(row))
+	}
+	return respond(ctx, resp)
+}
+
+type walResponse struct {
+	Status            string   `json:"status"`
+	Records           int64    `json:"wal_records"`
+	FPI               int64    `json:"wal_fpi"`
+	Bytes             int64    `json:"wal_bytes"`
+	BuffersFull       int64    `json:"wal_buffers_full"`
+	FPIPct            *float64 `json:"fpi_pct"`
+	BytesPerRecord    *float64 `json:"bytes_per_record"`
+	BytesPerSecond    *float64 `json:"bytes_per_second_since_reset"`
+	StatsReset        *string  `json:"stats_reset"`
+	SecondsSinceReset *int64   `json:"seconds_since_reset"`
+	FullPageWrites    string   `json:"full_page_writes"`
+	WALCompression    string   `json:"wal_compression"`
+	CheckpointTimeout string   `json:"checkpoint_timeout"`
+	MaxWALSize        string   `json:"max_wal_size"`
+	WALBuffers        string   `json:"wal_buffers"`
+}
+
+func handleCheckWAL(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	stats, err := util.FetchWALStats(ctx, config.Config.DB)
+	if result, unsupported := unsupportedResult(ctx, err); unsupported {
+		return result, nil
+	}
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := walResponse{
+		Status:            util.WALStatsStatus(stats).String(),
+		Records:           stats.Records,
+		FPI:               stats.FPI,
+		Bytes:             stats.Bytes,
+		BuffersFull:       stats.BuffersFull,
+		FPIPct:            stats.FPIPct(),
+		BytesPerRecord:    stats.BytesPerRecord(),
+		BytesPerSecond:    stats.BytesPerSecond(),
+		SecondsSinceReset: stats.SecondsSinceReset,
+		FullPageWrites:    stats.FullPageWrites,
+		WALCompression:    stats.WALCompression,
+		CheckpointTimeout: stats.CheckpointTimeout,
+		MaxWALSize:        stats.MaxWALSize,
+		WALBuffers:        stats.WALBuffers,
+	}
+	if stats.StatsReset != nil {
+		formatted := stats.StatsReset.Format(time.RFC3339)
+		resp.StatsReset = &formatted
 	}
 	return respond(ctx, resp)
 }

@@ -91,15 +91,14 @@ func (m MemoryStatsModel) View() string {
 	s := RenderHeader("Memory & Checkpoint Stats") + "\n"
 	s += m.table.View() + "\n"
 
-	cacheHitColor := ColorGreen
-	if m.stats.CacheHitRatio < 90 {
-		cacheHitColor = ColorRed
-	} else if m.stats.CacheHitRatio < 99 {
-		cacheHitColor = ColorYellow
+	renderHit := func(pct *float64) string {
+		return SeverityColor(formatHitPct(pct), int(CacheHitStatus(pct)))
 	}
-	s += fmt.Sprintf("\n  %s %s\n",
-		renderLabel("Buffer cache hit ratio:"),
-		lipgloss.NewStyle().Foreground(cacheHitColor).Render(fmt.Sprintf("%.2f%%", m.stats.CacheHitRatio)))
+	hit := m.stats.CacheHit
+	s += fmt.Sprintf("\n  %s %s   %s %s   %s %s\n",
+		renderLabel("Cache hit — heap:"), renderHit(hit.HeapHitPct),
+		renderLabel("index:"), renderHit(hit.IdxHitPct),
+		renderLabel("database (all blocks):"), renderHit(hit.DatabaseHitPct))
 
 	cp := m.stats.Checkpoint
 	buffersBackendStr := "N/A (moved to pg_stat_io in PG17+)"

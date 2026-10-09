@@ -6,6 +6,15 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Table Churn screen (`H`) and `check_table_churn` MCP tool**: inserts, updates, deletes
+  and HOT updates per table with `hot_pct`, `n_tup_newpage_upd` (PG16+) and fillfactor;
+  update-heavy tables (≥ 10k updates) with < 50% HOT get a warning and a fix hint. The MCP
+  tool can add a `pgstattuple_approx` bloat estimate (`include_bloat`), skipping tables
+  above `bloat_max_table_bytes`.
+- **I/O & WAL screen (`O`) and `check_io` / `check_wal` MCP tools**: `pg_stat_io` (PG16+) by
+  backend type, object and context with bytes and who writes relation blocks, and
+  `pg_stat_wal` (PG14+) with full-page-image %, bytes per record/second and the settings
+  that drive them. Older servers get `{"status": "unsupported"}` instead of an error.
 - **Xmin Horizon screen (`X`) and `check_xmin_horizon` MCP tool**: everything holding back
   the xmin horizon — sessions with an open snapshot or XID, standbys via
   `hot_standby_feedback`, replication slots (`xmin` / `catalog_xmin`) and prepared
@@ -29,6 +38,19 @@ All notable changes to pgdba-cli are documented here. Format follows
   `trigger_ratio`, `mod_since_analyze`, size in bytes and a `status`.
 
 ### Changed
+- **Index Usage ranks by wasted space** (size × (1 − share of the table's index scans),
+  invalid indexes first) and flags possible redundancies — duplicates, btree prefixes and
+  the same columns in another order — checked against every index of the table, so a
+  plain index duplicating the primary key is caught. Indexes backing PK/UNIQUE/EXCLUDE
+  constraints are hidden by default (`c` in the TUI, `include_constraints` in the MCP).
+  New share-of-scans and tuples-per-scan columns; `check_index_usage` returns sizes in
+  bytes, `redundant_with` and a `status`.
+- **One cache hit formula everywhere**: the dashboard, Memory & Checkpoint Stats and
+  `check_cache_hit` read the same source and report heap, index and database ratios, each
+  labeled with its formula (the dashboard's heap-only ratio and Memory Stats' all-blocks,
+  all-databases ratio used to disagree). `check_cache_hit` and `check_memory_stats` accept
+  `delta_seconds` to measure over an interval. JSON fields renamed: `cache_hit_ratio` →
+  `heap_hit_pct` (dashboard) / `cache_hit` object (memory stats).
 - **MCP responses use a single envelope** — every tool now returns
   `{"meta": {host, database, server_version}, "warnings": [...], "result": ...}` instead of
   a bare array/object. Clients that parsed the old shape must read `result`.

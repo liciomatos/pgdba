@@ -23,6 +23,14 @@ type CacheHitModel struct {
 
 func (m CacheHitModel) IsInputMode() bool { return m.filterMode }
 
+// formatHitPct renders a hit ratio, "N/A" when nothing was read.
+func formatHitPct(pct *float64) string {
+	if pct == nil {
+		return "N/A"
+	}
+	return fmt.Sprintf("%.2f%%", *pct)
+}
+
 func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 	tables, err := FetchCacheHit(context.Background(), config.Config.DB, NoRowLimit)
 	if err != nil {
@@ -45,10 +53,10 @@ func CheckCacheHit(initialModel func() tea.Model) tea.Model {
 			ct.TableName,
 			fmt.Sprintf("%d", ct.HeapBlksRead),
 			fmt.Sprintf("%d", ct.HeapBlksHit),
-			fmt.Sprintf("%.2f%%", ct.CacheHitRatio),
+			formatHitPct(ct.HeapHitPct),
 			fmt.Sprintf("%d", ct.IdxBlksRead),
 			fmt.Sprintf("%d", ct.IdxBlksHit),
-			fmt.Sprintf("%.2f%%", ct.IdxCacheHitRatio),
+			formatHitPct(ct.IdxHitPct),
 		})
 	}
 
@@ -110,18 +118,11 @@ func (m CacheHitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m CacheHitModel) View() string {
 	// Values are formatted as "%.2f%"; strip % and parse to determine severity.
 	hitColorizer := func(v string) int {
-		f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+		f, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(v), "%"), 64)
 		if err != nil {
 			return -1
 		}
-		switch {
-		case f < 70:
-			return 2
-		case f < 90:
-			return 1
-		default:
-			return 0
-		}
+		return int(TableCacheHitStatus(&f))
 	}
 	rules := []ColorRule{
 		{Column: 3, Colorize: hitColorizer},

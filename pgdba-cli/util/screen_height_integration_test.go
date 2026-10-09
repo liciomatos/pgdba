@@ -40,36 +40,39 @@ func TestScreens_FitTerminalHeight(t *testing.T) {
 	seedManyTables(t, 70)
 
 	screens := map[string]func() tea.Model{
-		"Dashboard":           CheckDashboard,
-		"SlowQueries":         func() tea.Model { return IdentifySlowQueries(dummyInitialModel) },
-		"LongRunningQueries":  func() tea.Model { return CheckLongRunningQueries(dummyInitialModel) },
-		"ReplicationSlots":    func() tea.Model { return CheckReplicationSlotsStatus(dummyInitialModel) },
-		"RecordLocks":         func() tea.Model { return CheckRecordLocks(dummyInitialModel) },
-		"Connections":         func() tea.Model { return CheckConnections(dummyInitialModel) },
-		"Autovacuum":          func() tea.Model { return CheckAutovacuum(dummyInitialModel) },
-		"AutovacuumDetail":    func() tea.Model { return CheckAutovacuumDetail("public", "scroll_t0", dummyInitialModel) },
-		"IndexUsage":          func() tea.Model { return CheckIndexUsage(dummyInitialModel) },
-		"IndexDetail":         func() tea.Model { return CheckIndexDetail("public", "scroll_t0_pkey", dummyInitialModel) },
-		"CacheHit":            func() tea.Model { return CheckCacheHit(dummyInitialModel) },
-		"Users":               func() tea.Model { return CheckUsers(dummyInitialModel) },
-		"Roles":               func() tea.Model { return CheckRoles(dummyInitialModel) },
-		"PgConfig":            func() tea.Model { return CheckPgConfig(dummyInitialModel) },
-		"SchemaBrowser":       func() tea.Model { return CheckSchemaBrowser(dummyInitialModel) },
-		"Extensions":          func() tea.Model { return CheckExtensions(dummyInitialModel) },
-		"Databases":           func() tea.Model { return CheckDatabases(dummyInitialModel) },
-		"QueryLoad":           func() tea.Model { return CheckQueryLoad(dummyInitialModel) },
-		"WaitEvents":          func() tea.Model { return CheckWaitEvents(dummyInitialModel) },
-		"FreezeMonitor":       func() tea.Model { return CheckFreezeMonitor(dummyInitialModel) },
-		"DatabaseSizes":       func() tea.Model { return CheckDatabaseSizes(dummyInitialModel) },
-		"TempFiles":           func() tea.Model { return CheckTempFiles(dummyInitialModel) },
-		"MemoryStats":         func() tea.Model { return CheckMemoryStats(dummyInitialModel) },
-		"PubSub":              func() tea.Model { return CheckPubSub(dummyInitialModel) },
-		"ToastTables":         func() tea.Model { return CheckToastTables(dummyInitialModel) },
-		"ReplicaIdentity":     func() tea.Model { return CheckReplicaIdentity(dummyInitialModel) },
-		"ReplicationConfig":   func() tea.Model { return CheckReplicationConfig(dummyInitialModel) },
-		"ReplicationStandbys": func() tea.Model { return CheckReplicationStandbys(dummyInitialModel) },
-		"XminHorizon":         func() tea.Model { return CheckXminHorizon(dummyInitialModel) },
-		"VacuumProgress":      func() tea.Model { return CheckVacuumProgress(dummyInitialModel) },
+		"Dashboard":                 CheckDashboard,
+		"SlowQueries":               func() tea.Model { return IdentifySlowQueries(dummyInitialModel) },
+		"LongRunningQueries":        func() tea.Model { return CheckLongRunningQueries(dummyInitialModel) },
+		"ReplicationSlots":          func() tea.Model { return CheckReplicationSlotsStatus(dummyInitialModel) },
+		"RecordLocks":               func() tea.Model { return CheckRecordLocks(dummyInitialModel) },
+		"Connections":               func() tea.Model { return CheckConnections(dummyInitialModel) },
+		"Autovacuum":                func() tea.Model { return CheckAutovacuum(dummyInitialModel) },
+		"AutovacuumDetail":          func() tea.Model { return CheckAutovacuumDetail("public", "scroll_t0", dummyInitialModel) },
+		"IndexUsage":                func() tea.Model { return CheckIndexUsage(dummyInitialModel) },
+		"IndexDetail":               func() tea.Model { return CheckIndexDetail("public", "scroll_t0_pkey", dummyInitialModel) },
+		"CacheHit":                  func() tea.Model { return CheckCacheHit(dummyInitialModel) },
+		"Users":                     func() tea.Model { return CheckUsers(dummyInitialModel) },
+		"Roles":                     func() tea.Model { return CheckRoles(dummyInitialModel) },
+		"PgConfig":                  func() tea.Model { return CheckPgConfig(dummyInitialModel) },
+		"SchemaBrowser":             func() tea.Model { return CheckSchemaBrowser(dummyInitialModel) },
+		"Extensions":                func() tea.Model { return CheckExtensions(dummyInitialModel) },
+		"Databases":                 func() tea.Model { return CheckDatabases(dummyInitialModel) },
+		"QueryLoad":                 func() tea.Model { return CheckQueryLoad(dummyInitialModel) },
+		"WaitEvents":                func() tea.Model { return CheckWaitEvents(dummyInitialModel) },
+		"FreezeMonitor":             func() tea.Model { return CheckFreezeMonitor(dummyInitialModel) },
+		"DatabaseSizes":             func() tea.Model { return CheckDatabaseSizes(dummyInitialModel) },
+		"TempFiles":                 func() tea.Model { return CheckTempFiles(dummyInitialModel) },
+		"MemoryStats":               func() tea.Model { return CheckMemoryStats(dummyInitialModel) },
+		"PubSub":                    func() tea.Model { return CheckPubSub(dummyInitialModel) },
+		"ToastTables":               func() tea.Model { return CheckToastTables(dummyInitialModel) },
+		"ReplicaIdentity":           func() tea.Model { return CheckReplicaIdentity(dummyInitialModel) },
+		"ReplicationConfig":         func() tea.Model { return CheckReplicationConfig(dummyInitialModel) },
+		"ReplicationStandbys":       func() tea.Model { return CheckReplicationStandbys(dummyInitialModel) },
+		"XminHorizon":               func() tea.Model { return CheckXminHorizon(dummyInitialModel) },
+		"VacuumProgress":            func() tea.Model { return CheckVacuumProgress(dummyInitialModel) },
+		"TableChurn":                func() tea.Model { return CheckTableChurn(dummyInitialModel) },
+		"IOWAL":                     func() tea.Model { return CheckIOWAL(dummyInitialModel) },
+		"IndexUsageWithConstraints": func() tea.Model { return checkIndexUsage(dummyInitialModel, true) },
 	}
 
 	for _, height := range []int{24, 40} {
@@ -108,13 +111,22 @@ func TestIndexUsage_ListsAllIndexesAndScrolls(t *testing.T) {
 	}
 	seedManyTables(t, 70)
 
-	var expected int
-	if err := testDB.QueryRow(`SELECT count(*) FROM pg_stat_user_indexes`).Scan(&expected); err != nil {
+	// The screen hides indexes backing PK/UNIQUE/EXCLUDE constraints until c is pressed.
+	var expected, withConstraints int
+	if err := testDB.QueryRow(`
+		SELECT count(*) FILTER (WHERE NOT EXISTS (
+		           SELECT 1 FROM pg_constraint c WHERE c.conindid = s.indexrelid AND c.contype IN ('p', 'u', 'x'))),
+		       count(*)
+		FROM pg_stat_user_indexes s`).Scan(&expected, &withConstraints); err != nil {
 		t.Fatal(err)
 	}
 	model := CheckIndexUsage(dummyInitialModel).(IndexUsageModel)
 	if got := len(model.allRows); got != expected {
-		t.Fatalf("Index Usage shows %d indexes, database has %d", got, expected)
+		t.Fatalf("Index Usage shows %d indexes, database has %d without constraint indexes", got, expected)
+	}
+	toggled, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if got := len(toggled.(IndexUsageModel).allRows); got != withConstraints {
+		t.Fatalf("after c, Index Usage shows %d indexes, database has %d", got, withConstraints)
 	}
 
 	var updated tea.Model = model

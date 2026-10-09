@@ -66,14 +66,7 @@ func CheckDashboard() tea.Model {
 		connLevel = 1
 	}
 
-	cacheLevel := 0
-	if data.CacheHitRatio != nil {
-		if *data.CacheHitRatio < 70 {
-			cacheLevel = 2
-		} else if *data.CacheHitRatio < 90 {
-			cacheLevel = 1
-		}
-	}
+	cacheLevel := int(CacheHitStatus(data.CacheHitRatio))
 
 	// ── Activity section ───────────────────────────────────────────────────
 	waitLevel := 0
@@ -361,10 +354,10 @@ func (m DashboardModel) renderBody(compact bool) string {
 	if m.cacheHit != nil {
 		cacheBar := SeverityColor(RenderBar(*m.cacheHit, bw), m.cacheLevel)
 		s += fmt.Sprintf("  %-28s  %-12s  %s\n",
-			labelStyle.Render("Cache hit ratio"), "", cacheBar)
+			labelStyle.Render("Heap cache hit"), "", cacheBar)
 	} else {
 		s += fmt.Sprintf("  %-28s  %s\n",
-			labelStyle.Render("Cache hit ratio"),
+			labelStyle.Render("Heap cache hit"),
 			lipgloss.NewStyle().Foreground(ColorGray).Render("N/A"))
 	}
 	s += gap
@@ -439,6 +432,8 @@ func (m DashboardModel) View() string {
 		renderKey("I") + " " + renderLabel("replica-id") + "  " +
 		renderKey("X") + " " + renderLabel("xmin") + "  " +
 		renderKey("V") + " " + renderLabel("vacuum") + "  " +
+		renderKey("H") + " " + renderLabel("hot") + "  " +
+		renderKey("O") + " " + renderLabel("io/wal") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("?") + " " + renderLabel("help") + "  " +
 		renderKey("q") + " " + renderLabel("quit")

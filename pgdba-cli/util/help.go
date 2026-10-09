@@ -46,7 +46,7 @@ var screenHelp = map[string]ScreenHelp{
 		Title:   "Dashboard — instance health at a glance",
 		Purpose: "Start screen. Summarizes activity, storage and server health of the connected database in one view, colored by severity, so you know which detail screen to open first.",
 		Columns: []HelpItem{
-			{"Connections / Cache hit ratio", "bars: sessions used vs max_connections (running out blocks new logins); share of block reads served from shared_buffers."},
+			{"Connections / Heap cache hit", "bars: sessions used vs max_connections (running out blocks new logins); share of user-table heap block reads served from shared_buffers — yellow < 99%, red < 90% (the same ratio Memory & Checkpoint Stats shows)."},
 			{"Commit rate", "share of transactions that commit instead of rolling back."},
 			{"Active / Wait events", "sessions running a query now; sessions waiting on something (lock, I/O, …) — yellow ≥ 5, red ≥ 20."},
 			{"Blocked queries", "sessions waiting on a lock held by another session — red when > 0 (key 4)."},
@@ -66,7 +66,7 @@ var screenHelp = map[string]ScreenHelp{
 			{"1-0", "slow queries, long running, replication slots, blocked queries, connections, autovacuum, index usage, cache hit, users, roles"},
 			{"p s e D L w f", "config, schema browser, extensions, switch database, query load, wait events, freeze monitor"},
 			{"S t m R T I", "database sizes, temp files, memory, pub/sub, TOAST tables, replica identity"},
-			{"X V", "xmin horizon (who holds back vacuum), vacuum progress"},
+			{"X V H O", "xmin horizon (who holds back vacuum), vacuum progress, table churn / HOT updates, I/O & WAL"},
 			{"q ctrl+c", "quit pgdba"},
 		},
 		Reading: []string{
@@ -225,23 +225,25 @@ var screenHelp = map[string]ScreenHelp{
 	},
 	"index_usage": {
 		Title:   "Index Usage (key 7) — which indexes are used, and how",
-		Purpose: "Lists every index with how often it was scanned, to find unused indexes (pure write and disk cost) and invalid ones.",
+		Purpose: "Ranks indexes by wasted space — size × (1 − their share of the table's index scans) — so a big index that serves few of its table's scans comes first, and flags invalid and possibly redundant indexes. Indexes backing PRIMARY KEY / UNIQUE constraints are hidden until you press c.",
 		Columns: []HelpItem{
-			{"Valid", "INVALID = a failed CREATE INDEX CONCURRENTLY left it behind: maintained on writes, never used for reads. Drop and recreate it."},
-			{"Scans", "index scans started since stats reset; 0 is red."},
-			{"Tup Read", "index entries returned by scans of this index."},
-			{"Tup Fetch", "live heap rows fetched by simple index scans (bitmap scans don't count here)."},
+			{"Status", "INVALID (red) = a failed CREATE INDEX CONCURRENTLY left it behind: maintained on writes, never used for reads — drop and recreate it; redundant (yellow) = see the Redundant column; unused (yellow) = never scanned and larger than 1 MB; ok."},
+			{"Scans", "index scans started since stats reset."},
+			{"Share", "this index's share of the scans of all indexes on its table (- when none was scanned)."},
+			{"Tup/Scan", "index entries returned per scan (idx_tup_read / idx_scan); high values mean a poorly selective index."},
 			{"Size", "on-disk size of the index."},
+			{"Redundant", "possible redundancy with another index of the same table: dup of (same columns, same order), prefix of (its columns lead a longer btree index, which can serve the same searches), same cols as (same columns in another order)."},
 		},
 		Keys: []HelpItem{
 			{"enter", "Index Detail: columns, type, unique/primary flags"},
+			{"c", "show / hide indexes that back PRIMARY KEY, UNIQUE or EXCLUDE constraints"},
 			{"/", "filter rows by text"},
-			{"↑ ↓", "move the selection; the line above the footer shows the full index and table name"},
+			{"↑ ↓", "move the selection; the line above the footer shows the full index name and its redundancies"},
 		},
 		Reading: []string{
 			"0 scans is a removal candidate only after a full business cycle since the last stats reset — and only on this server: replicas keep their own counters.",
-			"Never drop PRIMARY KEY / UNIQUE indexes because of 0 scans: they enforce constraints.",
-			"Tup Read much larger than Tup Fetch suggests rows filtered out after the index lookup (or bitmap scans).",
+			"Never drop PRIMARY KEY / UNIQUE indexes because of 0 scans: they enforce constraints. A unique index is never called redundant because of a non-unique one.",
+			"Redundancy is a hint: operator classes, collations, INCLUDE columns, partial predicates and expressions aren't compared (partial and expression indexes are skipped).",
 		},
 		Source: "pg_stat_user_indexes, pg_index, pg_attribute",
 	},
@@ -263,12 +265,13 @@ var screenHelp = map[string]ScreenHelp{
 		Purpose: "Per-table share of block reads found in PostgreSQL's buffer cache, for the table heap and its indexes.",
 		Columns: []HelpItem{
 			{"Heap Read / Heap Hit", "blocks read from outside shared_buffers vs found in it."},
-			{"Cache Hit % / Idx Hit %", "hit / (hit + read); yellow < 90%, red < 70%."},
+			{"Cache Hit % / Idx Hit %", "hit / (hit + read); yellow < 90%, red < 70%; N/A when the table had no reads."},
 		},
 		Keys: []HelpItem{{"/", "filter rows by text"}},
 		Reading: []string{
 			"A 'read' may still come from the OS page cache, so a low ratio isn't always disk I/O — but it is extra work.",
 			"Low ratios on big, hot tables suggest shared_buffers is small for the working set; on rarely-read tables they're expected.",
+			"The instance-wide heap, index and database ratios are on the dashboard and Memory & Checkpoint Stats (key m); the MCP check_cache_hit tool can also measure them over an interval (delta_seconds).",
 		},
 		Source: "pg_statio_user_tables",
 	},
@@ -450,11 +453,49 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Source: "pg_stat_progress_vacuum, pg_stat_activity",
 	},
+	"table_churn": {
+		Title:   "Table Churn (key H) — writes and HOT updates per table",
+		Purpose: "Ranks tables by updates since the last stats reset and shows how many were HOT (heap-only tuple) updates. A HOT update writes no index entries and its old version is pruned without vacuum; a non-HOT update writes every index of the table and leaves dead index entries behind.",
+		Columns: []HelpItem{
+			{"Inserts / Updates / Deletes", "rows written since the stats reset (pg_stat_user_tables n_tup_*)."},
+			{"HOT %", "share of updates that were HOT."},
+			{"New-page Upd", "PG16+: updates whose new row version had to go to another page — the same page was full, so the update couldn't be HOT."},
+			{"Fillfactor", "the table's fillfactor; (def) = not set, i.e. 100: pages are packed full, leaving no room for HOT updates."},
+			{"Dead / Size", "dead tuples waiting for vacuum; total size including indexes and TOAST."},
+		},
+		Keys: []HelpItem{{"/", "filter rows by text"}},
+		Reading: []string{
+			"Status is warning for tables with ≥ 10,000 updates of which less than 50% were HOT. The line above the footer suggests the fix for the selected table.",
+			"With fillfactor 100, lowering it to 80–90 (ALTER TABLE … SET (fillfactor = 85), effective for new pages; VACUUM FULL / pg_repack to rewrite) leaves room on each page for HOT updates.",
+			"If fillfactor already leaves room and HOT stays low, the updates change indexed columns — those can never be HOT; consider whether every index on them is needed.",
+			"Bloat estimates (pgstattuple_approx) are available through the MCP check_table_churn tool with include_bloat.",
+		},
+		Source: "pg_stat_user_tables (n_tup_ins/upd/del/hot_upd, n_tup_newpage_upd PG16+), pg_class (reloptions)",
+	},
+	"io_wal": {
+		Title:   "I/O & WAL (key O) — who reads and writes, and how much WAL",
+		Purpose: "WAL volume and its full-page-image share (pg_stat_wal, PG14+), and buffer I/O split by backend type, object and context (pg_stat_io, PG16+), to tell vacuum, checkpointer, background writer and query I/O apart.",
+		Columns: []HelpItem{
+			{"WAL / records / full-page images", "WAL generated since the reset; % of records that are full-page images (written on the first change to each page after a checkpoint)."},
+			{"buffers full", "times a backend had to write WAL itself because wal_buffers was full."},
+			{"Relation writes by", "share of data-block writes done by each backend type: checkpointer and background writer are expected; client backends writing a lot means they evict dirty buffers themselves."},
+			{"Backend Type / Object / Context", "who did the I/O, on what (relation, temp relation, wal on PG18+), and in which context: normal, vacuum (vacuum's ring buffer), bulkread, bulkwrite."},
+			{"Reads / Read, Writes / Written, Extends, Hits, Evictions, Fsyncs", "operations and bytes since the pg_stat_io reset."},
+		},
+		Reading: []string{
+			"Full-page images is yellow from 30% of records: checkpoints are frequent for this write pattern — raise max_wal_size / checkpoint_timeout, or enable wal_compression.",
+			"WAL buffers full is yellow above 0.1% of records: wal_buffers is too small for the write bursts.",
+			"Relation writes turn yellow when client backends do ≥ 25% of the writes in the normal context — tune the background writer (bgwriter_lru_maxpages / bgwriter_delay) or shared_buffers.",
+			"On PG13 neither view exists; PG14–15 show only the WAL part.",
+		},
+		Source: "pg_stat_wal (PG14+), pg_stat_io (PG16+), pg_settings",
+	},
 	"memory_stats": {
 		Title:   "Memory & Checkpoint Stats (key m) — buffers and write activity",
-		Purpose: "Memory-related settings, the cluster-wide cache hit ratio and checkpoint / background writer counters — SQL-only, so it works against remote servers.",
+		Purpose: "Memory-related settings, the buffer cache hit ratios and checkpoint / background writer counters — SQL-only, so it works against remote servers.",
 		Columns: []HelpItem{
 			{"Memory settings", "shared_buffers, effective_cache_size, work_mem, maintenance_work_mem, wal_buffers, huge_pages."},
+			{"Cache hit — heap / index / database", "heap = table blocks of user tables, index = their index blocks (pg_statio_user_tables), database = every block this database read, catalogs and TOAST included (pg_stat_database). Yellow < 99%, red < 90%. The dashboard's heap cache hit is the same number."},
 			{"Checkpoints timed vs requested", "requested checkpoints are forced by WAL volume; many of them mean max_wal_size is too small."},
 			{"Buffers backend", "PG ≤ 16: pages written by backends themselves — high values mean the background writer can't keep up (not available on PG17+)."},
 		},
@@ -724,4 +765,6 @@ func (m ReplicationStandbysModel) HelpTopic() string { return "replication_stand
 func (m ReplicaIdentityModel) HelpTopic() string     { return "replica_identity" }
 func (m XminHorizonModel) HelpTopic() string         { return "xmin_horizon" }
 func (m VacuumProgressModel) HelpTopic() string      { return "vacuum_progress" }
+func (m TableChurnModel) HelpTopic() string          { return "table_churn" }
+func (m IOWALModel) HelpTopic() string               { return "io_wal" }
 func (m VersionModel) HelpTopic() string             { return "version" }

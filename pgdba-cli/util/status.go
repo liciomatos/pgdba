@@ -89,3 +89,97 @@ func AutovacuumTableStatus(table AutovacuumTable) Status {
 	}
 	return status
 }
+
+// CacheHitStatus rates an instance-level cache hit ratio (heap, index or database):
+// critical below 90%, warning below 99% — an OLTP working set should be served from
+// shared_buffers almost entirely. nil (nothing read yet) is ok.
+func CacheHitStatus(pct *float64) Status {
+	switch {
+	case pct == nil:
+		return StatusOK
+	case *pct < 90:
+		return StatusCritical
+	case *pct < 99:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// TableCacheHitStatus rates one table's cache hit ratio, more leniently than the
+// instance ratio because single tables (bulk loads, rarely read history) legitimately
+// read from disk: critical below 70%, warning below 90%.
+func TableCacheHitStatus(pct *float64) Status {
+	switch {
+	case pct == nil:
+		return StatusOK
+	case *pct < 70:
+		return StatusCritical
+	case *pct < 90:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// unusedIndexMinBytes keeps tiny never-scanned indexes (empty tables) from being flagged.
+const unusedIndexMinBytes = 1 << 20
+
+// IndexUsageStatus rates an index: critical when INVALID (a failed CREATE INDEX
+// CONCURRENTLY: maintained on every write, never used), warning when it looks redundant
+// or has never been scanned and is larger than 1 MB.
+func IndexUsageStatus(idx IndexUsage) Status {
+	switch {
+	case !idx.IsValid:
+		return StatusCritical
+	case len(idx.RedundantWith) > 0, idx.IdxScan == 0 && idx.IndexSizeBytes > unusedIndexMinBytes:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// churnMinUpdates is the update count from which a low HOT ratio is worth acting on.
+const churnMinUpdates = 10_000
+
+// TableChurnStatus warns about update-heavy tables (≥ 10,000 updates) where less than
+// half of the updates are HOT: every non-HOT update writes every index and leaves dead
+// index entries for vacuum.
+func TableChurnStatus(t TableChurn) Status {
+	if t.Updates >= churnMinUpdates && t.HotPct != nil && *t.HotPct < 50 {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// TableChurnHint suggests the likely fix for a table TableChurnStatus warns about.
+func TableChurnHint(t TableChurn) string {
+	if TableChurnStatus(t) == StatusOK {
+		return ""
+	}
+	if t.Fillfactor >= 100 {
+		return "pages are packed full (fillfactor 100): HOT needs free space on the same page — consider fillfactor 80-90"
+	}
+	return "fillfactor already leaves room: updates probably change indexed columns, which can never be HOT"
+}
+
+// WALStatsStatus warns when full-page images are ≥ 30% of WAL records (checkpoints too
+// frequent for the write pattern; consider a larger max_wal_size / checkpoint_timeout
+// or wal_compression) or when WAL buffers filled up on more than 0.1% of records
+// (wal_buffers too small).
+func WALStatsStatus(w WALStats) Status {
+	if fpi := w.FPIPct(); fpi != nil && *fpi >= 30 {
+		return StatusWarning
+	}
+	if w.Records > 0 && w.BuffersFull*1000 > w.Records {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// IOStatsStatus warns when client backends do ≥ 25% of the relation block writes in
+// the normal context: they're evicting dirty buffers themselves, which adds write
+// latency to queries — the background writer / checkpointer aren't keeping up.
+func IOStatsStatus(stats IOStats) Status {
+	if stats.ClientBackendWritePct != nil && *stats.ClientBackendWritePct >= 25 {
+		return StatusWarning
+	}
+	return StatusOK
+}
