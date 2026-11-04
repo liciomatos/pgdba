@@ -165,6 +165,7 @@ parameters:
 | `check_pg_config` | `limit` / `offset` / `include_description` | `100` / `0` / `false` | paging; `short_desc` per parameter |
 | `check_long_running_queries` | `include_background` | `false` | also list autovacuum workers, walsenders and other background processes |
 | `check_wait_events` | `samples` / `interval_ms` / `include_idle` | `20` / `1000` / `false` | sample `pg_stat_activity` and average into active sessions (AAS); idle sessions excluded |
+| `check_wait_events` | `queries_per_event` / `top_queries` | `5` / `10` | statements behind each event, and the top statements overall split by wait event |
 | `check_index_usage` | `include_constraints` | `false` | also list indexes backing PK / UNIQUE / EXCLUDE constraints |
 | `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
 | `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
@@ -319,7 +320,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `e` | **Extensions** | Installed extensions | — |
 | `D` | **Switch Database** | Switch database without restarting | `enter` connect |
 | `L` | **Query Load** | Top queries by total execution time with load % bar | `enter` full query |
-| `w` | **Wait Events** | Wait events sampled over 1 s and averaged into active sessions (AAS), idle sessions excluded, with distribution bar | — |
+| `w` | **Wait Events** | Wait events sampled over 1 s and averaged into active sessions (AAS), idle sessions excluded, with distribution bar | `enter` the statements behind the selected event |
 | `f` | **Freeze Monitor** | XID age by database and top tables approaching wrap-around | `f` VACUUM FREEZE selected table |
 | `S` | **Database Sizes** | On-disk size of every database and tablespace, plus cluster total | — |
 | `t` | **Temp Files** | Temp file spill per database with average file size, plus the statements that wrote the most temp data (`pg_stat_statements`) | — |

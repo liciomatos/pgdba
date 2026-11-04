@@ -48,7 +48,7 @@ func Serve(port int) error {
 	), handleCheckConnections)
 
 	addTool(s, mcp.NewTool("check_wait_events",
-		mcp.WithDescription("What sessions wait on, sampled: pg_stat_activity is read `samples` times `interval_ms` apart and sessions are averaged per wait event into average active sessions (aas, the Performance Insights unit); total_aas equals the sum of the events' aas. Idle sessions (state idle, e.g. Client:ClientRead) and idle background processes (wait_event_type Activity) are excluded unless include_idle is true. \"CPU\" = running, not waiting. status: Lock critical from 1 aas and warning below; IO, LWLock and BufferPin warning from 1 aas."),
+		mcp.WithDescription("What sessions wait on, sampled: pg_stat_activity is read `samples` times `interval_ms` apart and sessions are averaged per wait event into average active sessions (aas, the Performance Insights unit); total_aas equals the sum of the events' aas. Idle sessions (state idle, e.g. Client:ClientRead), idle background processes (wait_event_type Activity) and walsenders waiting for new WAL (Client:WalSenderWaitForWal) are excluded unless include_idle is true. \"CPU\" = running, not waiting. Each event lists the statements behind it (queries, pct = share of the event) and top_queries ranks statements across all events with their AAS split by wait event — the Performance Insights top SQL. Statements are identified by query_id (PG14+) and shown with pg_stat_statements' normalized text when available (normalized: true), otherwise with pg_stat_activity's text, literals included (truncated to 500 characters); background processes show backend_type instead. status: Lock critical from 1 aas and warning below; IO, LWLock and BufferPin warning from 1 aas."),
 		mcp.WithInteger("samples",
 			mcp.Description("Number of pg_stat_activity samples"),
 			mcp.DefaultNumber(20),
@@ -60,6 +60,14 @@ func Serve(port int) error {
 		mcp.WithBoolean("include_idle",
 			mcp.Description("Also count idle sessions and idle background processes (the old single-snapshot view)"),
 			mcp.DefaultBool(false),
+		),
+		mcp.WithInteger("queries_per_event",
+			mcp.Description("Statements listed under each wait event (0 = all)"),
+			mcp.DefaultNumber(5),
+		),
+		mcp.WithInteger("top_queries",
+			mcp.Description("Statements listed in top_queries (0 = all)"),
+			mcp.DefaultNumber(10),
 		),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),

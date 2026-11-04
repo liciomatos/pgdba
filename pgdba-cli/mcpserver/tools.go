@@ -826,13 +826,34 @@ func handleCheckCacheHit(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 
 // --- wait events ---
 
+type waitEventShareResponse struct {
+	EventType string  `json:"event_type"`
+	Event     string  `json:"event"`
+	AAS       float64 `json:"aas"`
+}
+
+type waitEventQueryResponse struct {
+	QueryID *int64 `json:"query_id"` // null on PG13 or with compute_query_id off
+	Query   string `json:"query"`
+	// Normalized: text from pg_stat_statements ($1 for literals); otherwise it is
+	// pg_stat_activity's text, literals included.
+	Normalized      bool                     `json:"normalized"`
+	QueryTruncated  bool                     `json:"query_truncated,omitempty"`
+	BackendType     string                   `json:"backend_type,omitempty"` // set for background processes (no query)
+	AAS             float64                  `json:"aas"`
+	Pct             float64                  `json:"pct"`
+	SessionsSampled int                      `json:"sessions_sampled"`
+	Events          []waitEventShareResponse `json:"events,omitempty"` // top_queries only: AAS split by wait event
+}
+
 type waitEventResponse struct {
-	EventType       string  `json:"event_type"` // "CPU" = running, not waiting
-	Event           string  `json:"event"`
-	Status          string  `json:"status"`
-	AAS             float64 `json:"aas"` // average active sessions over the samples
-	SessionsSampled int     `json:"sessions_sampled"`
-	Pct             float64 `json:"pct"`
+	EventType       string                   `json:"event_type"` // "CPU" = running, not waiting
+	Event           string                   `json:"event"`
+	Status          string                   `json:"status"`
+	AAS             float64                  `json:"aas"` // average active sessions over the samples
+	SessionsSampled int                      `json:"sessions_sampled"`
+	Pct             float64                  `json:"pct"`
+	Queries         []waitEventQueryResponse `json:"queries"` // statements behind the event, pct = share of the event
 }
 
 type waitEventsResponse struct {
@@ -842,10 +863,31 @@ type waitEventsResponse struct {
 	IncludeIdle bool                `json:"include_idle"`
 	TotalAAS    float64             `json:"total_aas"` // equals the sum of the events' aas
 	Events      []waitEventResponse `json:"events"`
+	// TopQueries ranks statements across all events (pct = share of all sampled
+	// sessions), each split by wait event.
+	TopQueries []waitEventQueryResponse `json:"top_queries"`
 }
 
 // maxWaitSamplingSeconds caps samples × interval: the call blocks while sampling.
 const maxWaitSamplingSeconds = 60
+
+func toWaitEventQueryResponse(query util.WaitEventQuery) waitEventQueryResponse {
+	text, truncated := truncateQuery(query.Query)
+	resp := waitEventQueryResponse{
+		QueryID:         query.QueryID,
+		Query:           text,
+		Normalized:      query.Normalized,
+		QueryTruncated:  truncated,
+		BackendType:     query.BackendType,
+		AAS:             query.AAS,
+		Pct:             query.Pct,
+		SessionsSampled: query.Count,
+	}
+	for _, share := range query.Events {
+		resp.Events = append(resp.Events, waitEventShareResponse{EventType: share.EventType, Event: share.Event, AAS: share.AAS})
+	}
+	return resp
+}
 
 func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	samples := intParam(req, "samples", 20)
@@ -853,8 +895,13 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	if samples < 1 || intervalMS < 0 || (samples-1)*intervalMS > maxWaitSamplingSeconds*1000 {
 		return mcp.NewToolResultError(fmt.Sprintf("samples must be ≥ 1 and (samples-1) × interval_ms ≤ %d s", maxWaitSamplingSeconds)), nil
 	}
-	sampling, err := util.FetchWaitEvents(ctx, targetDB(ctx), samples, time.Duration(intervalMS)*time.Millisecond,
-		req.GetBool("include_idle", false))
+	sampling, err := util.FetchWaitEvents(ctx, targetDB(ctx), util.WaitEventOptions{
+		Samples:         samples,
+		Interval:        time.Duration(intervalMS) * time.Millisecond,
+		IncludeIdle:     req.GetBool("include_idle", false),
+		QueriesPerEvent: intParam(req, "queries_per_event", 5),
+		TopQueries:      intParam(req, "top_queries", 10),
+	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -863,6 +910,10 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	for _, e := range sampling.Events {
 		eventStatus := util.WaitEventStatus(e.EventType, e.AAS)
 		overall = max(overall, eventStatus)
+		queries := make([]waitEventQueryResponse, 0, len(e.Queries))
+		for _, query := range e.Queries {
+			queries = append(queries, toWaitEventQueryResponse(query))
+		}
 		events = append(events, waitEventResponse{
 			EventType:       e.EventType,
 			Event:           e.Event,
@@ -870,7 +921,12 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			AAS:             e.AAS,
 			SessionsSampled: e.Count,
 			Pct:             e.Pct,
+			Queries:         queries,
 		})
+	}
+	topQueries := make([]waitEventQueryResponse, 0, len(sampling.TopQueries))
+	for _, query := range sampling.TopQueries {
+		topQueries = append(topQueries, toWaitEventQueryResponse(query))
 	}
 	return respond(ctx, waitEventsResponse{
 		Status:      overall.String(),
@@ -879,6 +935,7 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		IncludeIdle: sampling.IncludeIdle,
 		TotalAAS:    sampling.TotalAAS,
 		Events:      events,
+		TopQueries:  topQueries,
 	})
 }
 

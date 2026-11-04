@@ -584,7 +584,7 @@ func FetchConnections(ctx context.Context, db *sql.DB) (ConnectionsResult, error
 
 func fetchIdleTransactions(ctx context.Context, db *sql.DB, result *ConnectionsResult) error {
 	if err := db.QueryRowContext(ctx, `
-		SELECT EXTRACT(EPOCH FROM (now() - min(xact_start)))::bigint
+		SELECT GREATEST(EXTRACT(EPOCH FROM (now() - min(xact_start)))::bigint, 0)
 		FROM pg_stat_activity
 		WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()`,
 	).Scan(&result.OldestTransactionAgeSeconds); err != nil {
@@ -593,8 +593,10 @@ func fetchIdleTransactions(ctx context.Context, db *sql.DB, result *ConnectionsR
 	rows, err := db.QueryContext(ctx, `
 		SELECT pid, COALESCE(usename::text, ''), COALESCE(application_name, ''), COALESCE(host(client_addr), ''),
 		       state,
-		       EXTRACT(EPOCH FROM (now() - state_change))::bigint,
-		       CASE WHEN xact_start IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM (now() - xact_start))::bigint END,
+		       -- GREATEST(…, 0): a clock adjustment on the server (e.g. VM time sync) must
+		       -- not turn a just-started idle period into a negative age.
+		       GREATEST(EXTRACT(EPOCH FROM (now() - state_change))::bigint, 0),
+		       CASE WHEN xact_start IS NULL THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now() - xact_start))::bigint, 0) END,
 		       COALESCE(query, '')
 		FROM pg_stat_activity
 		WHERE state IN ('idle in transaction', 'idle in transaction (aborted)')
@@ -1266,6 +1268,46 @@ func FetchCacheHit(ctx context.Context, db *sql.DB, limit int) ([]CacheHitTable,
 	return report.Tables, err
 }
 
+// WaitEventShare is how much of a query's sampled time went to one wait event.
+type WaitEventShare struct {
+	EventType string
+	Event     string
+	Count     int
+	AAS       float64
+}
+
+// WaitEventQuery is one statement seen in the samples, with the active sessions it
+// accounted for — the "top SQL" of a wait event.
+type WaitEventQuery struct {
+	// QueryID is pg_stat_activity.query_id (PG14+, when compute_query_id is on — it is
+	// with pg_stat_statements loaded); nil otherwise, and statements are then told
+	// apart by their text.
+	QueryID *int64
+	// Query is pg_stat_statements' normalized text ($1, $2 for literals) when the
+	// query_id is found there (Normalized), else pg_stat_activity's text with its
+	// literals. Empty for background processes, which run no query (see BackendType).
+	Query       string
+	Normalized  bool
+	BackendType string
+	Count       int     // sessions seen running it, summed over all samples
+	AAS         float64 // Count ÷ samples
+	Pct         float64 // share of its wait event (in WaitEvent.Queries) or of all sampled sessions (in TopQueries)
+	// Events splits the query's AAS by wait event; set in WaitEventSampling.TopQueries.
+	Events []WaitEventShare
+}
+
+// Label is the text to show for the query: its SQL, or the backend type of a
+// background process.
+func (q WaitEventQuery) Label() string {
+	if q.Query != "" {
+		return q.Query
+	}
+	if q.BackendType != "" {
+		return "(" + q.BackendType + ")"
+	}
+	return "(no query)"
+}
+
 // WaitEvent is one wait event averaged over the samples of a FetchWaitEvents call.
 type WaitEvent struct {
 	EventType string // "CPU" when the session was running, not waiting
@@ -1273,6 +1315,9 @@ type WaitEvent struct {
 	Count     int     // sessions seen on this event, summed over all samples
 	AAS       float64 // average active sessions: Count ÷ samples (the Performance Insights unit)
 	Pct       float64 // share of all sampled sessions
+	// Queries are the statements behind this event, most active first (at most
+	// WaitEventOptions.QueriesPerEvent).
+	Queries []WaitEventQuery
 }
 
 // WaitEventSampling is the result of sampling pg_stat_activity several times.
@@ -1284,25 +1329,57 @@ type WaitEventSampling struct {
 	// of every event's AAS.
 	TotalAAS float64
 	Events   []WaitEvent
+	// TopQueries are the statements with the most active sessions across all events,
+	// each split by wait event (at most WaitEventOptions.TopQueries).
+	TopQueries []WaitEventQuery
 }
 
-// FetchWaitEvents samples pg_stat_activity `samples` times, `interval` apart, and
-// averages sessions per wait event. A single snapshot is mostly noise; averaging gives
-// the same "average active sessions" picture as RDS Performance Insights.
+// WaitEventOptions controls FetchWaitEvents. Zero QueriesPerEvent / TopQueries keep
+// every query.
+type WaitEventOptions struct {
+	Samples         int
+	Interval        time.Duration
+	IncludeIdle     bool
+	QueriesPerEvent int
+	TopQueries      int
+}
+
+// waitQueryTextKeyLength is how much of an un-identified query's text tells it apart
+// from others; longer texts that share it are grouped together.
+const waitQueryTextKeyLength = 300
+
+// FetchWaitEvents samples pg_stat_activity opts.Samples times, opts.Interval apart, and
+// averages sessions per wait event and per query. A single snapshot is mostly noise;
+// averaging gives the same "average active sessions" picture as RDS Performance
+// Insights, including its top SQL per wait event.
 //
-// Unless includeIdle is set, sessions that aren't doing work are left out: state
-// 'idle' (a client connection waiting for its next query, Client:ClientRead) and
-// wait_event_type 'Activity' (background processes idling in their main loop).
-func FetchWaitEvents(ctx context.Context, db *sql.DB, samples int, interval time.Duration, includeIdle bool) (WaitEventSampling, error) {
-	sampling := WaitEventSampling{Samples: max(samples, 1), Interval: interval, IncludeIdle: includeIdle}
+// Unless IncludeIdle is set, sessions that aren't doing work are left out: state
+// 'idle' (a client connection waiting for its next query, Client:ClientRead),
+// wait_event_type 'Activity' (background processes idling in their main loop) and
+// walsenders waiting for new WAL to send (Client:WalSenderWaitForWal — reported as
+// state 'active', but idle).
+func FetchWaitEvents(ctx context.Context, db *sql.DB, opts WaitEventOptions) (WaitEventSampling, error) {
+	sampling := WaitEventSampling{Samples: max(opts.Samples, 1), Interval: opts.Interval, IncludeIdle: opts.IncludeIdle}
+	// pg_stat_activity.query_id was added in PG14.
+	queryIDColumn := "NULL::bigint"
+	if pgMajorVersion() >= 14 {
+		queryIDColumn = "query_id"
+	}
 	type eventKey struct{ eventType, event string }
-	counts := map[eventKey]int{}
-	var order []eventKey
+	type queryKey struct {
+		event eventKey
+		query string // "id:<query_id>", "text:<prefix>" or "backend:<type>"
+	}
+	eventCounts := map[eventKey]int{}
+	queryCounts := map[queryKey]int{}
+	queries := map[string]*WaitEventQuery{} // by queryKey.query
+	var eventOrder []eventKey
+	var queryOrder []queryKey
 	total := 0
 	for sample := 0; sample < sampling.Samples; sample++ {
 		if sample > 0 {
 			select {
-			case <-time.After(interval):
+			case <-time.After(opts.Interval):
 			case <-ctx.Done():
 				return sampling, ctx.Err()
 			}
@@ -1310,25 +1387,55 @@ func FetchWaitEvents(ctx context.Context, db *sql.DB, samples int, interval time
 		// Each sample is its own statement, so pg_stat_activity is re-read every time
 		// instead of being served from the transaction's cached snapshot.
 		rows, err := db.QueryContext(ctx, `
-			SELECT COALESCE(wait_event_type, 'CPU'), COALESCE(wait_event, '-'), count(*)
+			SELECT COALESCE(wait_event_type, 'CPU'), COALESCE(wait_event, '-'),
+			       `+queryIDColumn+`, COALESCE(query, ''), COALESCE(backend_type, ''), count(*)
 			FROM pg_stat_activity
 			WHERE pid <> pg_backend_pid()
-			  AND ($1 OR (state IS DISTINCT FROM 'idle' AND wait_event_type IS DISTINCT FROM 'Activity'))
-			GROUP BY 1, 2`, includeIdle)
+			  AND ($1 OR (state IS DISTINCT FROM 'idle'
+			              AND wait_event_type IS DISTINCT FROM 'Activity'
+			              AND wait_event IS DISTINCT FROM 'WalSenderWaitForWal'))
+			GROUP BY 1, 2, 3, 4, 5`, opts.IncludeIdle)
 		if err != nil {
 			return sampling, err
 		}
 		for rows.Next() {
-			var key eventKey
+			var event eventKey
+			var queryID *int64
+			var queryText, backendType string
 			var count int
-			if err := rows.Scan(&key.eventType, &key.event, &count); err != nil {
+			if err := rows.Scan(&event.eventType, &event.event, &queryID, &queryText, &backendType, &count); err != nil {
 				rows.Close()
 				return sampling, err
 			}
-			if _, seen := counts[key]; !seen {
-				order = append(order, key)
+			queryText = strings.Join(strings.Fields(queryText), " ")
+			var identity string
+			switch {
+			case queryID != nil && *queryID != 0:
+				identity = fmt.Sprintf("id:%d", *queryID)
+			case queryText != "":
+				identity = "text:" + string([]rune(queryText)[:min(len([]rune(queryText)), waitQueryTextKeyLength)])
+			default:
+				identity = "backend:" + backendType
 			}
-			counts[key] += count
+			if _, seen := queries[identity]; !seen {
+				query := &WaitEventQuery{Query: queryText}
+				if queryID != nil && *queryID != 0 {
+					query.QueryID = queryID
+				}
+				if queryText == "" {
+					query.BackendType = backendType
+				}
+				queries[identity] = query
+			}
+			key := queryKey{event: event, query: identity}
+			if _, seen := eventCounts[event]; !seen {
+				eventOrder = append(eventOrder, event)
+			}
+			if _, seen := queryCounts[key]; !seen {
+				queryOrder = append(queryOrder, key)
+			}
+			eventCounts[event] += count
+			queryCounts[key] += count
 			total += count
 		}
 		rows.Close()
@@ -1336,18 +1443,104 @@ func FetchWaitEvents(ctx context.Context, db *sql.DB, samples int, interval time
 			return sampling, err
 		}
 	}
+	normalizeWaitQueries(ctx, db, queries)
+
+	aas := func(count int) float64 { return float64(count) / float64(sampling.Samples) }
+	pct := func(part, whole int) float64 {
+		if whole == 0 {
+			return 0
+		}
+		return float64(part) / float64(whole) * 100
+	}
+	byEvent := map[eventKey][]WaitEventQuery{}
+	queryTotals := map[string]int{}
+	querySplits := map[string][]WaitEventShare{}
+	for _, key := range queryOrder {
+		count := queryCounts[key]
+		query := *queries[key.query]
+		query.Count, query.AAS, query.Pct = count, aas(count), pct(count, eventCounts[key.event])
+		byEvent[key.event] = append(byEvent[key.event], query)
+		queryTotals[key.query] += count
+		querySplits[key.query] = append(querySplits[key.query], WaitEventShare{
+			EventType: key.event.eventType, Event: key.event.event, Count: count, AAS: aas(count),
+		})
+	}
+	byCount := func(list []WaitEventQuery) {
+		sort.SliceStable(list, func(i, j int) bool { return list[i].Count > list[j].Count })
+	}
+
 	sampling.Events = []WaitEvent{}
-	for _, key := range order {
-		event := WaitEvent{EventType: key.eventType, Event: key.event, Count: counts[key],
-			AAS: float64(counts[key]) / float64(sampling.Samples)}
-		if total > 0 {
-			event.Pct = float64(counts[key]) / float64(total) * 100
+	for _, key := range eventOrder {
+		event := WaitEvent{EventType: key.eventType, Event: key.event, Count: eventCounts[key],
+			AAS: aas(eventCounts[key]), Pct: pct(eventCounts[key], total), Queries: byEvent[key]}
+		byCount(event.Queries)
+		if opts.QueriesPerEvent > 0 && len(event.Queries) > opts.QueriesPerEvent {
+			event.Queries = event.Queries[:opts.QueriesPerEvent]
 		}
 		sampling.TotalAAS += event.AAS
 		sampling.Events = append(sampling.Events, event)
 	}
 	sort.SliceStable(sampling.Events, func(i, j int) bool { return sampling.Events[i].Count > sampling.Events[j].Count })
+
+	sampling.TopQueries = []WaitEventQuery{}
+	for identity, count := range queryTotals {
+		query := *queries[identity]
+		query.Count, query.AAS, query.Pct = count, aas(count), pct(count, total)
+		query.Events = querySplits[identity]
+		sort.SliceStable(query.Events, func(i, j int) bool { return query.Events[i].Count > query.Events[j].Count })
+		sampling.TopQueries = append(sampling.TopQueries, query)
+	}
+	sort.SliceStable(sampling.TopQueries, func(i, j int) bool {
+		if sampling.TopQueries[i].Count != sampling.TopQueries[j].Count {
+			return sampling.TopQueries[i].Count > sampling.TopQueries[j].Count
+		}
+		return sampling.TopQueries[i].Label() < sampling.TopQueries[j].Label()
+	})
+	if opts.TopQueries > 0 && len(sampling.TopQueries) > opts.TopQueries {
+		sampling.TopQueries = sampling.TopQueries[:opts.TopQueries]
+	}
 	return sampling, nil
+}
+
+// normalizeWaitQueries replaces pg_stat_activity texts, which carry the statements'
+// literals, with pg_stat_statements' normalized text wherever the query_id is known
+// there. Best effort: without the extension (or on any error) the raw text stays.
+func normalizeWaitQueries(ctx context.Context, db *sql.DB, queries map[string]*WaitEventQuery) {
+	var ids []int64
+	for _, query := range queries {
+		if query.QueryID != nil {
+			ids = append(ids, *query.QueryID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	pgss, err := FetchPgStatStatementsInfo(ctx, db)
+	if err != nil || !pgss.Installed {
+		return
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT DISTINCT ON (queryid) queryid, query FROM `+pgss.Relation+` WHERE queryid = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	normalized := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var text string
+		if rows.Scan(&id, &text) == nil {
+			normalized[id] = strings.Join(strings.Fields(text), " ")
+		}
+	}
+	for _, query := range queries {
+		if query.QueryID == nil {
+			continue
+		}
+		if text, ok := normalized[*query.QueryID]; ok {
+			query.Query, query.Normalized = text, true
+		}
+	}
 }
 
 // QueryLoad is one row from pg_stat_statements sorted by total execution time.

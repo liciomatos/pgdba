@@ -6,6 +6,14 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Wait events broken down by query**: each sampled wait event lists the statements
+  behind it (AAS and share of the event), and `check_wait_events` adds `top_queries` —
+  the statements with the most active sessions, each split by wait event, like
+  Performance Insights' top SQL. Statements are identified by `query_id` (PG14+) and shown
+  with pg_stat_statements' normalized text when available, otherwise with
+  pg_stat_activity's text (truncated). In the TUI, `enter` on a wait event opens its
+  statements. Walsenders idling for new WAL (`Client:WalSenderWaitForWal`) are now
+  excluded with the other idle sessions.
 - **Query replicas from the MCP server**: `--replica name=URL` / `--replica-vault
   name=entry` (repeatable) add servers, and every tool accepts `target` (`primary` by
   default); `meta.target`/`meta.role` tell which server answered. `check_index_usage`
@@ -90,6 +98,8 @@ All notable changes to pgdba-cli are documented here. Format follows
   screen. `slow_query_count` is `null` with `slow_query_unavailable_reason` instead of `-1`.
 
 ### Fixed
+- **Connections could show a negative idle-in-transaction age** after a server clock
+  adjustment (e.g. VM time sync); ages are now clamped at zero.
 - **Consistent screen footers**: Table Churn and Xmin Horizon no longer show "/ filter"
   twice; Query Detail and the help page use the same "q back" style as every other
   screen; the Schema Browser column view says "q back to tables" (q already went back to
