@@ -1,6 +1,9 @@
 package util
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Status is the severity of one diagnostic row or response. The values match the
 // SeverityColor levels, so a screen can color a cell straight from it, and the MCP
@@ -415,4 +418,111 @@ func AutovacuumThresholdsStatus(thresholds AutovacuumThresholds) Status {
 		return StatusWarning
 	}
 	return StatusOK
+}
+
+// RecoveryConflictStatus warns when queries on this standby were canceled by WAL replay.
+func RecoveryConflictStatus(d RecoveryConflictDatabase) Status {
+	if d.Total > 0 {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// ReplayStatus rates a standby's replay state; a primary is always ok. Lag counts only
+// while received WAL is waiting to be replayed (the replay timestamp also ages while
+// the primary is idle), with the StandbyLagStatus thresholds. A paused replay or a
+// missing / non-streaming WAL receiver is a warning.
+func ReplayStatus(r RecoveryConflicts) Status {
+	if !r.InRecovery {
+		return StatusOK
+	}
+	status := StatusOK
+	if r.ReplayBacklogBytes != nil && *r.ReplayBacklogBytes > 0 {
+		status = StandbyLagStatus(*r.ReplayBacklogBytes, r.ReplayLagSeconds)
+	}
+	if r.ReplayPaused != nil && *r.ReplayPaused {
+		status = worst(status, StatusWarning)
+	}
+	if r.WALReceiver == nil || r.WALReceiver.Status != "streaming" {
+		status = worst(status, StatusWarning)
+	}
+	return status
+}
+
+// DatabaseHealthStatus rates one database's pg_stat_database counters:
+//   - critical: any data checksum failure (storage corruption);
+//   - warning: any deadlock, ≥ 5% of ≥ 1,000 transactions rolled back, or ≥ 10% of
+//     session time spent idle in transaction (PG14+: locks and snapshots held for nothing).
+func DatabaseHealthStatus(d DatabaseHealth) Status {
+	if d.ChecksumFailures != nil && *d.ChecksumFailures > 0 {
+		return StatusCritical
+	}
+	status := StatusOK
+	if d.Deadlocks > 0 {
+		status = StatusWarning
+	}
+	if d.RollbackPct != nil && *d.RollbackPct >= 5 && d.XactCommit+d.XactRollback >= 1000 {
+		status = StatusWarning
+	}
+	if pct := d.IdleInTransactionPct(); pct != nil && *pct >= 10 {
+		status = StatusWarning
+	}
+	return status
+}
+
+// SequenceStatus rates how much of a sequence's range (capped by its column type) is
+// used: warning from 75%, critical from 90%.
+func SequenceStatus(s OwnedSequence) Status {
+	switch {
+	case s.PctUsed == nil:
+		return StatusOK
+	case *s.PctUsed >= 90:
+		return StatusCritical
+	case *s.PctUsed >= 75:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// UpsertTableStatus is the worst of the table's HOT status (TableChurnStatus) and its
+// owned sequences' exhaustion status.
+func UpsertTableStatus(t UpsertTable) Status {
+	status := TableChurnStatus(t.Churn)
+	for _, sequence := range t.Sequences {
+		status = worst(status, SequenceStatus(sequence))
+	}
+	return status
+}
+
+// upsertBurnRatio is the values-per-live-row ratio above which a sequence is reported as
+// burned by conflicting upserts.
+const upsertBurnRatio = 2
+
+// UpsertTableHints explains what to change on an upsert target table.
+func UpsertTableHints(t UpsertTable) []string {
+	hints := []string{}
+	if hint := TableChurnHint(t.Churn); hint != "" {
+		hints = append(hints, hint)
+	}
+	if t.UpdateSharePct != nil && *t.UpdateSharePct >= 50 && t.IndexCount > 3 && TableChurnStatus(t.Churn) != StatusOK {
+		hints = append(hints, fmt.Sprintf("most upserts end as updates and the table has %d indexes: each non-HOT update writes all of them", t.IndexCount))
+	}
+	for _, sequence := range t.Sequences {
+		if sequence.ValuesPerLiveRow != nil && *sequence.ValuesPerLiveRow >= upsertBurnRatio {
+			hints = append(hints, fmt.Sprintf("%s used %.1f values per live row: every attempted upsert row calls nextval() even when it updates", sequence.Name, *sequence.ValuesPerLiveRow))
+		}
+		if SequenceStatus(sequence) != StatusOK {
+			hints = append(hints, fmt.Sprintf("%s has used %.1f%% of its %s range — plan a move to bigint", sequence.Name, *sequence.PctUsed, sequence.ColumnType))
+		}
+	}
+	return hints
+}
+
+// UpsertStatementHint flags DO UPDATE statements without a WHERE clause: they write a
+// new row version (and WAL, and possibly every index) even when nothing changed.
+func UpsertStatementHint(s UpsertStatement) string {
+	if s.Action == "update" && !s.UpdateHasWhere {
+		return "DO UPDATE has no WHERE: unchanged rows are rewritten anyway — add WHERE (t.col1, t.col2) IS DISTINCT FROM (EXCLUDED.col1, EXCLUDED.col2)"
+	}
+	return ""
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -3922,6 +3924,7 @@ func FetchReplicaIdentityIssues(ctx context.Context, db *sql.DB) ([]ReplicaIdent
 // many of its updates were HOT (heap-only: no index maintenance, the old version can be
 // pruned without vacuum).
 type TableChurn struct {
+	RelID      int64 // pg_class oid
 	SchemaName string
 	TableName  string
 	Inserts    int64
@@ -3944,6 +3947,14 @@ type TableChurn struct {
 
 // FetchTableChurn returns user tables ranked by updates since the last stats reset.
 func FetchTableChurn(ctx context.Context, db *sql.DB, limit int) ([]TableChurn, error) {
+	return queryTableChurn(ctx, db, `
+		ORDER BY s.n_tup_upd DESC, s.n_tup_ins + s.n_tup_del DESC, s.schemaname, s.relname
+		LIMIT NULLIF($1::int, 0)`, limit)
+}
+
+// queryTableChurn reads TableChurn rows from pg_stat_user_tables; tail holds the
+// WHERE/ORDER BY/LIMIT clauses (on aliases s and c) and args their parameters.
+func queryTableChurn(ctx context.Context, db *sql.DB, tail string, args ...any) ([]TableChurn, error) {
 	// n_tup_newpage_upd was added in PG16.
 	newPageColumn := "NULL::bigint"
 	if pgMajorVersion() >= 16 {
@@ -3951,7 +3962,7 @@ func FetchTableChurn(ctx context.Context, db *sql.DB, limit int) ([]TableChurn, 
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT
-			s.schemaname, s.relname,
+			s.relid::bigint, s.schemaname, s.relname,
 			s.n_tup_ins, s.n_tup_upd, s.n_tup_del, s.n_tup_hot_upd, `+newPageColumn+`,
 			s.n_live_tup, s.n_dead_tup,
 			COALESCE(c.reloptions, '{}'),
@@ -3959,9 +3970,7 @@ func FetchTableChurn(ctx context.Context, db *sql.DB, limit int) ([]TableChurn, 
 			pg_total_relation_size(c.oid),
 			pg_size_pretty(pg_total_relation_size(c.oid))
 		FROM pg_stat_user_tables s
-		JOIN pg_class c ON c.oid = s.relid
-		ORDER BY s.n_tup_upd DESC, s.n_tup_ins + s.n_tup_del DESC, s.schemaname, s.relname
-		LIMIT NULLIF($1::int, 0)`, limit)
+		JOIN pg_class c ON c.oid = s.relid`+tail, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3970,7 +3979,7 @@ func FetchTableChurn(ctx context.Context, db *sql.DB, limit int) ([]TableChurn, 
 	for rows.Next() {
 		var t TableChurn
 		var reloptions pq.StringArray
-		if err := rows.Scan(&t.SchemaName, &t.TableName, &t.Inserts, &t.Updates, &t.Deletes, &t.HotUpdates,
+		if err := rows.Scan(&t.RelID, &t.SchemaName, &t.TableName, &t.Inserts, &t.Updates, &t.Deletes, &t.HotUpdates,
 			&t.NewPageUpdates, &t.LiveTuples, &t.DeadTuples, &reloptions,
 			&t.TableSizeBytes, &t.TotalSizeBytes, &t.TotalSize); err != nil {
 			return nil, err
@@ -4229,4 +4238,547 @@ func FetchWALStats(ctx context.Context, db *sql.DB) (WALStats, error) {
 	).Scan(&stats.Records, &stats.FPI, &stats.Bytes, &stats.BuffersFull, &stats.StatsReset, &stats.SecondsSinceReset,
 		&stats.FullPageWrites, &stats.WALCompression, &stats.CheckpointTimeout, &stats.MaxWALSize, &stats.WALBuffers)
 	return stats, err
+}
+
+// RecoveryConflictDatabase is one database's pg_stat_database_conflicts row: queries
+// canceled on this standby because replaying WAL from the primary needed something they
+// held. The counters are always 0 on a primary.
+type RecoveryConflictDatabase struct {
+	Database   string
+	Tablespace int64 // a dropped tablespace was in use (temp files)
+	Lock       int64 // replay needed a lock the query held (e.g. ACCESS EXCLUSIVE from TRUNCATE/DROP, or vacuum truncating the table end)
+	Snapshot   int64 // replay removed row versions the query's snapshot could still see (vacuum cleanup on the primary)
+	Bufferpin  int64 // replay needed a buffer the query had pinned
+	Deadlock   int64 // replay deadlocked with the query
+	// ActiveLogicalSlot counts logical slots invalidated on the standby (PG16+); nil before.
+	ActiveLogicalSlot *int64
+	Total             int64
+}
+
+// WALReceiverStatus is this standby's pg_stat_wal_receiver row.
+type WALReceiverStatus struct {
+	Status             string
+	SenderHost         string
+	SenderPort         *int
+	SlotName           string
+	FlushedLSN         string
+	LastMsgReceiptTime *time.Time
+	LatestEndTime      *time.Time
+}
+
+// RecoveryConflicts is the standby-side replication picture: replay position and lag,
+// the WAL receiver, and the per-database recovery conflict counters.
+type RecoveryConflicts struct {
+	InRecovery   bool
+	ReplayPaused *bool // pg_is_wal_replay_paused(); nil on a primary
+	ReceiveLSN   *string
+	ReplayLSN    *string
+	// ReplayBacklogBytes is WAL received but not replayed yet; nil on a primary.
+	ReplayBacklogBytes *int64
+	// LastReplayTime is the commit time of the last replayed transaction. now() minus it
+	// (ReplayLagSeconds) grows while the primary is idle, so it only means lag when
+	// ReplayBacklogBytes > 0.
+	LastReplayTime   *time.Time
+	ReplayLagSeconds *float64
+	WALReceiver      *WALReceiverStatus // nil on a primary or when no receiver is running
+	Databases        []RecoveryConflictDatabase
+	Warnings         []string
+}
+
+// FetchRecoveryConflicts reads pg_stat_database_conflicts for every database plus the
+// replay state of this server. Each part is read on its own; failures go to Warnings.
+func FetchRecoveryConflicts(ctx context.Context, db *sql.DB) (RecoveryConflicts, error) {
+	var result RecoveryConflicts
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			pg_is_in_recovery(),
+			CASE WHEN pg_is_in_recovery() THEN pg_is_wal_replay_paused() END,
+			pg_last_wal_receive_lsn()::text,
+			pg_last_wal_replay_lsn()::text,
+			pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())::bigint,
+			pg_last_xact_replay_timestamp(),
+			EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::float8`,
+	).Scan(&result.InRecovery, &result.ReplayPaused, &result.ReceiveLSN, &result.ReplayLSN,
+		&result.ReplayBacklogBytes, &result.LastReplayTime, &result.ReplayLagSeconds)
+	if err != nil {
+		return result, err
+	}
+
+	if result.InRecovery {
+		var receiver WALReceiverStatus
+		err := db.QueryRowContext(ctx, `
+			SELECT COALESCE(status, ''), COALESCE(sender_host, ''), sender_port, COALESCE(slot_name, ''),
+			       COALESCE(flushed_lsn::text, ''), last_msg_receipt_time, latest_end_time
+			FROM pg_stat_wal_receiver`,
+		).Scan(&receiver.Status, &receiver.SenderHost, &receiver.SenderPort, &receiver.SlotName,
+			&receiver.FlushedLSN, &receiver.LastMsgReceiptTime, &receiver.LatestEndTime)
+		switch {
+		case err == sql.ErrNoRows:
+			result.Warnings = append(result.Warnings, "no WAL receiver running: the standby is not streaming (restoring from archive, or the primary is unreachable)")
+		case err != nil:
+			result.Warnings = append(result.Warnings, "wal receiver: "+err.Error())
+		default:
+			result.WALReceiver = &receiver
+		}
+	}
+
+	// confl_active_logicalslot was added in PG16 (logical decoding on standbys).
+	logicalSlotColumn := "NULL::bigint"
+	if pgMajorVersion() >= 16 {
+		logicalSlotColumn = "confl_active_logicalslot"
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT datname, confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, `+logicalSlotColumn+`
+		FROM pg_stat_database_conflicts
+		WHERE datname IS NOT NULL
+		ORDER BY confl_tablespace + confl_lock + confl_snapshot + confl_bufferpin + confl_deadlock DESC, datname`)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "pg_stat_database_conflicts: "+err.Error())
+		return result, nil
+	}
+	defer rows.Close()
+	result.Databases = []RecoveryConflictDatabase{}
+	for rows.Next() {
+		var d RecoveryConflictDatabase
+		if err := rows.Scan(&d.Database, &d.Tablespace, &d.Lock, &d.Snapshot, &d.Bufferpin, &d.Deadlock, &d.ActiveLogicalSlot); err != nil {
+			return result, err
+		}
+		d.Total = d.Tablespace + d.Lock + d.Snapshot + d.Bufferpin + d.Deadlock
+		if d.ActiveLogicalSlot != nil {
+			d.Total += *d.ActiveLogicalSlot
+		}
+		result.Databases = append(result.Databases, d)
+	}
+	return result, rows.Err()
+}
+
+// DatabaseHealth is one database's pg_stat_database counters that point at errors or
+// wasted work. Temp file counters are left to FetchTempFileUsage.
+type DatabaseHealth struct {
+	Database     string
+	NumBackends  int
+	XactCommit   int64
+	XactRollback int64
+	RollbackPct  *float64 // nil without transactions
+	Deadlocks    int64
+	Conflicts    int64 // recovery conflicts (standby only); split in FetchRecoveryConflicts
+	// ChecksumFailures is NULL when data checksums are disabled.
+	ChecksumFailures    *int64
+	ChecksumLastFailure *time.Time
+	BlkReadTimeMS       float64 // 0 unless track_io_timing is on
+	BlkWriteTimeMS      float64
+	TupReturned         int64 // rows read by sequential scans and index scans
+	TupFetched          int64 // rows fetched by index scans
+	TupInserted         int64
+	TupUpdated          int64
+	TupDeleted          int64
+	// Session counters were added in PG14; nil before.
+	SessionTimeMS           *float64
+	ActiveTimeMS            *float64
+	IdleInTransactionTimeMS *float64
+	Sessions                *int64
+	SessionsAbandoned       *int64 // the client disconnected without closing the session
+	SessionsFatal           *int64 // ended by a fatal error
+	SessionsKilled          *int64 // terminated by an operator (pg_terminate_backend, timeouts)
+	// Parallel worker counters were added in PG18; nil before.
+	ParallelWorkersToLaunch *int64
+	ParallelWorkersLaunched *int64
+	StatsReset              *time.Time
+}
+
+// IdleInTransactionPct is the share of session time spent idle inside a transaction
+// (PG14+); nil when unknown.
+func (d DatabaseHealth) IdleInTransactionPct() *float64 {
+	if d.SessionTimeMS == nil || d.IdleInTransactionTimeMS == nil || *d.SessionTimeMS <= 0 {
+		return nil
+	}
+	pct := *d.IdleInTransactionTimeMS / *d.SessionTimeMS * 100
+	return &pct
+}
+
+// FetchDatabaseHealth reads pg_stat_database for every database (the shared-objects row
+// with a NULL datname is skipped).
+func FetchDatabaseHealth(ctx context.Context, db *sql.DB) ([]DatabaseHealth, error) {
+	majorVersion := pgMajorVersion()
+	// Session accounting columns were added to pg_stat_database in PG14.
+	sessionColumns := "NULL::float8, NULL::float8, NULL::float8, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint"
+	if majorVersion >= 14 {
+		sessionColumns = "session_time, active_time, idle_in_transaction_time, sessions, sessions_abandoned, sessions_fatal, sessions_killed"
+	}
+	// parallel_workers_to_launch/launched were added in PG18.
+	parallelColumns := "NULL::bigint, NULL::bigint"
+	if majorVersion >= 18 {
+		parallelColumns = "parallel_workers_to_launch, parallel_workers_launched"
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT datname, numbackends, xact_commit, xact_rollback, deadlocks, conflicts,
+		       checksum_failures, checksum_last_failure, blk_read_time, blk_write_time,
+		       tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
+		       `+sessionColumns+`, `+parallelColumns+`, stats_reset
+		FROM pg_stat_database
+		WHERE datname IS NOT NULL
+		ORDER BY xact_commit + xact_rollback DESC, datname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []DatabaseHealth{}
+	for rows.Next() {
+		var d DatabaseHealth
+		if err := rows.Scan(&d.Database, &d.NumBackends, &d.XactCommit, &d.XactRollback, &d.Deadlocks, &d.Conflicts,
+			&d.ChecksumFailures, &d.ChecksumLastFailure, &d.BlkReadTimeMS, &d.BlkWriteTimeMS,
+			&d.TupReturned, &d.TupFetched, &d.TupInserted, &d.TupUpdated, &d.TupDeleted,
+			&d.SessionTimeMS, &d.ActiveTimeMS, &d.IdleInTransactionTimeMS, &d.Sessions,
+			&d.SessionsAbandoned, &d.SessionsFatal, &d.SessionsKilled,
+			&d.ParallelWorkersToLaunch, &d.ParallelWorkersLaunched, &d.StatsReset); err != nil {
+			return nil, err
+		}
+		if total := d.XactCommit + d.XactRollback; total > 0 {
+			pct := float64(d.XactRollback) / float64(total) * 100
+			d.RollbackPct = &pct
+		}
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
+// UpsertStatement is a pg_stat_statements entry for an INSERT … ON CONFLICT.
+type UpsertStatement struct {
+	QueryID           int64
+	Query             string
+	Calls             int64
+	Rows              int64 // rows inserted or updated; DO NOTHING skips are not counted
+	TotalTimeMS       float64
+	MeanTimeMS        float64
+	SharedBlksHit     int64
+	SharedBlksRead    int64
+	SharedBlksDirtied int64
+	SharedBlksWritten int64
+	WALBytes          *float64 // pg_stat_statements 1.8+; nil before
+	Action            string   // "update", "nothing", or "" when the text didn't say
+	UpdateHasWhere    bool     // DO UPDATE … WHERE: no-op updates can be skipped
+	TargetTable       string   // as written after INSERT INTO
+	ResolvedTable     string   // schema.table, "" when the name didn't resolve from this session
+}
+
+// UpsertIndex is an index on an upsert target table that ON CONFLICT can use as its
+// arbiter (unique or exclusion).
+type UpsertIndex struct {
+	Name       string
+	Definition string
+	Primary    bool
+	Valid      bool
+	Scans      int64
+	SizeBytes  int64
+}
+
+// OwnedSequence is a sequence owned by a table column (serial or identity).
+type OwnedSequence struct {
+	Name       string
+	Column     string
+	ColumnType string
+	LastValue  *int64 // nil when never called or not readable by this role
+	StartValue int64
+	Increment  int64
+	// MaxValue is the smaller of the sequence's max_value and the column type's limit:
+	// a bigint sequence feeding an integer column fails at 2^31.
+	MaxValue int64
+	PctUsed  *float64
+	// ValuesPerLiveRow is (values consumed) ÷ live rows. Every row an INSERT … ON
+	// CONFLICT attempts calls nextval(), even when it ends up updating, so values far
+	// above the row count mean conflicts burn the sequence (deletes also contribute).
+	ValuesPerLiveRow *float64
+}
+
+// UpsertTable is a table targeted by INSERT … ON CONFLICT statements.
+type UpsertTable struct {
+	Churn TableChurn
+	// UpdateSharePct is updates ÷ (inserts + updates): roughly the conflict rate when
+	// the upsert is the table's main writer.
+	UpdateSharePct *float64
+	IndexCount     int // every index a non-HOT update has to write
+	ArbiterIndexes []UpsertIndex
+	Sequences      []OwnedSequence
+	Statements     int
+}
+
+// UpsertAnalysis is the INSERT … ON CONFLICT workload: the statements, the tables they
+// write and the sessions waiting on speculative insertion right now.
+type UpsertAnalysis struct {
+	Statements []UpsertStatement
+	Tables     []UpsertTable
+	// SpeculativeTokenWaits counts sessions waiting on another session's in-progress
+	// speculative insertion of the same key (pg_locks locktype spectoken).
+	SpeculativeTokenWaits int
+	ActiveUpsertSessions  int
+	UpsertSessionsOnLocks int // active upserts waiting on a Lock wait event
+	Warnings              []string
+}
+
+var (
+	upsertTargetPattern  = regexp.MustCompile(`(?is)\binsert\s+into\s+("(?:[^"]|"")+"|[\w$]+)(?:\s*\.\s*("(?:[^"]|"")+"|[\w$]+))?`)
+	upsertUpdatePattern  = regexp.MustCompile(`(?is)\bon\s+conflict\b.*?\bdo\s+update\b(.*)$`)
+	upsertNothingPattern = regexp.MustCompile(`(?is)\bon\s+conflict\b.*?\bdo\s+nothing\b`)
+	upsertWherePattern   = regexp.MustCompile(`(?is)\bwhere\b`)
+)
+
+// parseUpsert extracts the target table and the conflict action from statement text.
+// It is a heuristic over normalized SQL, not a parser.
+func parseUpsert(query string) (target, action string, updateHasWhere bool) {
+	if match := upsertTargetPattern.FindStringSubmatch(query); match != nil {
+		target = match[1]
+		if match[2] != "" {
+			target += "." + match[2]
+		}
+	}
+	switch {
+	case upsertNothingPattern.MatchString(query):
+		action = "nothing"
+	default:
+		if match := upsertUpdatePattern.FindStringSubmatch(query); match != nil {
+			action = "update"
+			updateHasWhere = upsertWherePattern.MatchString(match[1])
+		}
+	}
+	return target, action, updateHasWhere
+}
+
+// columnTypeMax is the largest value an integer column type can hold.
+func columnTypeMax(columnType string) int64 {
+	switch columnType {
+	case "smallint":
+		return math.MaxInt16
+	case "integer":
+		return math.MaxInt32
+	}
+	return math.MaxInt64
+}
+
+// FetchUpsertAnalysis finds INSERT … ON CONFLICT statements in pg_stat_statements,
+// resolves their target tables, and reads each table's write pattern, arbiter
+// candidate indexes and owned sequences. extraTable (optional, "schema.table" or a
+// search_path-relative name) is analyzed even without pg_stat_statements.
+func FetchUpsertAnalysis(ctx context.Context, db *sql.DB, extraTable string, limit int) (UpsertAnalysis, error) {
+	result := UpsertAnalysis{Statements: []UpsertStatement{}, Tables: []UpsertTable{}}
+	pgss, err := requirePgStatStatements(ctx, db)
+	if err != nil {
+		if extraTable == "" {
+			return result, err
+		}
+		result.Warnings = append(result.Warnings, "statements: "+err.Error())
+	} else {
+		walColumn := "NULL::numeric"
+		if compareExtensionVersions(pgss.Version, "1.8") >= 0 {
+			walColumn = "wal_bytes"
+		}
+		// Column names come from pgStatStatementsColumns (fixed identifiers), never user input.
+		rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT queryid, query, calls, rows, %s, %s,
+			       shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, %s::float8
+			FROM %s
+			WHERE query ~* '\minsert\s+into\M' AND query ~* '\mon\s+conflict\M'
+			ORDER BY %s DESC
+			LIMIT NULLIF($1::int, 0)`, pgss.TotalTimeColumn, pgss.MeanTimeColumn, walColumn, pgss.Relation, pgss.TotalTimeColumn), limit)
+		if err != nil {
+			return result, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s UpsertStatement
+			if err := rows.Scan(&s.QueryID, &s.Query, &s.Calls, &s.Rows, &s.TotalTimeMS, &s.MeanTimeMS,
+				&s.SharedBlksHit, &s.SharedBlksRead, &s.SharedBlksDirtied, &s.SharedBlksWritten, &s.WALBytes); err != nil {
+				return result, err
+			}
+			s.TargetTable, s.Action, s.UpdateHasWhere = parseUpsert(s.Query)
+			result.Statements = append(result.Statements, s)
+		}
+		if err := rows.Err(); err != nil {
+			return result, err
+		}
+	}
+
+	// Resolve every distinct target name to a table oid. to_regclass uses this
+	// session's search_path, which may differ from the application's.
+	statementsPerTable := map[int64]int{}
+	resolved := map[string]int64{}
+	var unresolved []string
+	resolve := func(name string) (int64, string) {
+		if oid, ok := resolved[name]; ok {
+			return oid, ""
+		}
+		var oid sql.NullInt64
+		var qualified sql.NullString
+		err := db.QueryRowContext(ctx, `
+			SELECT c.oid::bigint, n.nspname || '.' || c.relname
+			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.oid = to_regclass($1)`, name).Scan(&oid, &qualified)
+		if err != nil || !oid.Valid {
+			return 0, ""
+		}
+		resolved[name] = oid.Int64
+		return oid.Int64, qualified.String
+	}
+	qualifiedNames := map[int64]string{}
+	for i, s := range result.Statements {
+		if s.TargetTable == "" {
+			continue
+		}
+		oid, qualified := resolve(s.TargetTable)
+		if oid == 0 {
+			unresolved = append(unresolved, s.TargetTable)
+			continue
+		}
+		if qualified != "" {
+			qualifiedNames[oid] = qualified
+		}
+		result.Statements[i].ResolvedTable = qualifiedNames[oid]
+		statementsPerTable[oid]++
+	}
+	if extraTable != "" {
+		oid, _ := resolve(extraTable)
+		if oid == 0 {
+			return result, fmt.Errorf("table %q not found", extraTable)
+		}
+		if _, ok := statementsPerTable[oid]; !ok {
+			statementsPerTable[oid] = 0
+		}
+	}
+	if len(unresolved) > 0 {
+		slices.Sort(unresolved)
+		result.Warnings = append(result.Warnings, "target tables not found from this session's search_path (schema-qualify them, or pass table): "+strings.Join(slices.Compact(unresolved), ", "))
+	}
+
+	sessionErr := db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM pg_locks WHERE locktype = 'spectoken' AND NOT granted),
+			count(*),
+			count(*) FILTER (WHERE wait_event_type = 'Lock')
+		FROM pg_stat_activity
+		WHERE state = 'active' AND query ~* '\mon\s+conflict\M' AND pid <> pg_backend_pid()`,
+	).Scan(&result.SpeculativeTokenWaits, &result.ActiveUpsertSessions, &result.UpsertSessionsOnLocks)
+	if sessionErr != nil {
+		result.Warnings = append(result.Warnings, "active upsert sessions: "+sessionErr.Error())
+	}
+
+	if len(statementsPerTable) == 0 {
+		return result, nil
+	}
+	oids := make([]int64, 0, len(statementsPerTable))
+	for oid := range statementsPerTable {
+		oids = append(oids, oid)
+	}
+	tables, err := queryTableChurn(ctx, db, `
+		WHERE s.relid = ANY($1::oid[])
+		ORDER BY s.n_tup_upd DESC, s.schemaname, s.relname`, pq.Array(oids))
+	if err != nil {
+		return result, err
+	}
+	indexes, indexCounts, err := fetchUpsertIndexes(ctx, db, oids)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "indexes: "+err.Error())
+	}
+	sequences, err := fetchOwnedSequences(ctx, db, oids)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "sequences: "+err.Error())
+	}
+	for _, churn := range tables {
+		table := UpsertTable{
+			Churn:          churn,
+			IndexCount:     indexCounts[churn.RelID],
+			ArbiterIndexes: indexes[churn.RelID],
+			Sequences:      sequences[churn.RelID],
+			Statements:     statementsPerTable[churn.RelID],
+		}
+		if written := churn.Inserts + churn.Updates; written > 0 {
+			pct := float64(churn.Updates) / float64(written) * 100
+			table.UpdateSharePct = &pct
+		}
+		for i, sequence := range table.Sequences {
+			if sequence.LastValue != nil && churn.LiveTuples > 0 && sequence.Increment != 0 {
+				ratio := float64((*sequence.LastValue-sequence.StartValue)/sequence.Increment+1) / float64(churn.LiveTuples)
+				table.Sequences[i].ValuesPerLiveRow = &ratio
+			}
+		}
+		if table.ArbiterIndexes == nil {
+			table.ArbiterIndexes = []UpsertIndex{}
+		}
+		if table.Sequences == nil {
+			table.Sequences = []OwnedSequence{}
+		}
+		result.Tables = append(result.Tables, table)
+	}
+	return result, nil
+}
+
+// fetchUpsertIndexes returns the unique and exclusion indexes of each table (ON
+// CONFLICT arbiter candidates) and how many indexes each table has in total.
+func fetchUpsertIndexes(ctx context.Context, db *sql.DB, oids []int64) (map[int64][]UpsertIndex, map[int64]int, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT i.indrelid::bigint, n.nspname || '.' || ic.relname, pg_get_indexdef(i.indexrelid),
+		       i.indisprimary, i.indisvalid, COALESCE(s.idx_scan, 0), pg_relation_size(i.indexrelid),
+		       i.indisunique OR EXISTS (SELECT 1 FROM pg_constraint x WHERE x.conindid = i.indexrelid AND x.contype = 'x')
+		FROM pg_index i
+		JOIN pg_class ic ON ic.oid = i.indexrelid
+		JOIN pg_namespace n ON n.oid = ic.relnamespace
+		LEFT JOIN pg_stat_all_indexes s ON s.indexrelid = i.indexrelid
+		WHERE i.indrelid = ANY($1::oid[])
+		ORDER BY i.indisprimary DESC, ic.relname`, pq.Array(oids))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	arbiters := map[int64][]UpsertIndex{}
+	counts := map[int64]int{}
+	for rows.Next() {
+		var relID int64
+		var index UpsertIndex
+		var arbiter bool
+		if err := rows.Scan(&relID, &index.Name, &index.Definition, &index.Primary, &index.Valid,
+			&index.Scans, &index.SizeBytes, &arbiter); err != nil {
+			return nil, nil, err
+		}
+		counts[relID]++
+		if arbiter {
+			arbiters[relID] = append(arbiters[relID], index)
+		}
+	}
+	return arbiters, counts, rows.Err()
+}
+
+// fetchOwnedSequences returns the sequences owned by columns of the given tables
+// (serial and identity columns), keyed by table oid.
+func fetchOwnedSequences(ctx context.Context, db *sql.DB, oids []int64) (map[int64][]OwnedSequence, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT d.refobjid::bigint, sn.nspname || '.' || seq.relname, a.attname, format_type(a.atttypid, a.atttypmod),
+		       s.last_value, s.start_value, s.increment_by, s.max_value
+		FROM pg_depend d
+		JOIN pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
+		JOIN pg_namespace sn ON sn.oid = seq.relnamespace
+		JOIN pg_sequences s ON s.schemaname = sn.nspname AND s.sequencename = seq.relname
+		JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+		WHERE d.classid = 'pg_class'::regclass
+		  AND d.refclassid = 'pg_class'::regclass
+		  AND d.deptype IN ('a', 'i')
+		  AND d.refobjid = ANY($1::oid[])
+		ORDER BY 2`, pq.Array(oids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := map[int64][]OwnedSequence{}
+	for rows.Next() {
+		var relID int64
+		var sequence OwnedSequence
+		if err := rows.Scan(&relID, &sequence.Name, &sequence.Column, &sequence.ColumnType,
+			&sequence.LastValue, &sequence.StartValue, &sequence.Increment, &sequence.MaxValue); err != nil {
+			return nil, err
+		}
+		sequence.MaxValue = min(sequence.MaxValue, columnTypeMax(sequence.ColumnType))
+		if sequence.LastValue != nil && sequence.Increment > 0 && sequence.MaxValue > sequence.StartValue {
+			pct := float64(*sequence.LastValue-sequence.StartValue) / float64(sequence.MaxValue-sequence.StartValue) * 100
+			sequence.PctUsed = &pct
+		}
+		results[relID] = append(results[relID], sequence)
+	}
+	return results, rows.Err()
 }

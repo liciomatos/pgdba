@@ -436,6 +436,8 @@ func (m DashboardModel) View() string {
 		renderKey("V") + " " + renderLabel("vacuum") + "  " +
 		renderKey("H") + " " + renderLabel("hot") + "  " +
 		renderKey("O") + " " + renderLabel("io/wal") + "  " +
+		renderKey("C") + " " + renderLabel("confl") + "  " +
+		renderKey("U") + " " + renderLabel("upsert") + "  " +
 		renderKey("r") + " " + renderLabel("refresh") + "  " +
 		renderKey("?") + " " + renderLabel("help") + "  " +
 		renderKey("q") + " " + renderLabel("quit")

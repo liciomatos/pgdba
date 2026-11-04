@@ -2245,3 +2245,282 @@ func handleCheckWAL(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	}
 	return respond(ctx, resp)
 }
+
+// --- recovery conflicts ---
+
+type recoveryConflictResponse struct {
+	Database          string `json:"database"`
+	Status            string `json:"status"`
+	Total             int64  `json:"total"`
+	Tablespace        int64  `json:"confl_tablespace"`
+	Lock              int64  `json:"confl_lock"`
+	Snapshot          int64  `json:"confl_snapshot"`
+	Bufferpin         int64  `json:"confl_bufferpin"`
+	Deadlock          int64  `json:"confl_deadlock"`
+	ActiveLogicalSlot *int64 `json:"confl_active_logicalslot"` // PG16+
+}
+
+type walReceiverResponse struct {
+	Status             string  `json:"status"`
+	SenderHost         string  `json:"sender_host"`
+	SenderPort         *int    `json:"sender_port"`
+	SlotName           string  `json:"slot_name"`
+	FlushedLSN         string  `json:"flushed_lsn"`
+	LastMsgReceiptTime *string `json:"last_msg_receipt_time"`
+	LatestEndTime      *string `json:"latest_end_time"`
+}
+
+type recoveryConflictsResponse struct {
+	Status             string                     `json:"status"`
+	ReplayStatus       string                     `json:"replay_status"`
+	InRecovery         bool                       `json:"in_recovery"`
+	ReplayPaused       *bool                      `json:"replay_paused"`
+	ReceiveLSN         *string                    `json:"receive_lsn"`
+	ReplayLSN          *string                    `json:"replay_lsn"`
+	ReplayBacklogBytes *int64                     `json:"replay_backlog_bytes"`
+	LastReplayTime     *string                    `json:"last_replay_time"`
+	ReplayLagSeconds   *float64                   `json:"replay_lag_seconds"`
+	WALReceiver        *walReceiverResponse       `json:"wal_receiver"`
+	Databases          []recoveryConflictResponse `json:"databases"`
+}
+
+// optionalTime formats a nullable timestamp as RFC 3339, keeping null as null.
+func optionalTime(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	formatted := t.Format(time.RFC3339)
+	return &formatted
+}
+
+func handleCheckRecoveryConflicts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	conflicts, err := util.FetchRecoveryConflicts(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	replayStatus := util.ReplayStatus(conflicts)
+	resp := recoveryConflictsResponse{
+		ReplayStatus:       replayStatus.String(),
+		InRecovery:         conflicts.InRecovery,
+		ReplayPaused:       conflicts.ReplayPaused,
+		ReceiveLSN:         conflicts.ReceiveLSN,
+		ReplayLSN:          conflicts.ReplayLSN,
+		ReplayBacklogBytes: conflicts.ReplayBacklogBytes,
+		LastReplayTime:     optionalTime(conflicts.LastReplayTime),
+		ReplayLagSeconds:   conflicts.ReplayLagSeconds,
+		Databases:          make([]recoveryConflictResponse, 0, len(conflicts.Databases)),
+	}
+	status := replayStatus
+	for _, d := range conflicts.Databases {
+		databaseStatus := util.RecoveryConflictStatus(d)
+		status = max(status, databaseStatus)
+		resp.Databases = append(resp.Databases, recoveryConflictResponse{
+			Database: d.Database, Status: databaseStatus.String(), Total: d.Total,
+			Tablespace: d.Tablespace, Lock: d.Lock, Snapshot: d.Snapshot, Bufferpin: d.Bufferpin,
+			Deadlock: d.Deadlock, ActiveLogicalSlot: d.ActiveLogicalSlot,
+		})
+	}
+	resp.Status = status.String()
+	if receiver := conflicts.WALReceiver; receiver != nil {
+		resp.WALReceiver = &walReceiverResponse{
+			Status: receiver.Status, SenderHost: receiver.SenderHost, SenderPort: receiver.SenderPort,
+			SlotName: receiver.SlotName, FlushedLSN: receiver.FlushedLSN,
+			LastMsgReceiptTime: optionalTime(receiver.LastMsgReceiptTime),
+			LatestEndTime:      optionalTime(receiver.LatestEndTime),
+		}
+	}
+	warnings := conflicts.Warnings
+	if !conflicts.InRecovery {
+		warnings = append(warnings, "this server is a primary: recovery conflicts only happen on standbys, so every counter is 0 here — call again with target set to a replica")
+	}
+	return respond(ctx, resp, warnings...)
+}
+
+// --- database health ---
+
+type databaseHealthResponse struct {
+	Database                string             `json:"database"`
+	Status                  string             `json:"status"`
+	NumBackends             int                `json:"numbackends"`
+	XactCommit              int64              `json:"xact_commit"`
+	XactRollback            int64              `json:"xact_rollback"`
+	RollbackPct             *float64           `json:"rollback_pct"`
+	Deadlocks               int64              `json:"deadlocks"`
+	Conflicts               int64              `json:"recovery_conflicts"`
+	ChecksumFailures        *int64             `json:"checksum_failures"` // null = data checksums disabled
+	ChecksumLastFailure     *string            `json:"checksum_last_failure"`
+	BlkReadTimeMS           float64            `json:"blk_read_time_ms"`
+	BlkWriteTimeMS          float64            `json:"blk_write_time_ms"`
+	TupReturned             int64              `json:"tup_returned"`
+	TupFetched              int64              `json:"tup_fetched"`
+	TupInserted             int64              `json:"tup_inserted"`
+	TupUpdated              int64              `json:"tup_updated"`
+	TupDeleted              int64              `json:"tup_deleted"`
+	SessionTimeMS           *float64           `json:"session_time_ms"`
+	ActiveTimeMS            *float64           `json:"active_time_ms"`
+	IdleInTransactionTimeMS *float64           `json:"idle_in_transaction_time_ms"`
+	IdleInTransactionPct    *float64           `json:"idle_in_transaction_pct"`
+	Sessions                *int64             `json:"sessions"`
+	SessionsAbandoned       *int64             `json:"sessions_abandoned"`
+	SessionsFatal           *int64             `json:"sessions_fatal"`
+	SessionsKilled          *int64             `json:"sessions_killed"`
+	ParallelWorkersToLaunch *int64             `json:"parallel_workers_to_launch"`
+	ParallelWorkersLaunched *int64             `json:"parallel_workers_launched"`
+	StatsReset              statsResetResponse `json:"stats_reset"`
+}
+
+func handleCheckDatabaseHealth(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	databases, err := util.FetchDatabaseHealth(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	now := time.Now()
+	resp := make([]databaseHealthResponse, 0, len(databases))
+	for _, d := range databases {
+		resp = append(resp, databaseHealthResponse{
+			Database: d.Database, Status: util.DatabaseHealthStatus(d).String(), NumBackends: d.NumBackends,
+			XactCommit: d.XactCommit, XactRollback: d.XactRollback, RollbackPct: d.RollbackPct,
+			Deadlocks: d.Deadlocks, Conflicts: d.Conflicts,
+			ChecksumFailures: d.ChecksumFailures, ChecksumLastFailure: optionalTime(d.ChecksumLastFailure),
+			BlkReadTimeMS: d.BlkReadTimeMS, BlkWriteTimeMS: d.BlkWriteTimeMS,
+			TupReturned: d.TupReturned, TupFetched: d.TupFetched, TupInserted: d.TupInserted,
+			TupUpdated: d.TupUpdated, TupDeleted: d.TupDeleted,
+			SessionTimeMS: d.SessionTimeMS, ActiveTimeMS: d.ActiveTimeMS,
+			IdleInTransactionTimeMS: d.IdleInTransactionTimeMS, IdleInTransactionPct: d.IdleInTransactionPct(),
+			Sessions: d.Sessions, SessionsAbandoned: d.SessionsAbandoned, SessionsFatal: d.SessionsFatal,
+			SessionsKilled:          d.SessionsKilled,
+			ParallelWorkersToLaunch: d.ParallelWorkersToLaunch, ParallelWorkersLaunched: d.ParallelWorkersLaunched,
+			StatsReset: toStatsReset(d.StatsReset, now),
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- upsert analysis ---
+
+type upsertStatementResponse struct {
+	QueryID           int64    `json:"queryid"`
+	Query             string   `json:"query"`
+	QueryTruncated    bool     `json:"query_truncated"`
+	Action            string   `json:"conflict_action"` // update, nothing, or "" when not recognized
+	UpdateHasWhere    bool     `json:"update_has_where"`
+	Hint              string   `json:"hint,omitempty"`
+	TargetTable       string   `json:"target_table"`
+	ResolvedTable     string   `json:"resolved_table"`
+	Calls             int64    `json:"calls"`
+	Rows              int64    `json:"rows"`
+	TotalTimeMS       float64  `json:"total_time_ms"`
+	MeanTimeMS        float64  `json:"mean_time_ms"`
+	SharedBlksHit     int64    `json:"shared_blks_hit"`
+	SharedBlksRead    int64    `json:"shared_blks_read"`
+	SharedBlksDirtied int64    `json:"shared_blks_dirtied"`
+	SharedBlksWritten int64    `json:"shared_blks_written"`
+	WALBytes          *float64 `json:"wal_bytes"`
+}
+
+type upsertIndexResponse struct {
+	Name       string `json:"name"`
+	Definition string `json:"definition"`
+	Primary    bool   `json:"primary"`
+	Valid      bool   `json:"valid"`
+	Scans      int64  `json:"idx_scan"`
+	SizeBytes  int64  `json:"size_bytes"`
+}
+
+type ownedSequenceResponse struct {
+	Name             string   `json:"name"`
+	Status           string   `json:"status"`
+	Column           string   `json:"column"`
+	ColumnType       string   `json:"column_type"`
+	LastValue        *int64   `json:"last_value"`
+	MaxValue         int64    `json:"max_value"`
+	PctUsed          *float64 `json:"pct_used"`
+	ValuesPerLiveRow *float64 `json:"values_per_live_row"`
+}
+
+type upsertTableResponse struct {
+	Table          string                  `json:"table"`
+	Status         string                  `json:"status"`
+	Hints          []string                `json:"hints"`
+	Statements     int                     `json:"statements"`
+	Inserts        int64                   `json:"n_tup_ins"`
+	Updates        int64                   `json:"n_tup_upd"`
+	HotUpdates     int64                   `json:"n_tup_hot_upd"`
+	HotPct         *float64                `json:"hot_pct"`
+	NewPageUpdates *int64                  `json:"n_tup_newpage_upd"`
+	UpdateSharePct *float64                `json:"update_share_pct"`
+	Fillfactor     int                     `json:"fillfactor"`
+	FillfactorSet  bool                    `json:"fillfactor_set"`
+	LiveTuples     int64                   `json:"n_live_tup"`
+	DeadTuples     int64                   `json:"n_dead_tup"`
+	TotalSizeBytes int64                   `json:"total_size_bytes"`
+	IndexCount     int                     `json:"index_count"`
+	ArbiterIndexes []upsertIndexResponse   `json:"arbiter_indexes"`
+	Sequences      []ownedSequenceResponse `json:"sequences"`
+}
+
+type upsertAnalysisResponse struct {
+	Status                string                    `json:"status"`
+	SpeculativeTokenWaits int                       `json:"speculative_token_waits"`
+	ActiveUpsertSessions  int                       `json:"active_upsert_sessions"`
+	UpsertSessionsOnLocks int                       `json:"upsert_sessions_waiting_on_locks"`
+	Tables                []upsertTableResponse     `json:"tables"`
+	Statements            []upsertStatementResponse `json:"statements"`
+}
+
+func handleCheckUpsertAnalysis(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	analysis, err := util.FetchUpsertAnalysis(ctx, targetDB(ctx), strParam(req, "table", ""), intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	status := util.StatusOK
+	if analysis.SpeculativeTokenWaits > 0 || analysis.UpsertSessionsOnLocks > 0 {
+		status = util.StatusWarning
+	}
+	resp := upsertAnalysisResponse{
+		SpeculativeTokenWaits: analysis.SpeculativeTokenWaits,
+		ActiveUpsertSessions:  analysis.ActiveUpsertSessions,
+		UpsertSessionsOnLocks: analysis.UpsertSessionsOnLocks,
+		Tables:                make([]upsertTableResponse, 0, len(analysis.Tables)),
+		Statements:            make([]upsertStatementResponse, 0, len(analysis.Statements)),
+	}
+	for _, t := range analysis.Tables {
+		tableStatus := util.UpsertTableStatus(t)
+		status = max(status, tableStatus)
+		row := upsertTableResponse{
+			Table: t.Churn.SchemaName + "." + t.Churn.TableName, Status: tableStatus.String(),
+			Hints: util.UpsertTableHints(t), Statements: t.Statements,
+			Inserts: t.Churn.Inserts, Updates: t.Churn.Updates, HotUpdates: t.Churn.HotUpdates,
+			HotPct: t.Churn.HotPct, NewPageUpdates: t.Churn.NewPageUpdates, UpdateSharePct: t.UpdateSharePct,
+			Fillfactor: t.Churn.Fillfactor, FillfactorSet: t.Churn.FillfactorSet,
+			LiveTuples: t.Churn.LiveTuples, DeadTuples: t.Churn.DeadTuples, TotalSizeBytes: t.Churn.TotalSizeBytes,
+			IndexCount:     t.IndexCount,
+			ArbiterIndexes: make([]upsertIndexResponse, 0, len(t.ArbiterIndexes)),
+			Sequences:      make([]ownedSequenceResponse, 0, len(t.Sequences)),
+		}
+		for _, index := range t.ArbiterIndexes {
+			row.ArbiterIndexes = append(row.ArbiterIndexes, upsertIndexResponse(index))
+		}
+		for _, sequence := range t.Sequences {
+			row.Sequences = append(row.Sequences, ownedSequenceResponse{
+				Name: sequence.Name, Status: util.SequenceStatus(sequence).String(),
+				Column: sequence.Column, ColumnType: sequence.ColumnType, LastValue: sequence.LastValue,
+				MaxValue: sequence.MaxValue, PctUsed: sequence.PctUsed, ValuesPerLiveRow: sequence.ValuesPerLiveRow,
+			})
+		}
+		resp.Tables = append(resp.Tables, row)
+	}
+	for _, s := range analysis.Statements {
+		query, truncated := truncateQuery(s.Query)
+		resp.Statements = append(resp.Statements, upsertStatementResponse{
+			QueryID: s.QueryID, Query: query, QueryTruncated: truncated, Action: s.Action,
+			UpdateHasWhere: s.UpdateHasWhere, Hint: util.UpsertStatementHint(s),
+			TargetTable: s.TargetTable, ResolvedTable: s.ResolvedTable, Calls: s.Calls, Rows: s.Rows,
+			TotalTimeMS: s.TotalTimeMS, MeanTimeMS: s.MeanTimeMS,
+			SharedBlksHit: s.SharedBlksHit, SharedBlksRead: s.SharedBlksRead,
+			SharedBlksDirtied: s.SharedBlksDirtied, SharedBlksWritten: s.SharedBlksWritten, WALBytes: s.WALBytes,
+		})
+	}
+	resp.Status = status.String()
+	return respond(ctx, resp, analysis.Warnings...)
+}
