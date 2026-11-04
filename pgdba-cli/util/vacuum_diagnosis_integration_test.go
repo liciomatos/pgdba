@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,9 +78,17 @@ func TestFetchXminHorizon_FindsEveryKindOfHolder(t *testing.T) {
 		_, _ = testDB.Exec(`DROP TABLE IF EXISTS xmin_prepared_t`)
 	})
 
-	horizon, err := FetchXminHorizon(ctx, testDB)
-	if err != nil {
-		t.Fatal(err)
+	// An autovacuum worker that starts meanwhile (catalog churn from other tests) holds
+	// an older xmin and rightly defines the horizon; wait for it to finish.
+	var horizon XminHorizon
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		if horizon, err = FetchXminHorizon(ctx, testDB); err != nil {
+			t.Fatal(err)
+		}
+		holder := horizon.HorizonHolder()
+		if holder == nil || !strings.HasPrefix(holder.Query, "autovacuum:") || time.Now().After(deadline) {
+			break
+		}
 	}
 	sessionHolder := findHolder(horizon, XminSourceSession, strconv.Itoa(sessionPID))
 	if sessionHolder == nil {
