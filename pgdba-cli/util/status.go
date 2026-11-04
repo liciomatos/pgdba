@@ -2,6 +2,8 @@ package util
 
 import (
 	"fmt"
+	"math"
+	"net"
 	"strings"
 	"time"
 )
@@ -571,4 +573,115 @@ func SubtransactionStatus(b SubtransactionBackend) Status {
 		return StatusWarning
 	}
 	return StatusOK
+}
+
+// MissingFKIndexStatus: every unindexed foreign key is a warning; critical when the
+// referencing table is ≥ 1 GB and the referenced table gets updates or deletes (each
+// one scans that table).
+func MissingFKIndexStatus(m MissingFKIndex) Status {
+	if m.TableSizeBytes >= 1<<30 && m.ReferencedWrites > 0 {
+		return StatusCritical
+	}
+	return StatusWarning
+}
+
+// SeqScanTableStatus warns about large tables (heap ≥ 100 MB) read by ≥ 100 sequential
+// scans averaging ≥ 100,000 rows: likely queries missing an index.
+func SeqScanTableStatus(t SeqScanTable) Status {
+	if t.HeapBytes >= 100<<20 && t.SeqScan >= 100 && t.AvgRowsPerScan >= 100_000 {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// ColumnStatsHints suggests index and statistics changes from one column's statistics.
+func ColumnStatsHints(table TableColumnStats, column ColumnStats) []string {
+	hints := []string{}
+	switch {
+	case !column.Readable:
+		return append(hints, "statistics hidden: this role has no SELECT privilege on the column")
+	case !column.HasStats:
+		return append(hints, "no statistics: run ANALYZE "+table.Table)
+	}
+	bigTable := table.Reltuples >= 100_000
+	if column.EstimatedDistinct != nil && *column.EstimatedDistinct > 0 && *column.EstimatedDistinct <= 10 && bigTable && column.LeadsIndex {
+		hints = append(hints, fmt.Sprintf("only ~%.0f distinct values lead an index: a btree on it rarely beats a seq scan — prefer a partial index (WHERE %s = …) for the rare value, or put a more selective column first", *column.EstimatedDistinct, column.Name))
+	}
+	if column.Correlation != nil && math.Abs(*column.Correlation) >= 0.9 && bigTable {
+		hints = append(hints, fmt.Sprintf("physical order follows %s (correlation %.2f): range filters on it suit a small BRIN index", column.Name, *column.Correlation))
+	}
+	if column.NullFrac != nil && *column.NullFrac >= 0.8 && column.InIndex {
+		hints = append(hints, fmt.Sprintf("%.0f%% NULL and indexed: a partial index WHERE %s IS NOT NULL is much smaller", *column.NullFrac*100, column.Name))
+	}
+	return hints
+}
+
+// BloatEstimateStatus rates a statistics-based bloat estimate: critical from 50% and
+// 100 MB of bloat, warning from 30% and 10 MB. Not-applicable estimates are ok.
+func BloatEstimateStatus(b BloatEstimate) Status {
+	switch {
+	case b.NotApplicable:
+		return StatusOK
+	case b.BloatPct >= 50 && b.BloatBytes >= 100<<20:
+		return StatusCritical
+	case b.BloatPct >= 30 && b.BloatBytes >= 10<<20:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// DisabledTriggerStatus: a disabled internal (foreign key) trigger means the constraint
+// is not enforced — critical; any other disabled trigger is a warning.
+func DisabledTriggerStatus(t DisabledTrigger) Status {
+	if t.Internal {
+		return StatusCritical
+	}
+	return StatusWarning
+}
+
+// PartitionedTableStatus warns when the default partition holds ≥ 10% of a partitioned
+// table of at least 100 MB: partitions for that data are missing.
+func PartitionedTableStatus(t PartitionedTable) Status {
+	if t.DefaultPartitionBytes != nil && t.SizeBytes >= 100<<20 && float64(*t.DefaultPartitionBytes) >= 0.1*float64(t.SizeBytes) {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// HBARuleStatus rates a pg_hba.conf line: critical for a line with an error, trust
+// over the network, or cleartext password over a connection that may not be SSL;
+// warning for trust on the local socket or loopback, cleartext password over hostssl,
+// and md5 (deprecated in favor of scram-sha-256).
+func HBARuleStatus(rule HBARule) Status {
+	onThisMachine := rule.Type == "local" || isLoopbackAddress(rule.Address)
+	switch {
+	case rule.Error != "":
+		return StatusCritical
+	case rule.AuthMethod == "trust" && !onThisMachine:
+		return StatusCritical
+	case rule.AuthMethod == "password" && !onThisMachine && rule.Type != "hostssl":
+		return StatusCritical
+	case rule.AuthMethod == "trust", rule.AuthMethod == "password", rule.AuthMethod == "md5":
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// ConnectionEncryptionStatus warns about network connections without SSL.
+func ConnectionEncryptionStatus(c ConnectionEncryption) Status {
+	if !c.SSL && c.ClientAddr != "local" {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// isLoopbackAddress reports whether a pg_hba address ("127.0.0.1/255.255.255.255",
+// "::1/…", "localhost") only matches connections from this machine.
+func isLoopbackAddress(address string) bool {
+	host, _, _ := strings.Cut(address, "/")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

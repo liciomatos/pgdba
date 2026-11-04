@@ -73,6 +73,7 @@ func TestScreens_FitTerminalHeight(t *testing.T) {
 		"TableChurn":                func() tea.Model { return CheckTableChurn(dummyInitialModel) },
 		"RecoveryConflicts":         func() tea.Model { return CheckRecoveryConflicts(dummyInitialModel) },
 		"UpsertAnalysis":            func() tea.Model { return CheckUpsertAnalysis(dummyInitialModel) },
+		"Sequences":                 func() tea.Model { return CheckSequences(dummyInitialModel) },
 		"IOWAL":                     func() tea.Model { return CheckIOWAL(dummyInitialModel) },
 		"IndexUsageWithConstraints": func() tea.Model { return checkIndexUsage(dummyInitialModel, true) },
 	}

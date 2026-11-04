@@ -52,6 +52,7 @@ var screenModels = map[string]tea.Model{
 	"TableChurnModel":          TableChurnModel{},
 	"RecoveryConflictsModel":   RecoveryConflictsModel{},
 	"UpsertAnalysisModel":      UpsertAnalysisModel{},
+	"SequencesModel":           SequencesModel{},
 	"IOWALModel":               IOWALModel{},
 	"VersionModel":             VersionModel{},
 }

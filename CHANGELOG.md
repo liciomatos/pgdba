@@ -6,6 +6,29 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Sequences screen (`Q`) and `check_sequences` MCP tool**: every sequence with the
+  column that owns or defaults to it and the % of its range used, capped by the column
+  type (a bigint sequence feeding an integer column stops at 2^31); warning ≥ 75%,
+  critical ≥ 90%.
+- **Schema and planner MCP tools** for modeling recommendations:
+  - `check_missing_fk_indexes`: foreign keys without a leading index, with the
+    referencing table's size, how often the referenced table is updated/deleted and a
+    `CREATE INDEX [CONCURRENTLY]` suggestion;
+  - `check_seq_scan_tables`: tables by rows read through sequential scans, with rows per
+    scan and `last_seq_scan` (PG16+);
+  - `check_column_stats`: one table's `pg_stats` (null fraction, distinct values,
+    correlation, most common values) and extended statistics, with partial-index, BRIN
+    and ANALYZE hints;
+  - `check_bloat_estimate`: table and btree index bloat — measured with pgstattuple
+    (`pgstattuple_approx` for tables, `pgstatindex` for indexes) when the extension is
+    installed, for relations up to `max_measure_bytes`; otherwise a statistics-based
+    estimate that needs no extension (`method` says which);
+  - `check_schema_hygiene`: disabled triggers (foreign-key triggers are critical), NOT
+    VALID constraints, unlogged tables, partitioned tables with their default
+    partition, and custom storage parameters;
+  - `check_functions`: `pg_stat_user_functions` (warns while `track_functions` is none);
+  - `check_security`: SSL use per client, `pg_hba.conf` rules (trust, password, md5) and
+    `password_encryption`.
 - **`check_operation_progress` MCP tool**: running CREATE INDEX / REINDEX (with the
   transactions a CONCURRENTLY build waits for), ANALYZE, CLUSTER / VACUUM FULL, COPY
   (PG14+) and base backups, with phase and % done; a `waiting for …` phase is a warning.

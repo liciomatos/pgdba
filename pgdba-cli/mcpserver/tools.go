@@ -2830,3 +2830,408 @@ func handleCheckSLRU(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	resp.Status = status.String()
 	return respond(ctx, resp, report.Warnings...)
 }
+
+// --- sequences ---
+
+type sequenceResponse struct {
+	Name       string   `json:"name"`
+	Status     string   `json:"status"`
+	DataType   string   `json:"data_type"`
+	Table      string   `json:"table"`
+	Column     string   `json:"column"`
+	ColumnType string   `json:"column_type"`
+	Usage      string   `json:"usage"` // owned (serial/identity), default (DEFAULT nextval), or "" when unused
+	LastValue  *int64   `json:"last_value"`
+	MaxValue   int64    `json:"max_value"`
+	Increment  int64    `json:"increment"`
+	Cycle      bool     `json:"cycle"`
+	PctUsed    *float64 `json:"pct_used"`
+}
+
+func toSequenceResponse(sequence util.OwnedSequence) sequenceResponse {
+	return sequenceResponse{
+		Name: sequence.Name, Status: util.SequenceStatus(sequence).String(), DataType: sequence.DataType,
+		Table: sequence.Table, Column: sequence.Column, ColumnType: sequence.ColumnType, Usage: sequence.Usage,
+		LastValue: sequence.LastValue, MaxValue: sequence.MaxValue, Increment: sequence.Increment,
+		Cycle: sequence.Cycle, PctUsed: sequence.PctUsed,
+	}
+}
+
+func handleCheckSequences(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	sequences, err := util.FetchSequences(ctx, targetDB(ctx), intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]sequenceResponse, 0, len(sequences))
+	for _, sequence := range sequences {
+		resp = append(resp, toSequenceResponse(sequence))
+	}
+	return respond(ctx, resp)
+}
+
+// --- foreign keys without an index ---
+
+type missingFKIndexResponse struct {
+	Constraint       string   `json:"constraint"`
+	Status           string   `json:"status"`
+	Table            string   `json:"table"`
+	ReferencedTable  string   `json:"referenced_table"`
+	Columns          []string `json:"columns"`
+	TableSizeBytes   int64    `json:"table_size_bytes"`
+	TableSeqScans    int64    `json:"table_seq_scans"`
+	ReferencedWrites int64    `json:"referenced_updates_deletes"`
+	Suggestion       string   `json:"suggestion"`
+}
+
+func handleCheckMissingFKIndexes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	missing, err := util.FetchMissingFKIndexes(ctx, targetDB(ctx), intParam(req, "limit", 50))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]missingFKIndexResponse, 0, len(missing))
+	for _, m := range missing {
+		resp = append(resp, missingFKIndexResponse{
+			Constraint: m.Constraint, Status: util.MissingFKIndexStatus(m).String(), Table: m.Table,
+			ReferencedTable: m.ReferencedTable, Columns: m.Columns, TableSizeBytes: m.TableSizeBytes,
+			TableSeqScans: m.TableSeqScans, ReferencedWrites: m.ReferencedWrites, Suggestion: m.Suggestion(),
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- sequential scans ---
+
+type seqScanTableResponse struct {
+	SchemaName       string   `json:"schema_name"`
+	TableName        string   `json:"table_name"`
+	Status           string   `json:"status"`
+	SeqScan          int64    `json:"seq_scan"`
+	SeqTupRead       int64    `json:"seq_tup_read"`
+	AvgRowsPerScan   float64  `json:"avg_rows_per_seq_scan"`
+	IdxScan          int64    `json:"idx_scan"`
+	SeqScanPct       *float64 `json:"seq_scan_pct"`
+	LiveTuples       int64    `json:"n_live_tup"`
+	HeapBytes        int64    `json:"heap_bytes"`
+	LastSeqScan      *string  `json:"last_seq_scan"`
+	SecondsSinceScan *float64 `json:"seconds_since_last_seq_scan"`
+}
+
+func handleCheckSeqScanTables(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	tables, err := util.FetchSeqScanTables(ctx, targetDB(ctx), intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]seqScanTableResponse, 0, len(tables))
+	for _, t := range tables {
+		resp = append(resp, seqScanTableResponse{
+			SchemaName: t.SchemaName, TableName: t.TableName, Status: util.SeqScanTableStatus(t).String(),
+			SeqScan: t.SeqScan, SeqTupRead: t.SeqTupRead, AvgRowsPerScan: t.AvgRowsPerScan, IdxScan: t.IdxScan,
+			SeqScanPct: t.SeqScanPct, LiveTuples: t.LiveTuples, HeapBytes: t.HeapBytes,
+			LastSeqScan: optionalTime(t.LastSeqScan), SecondsSinceScan: t.SecondsSinceSeq,
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- column statistics ---
+
+type columnStatsResponse struct {
+	Name              string    `json:"name"`
+	DataType          string    `json:"data_type"`
+	HasStats          bool      `json:"has_stats"`
+	NullFrac          *float64  `json:"null_frac"`
+	NDistinct         *float64  `json:"n_distinct"`
+	EstimatedDistinct *float64  `json:"estimated_distinct"`
+	Correlation       *float64  `json:"correlation"`
+	AvgWidth          *int      `json:"avg_width_bytes"`
+	MostCommonValues  []string  `json:"most_common_vals"`
+	MostCommonFreqs   []float64 `json:"most_common_freqs"`
+	LeadsIndex        bool      `json:"leads_index"`
+	InIndex           bool      `json:"in_index"`
+	Hints             []string  `json:"hints"`
+}
+
+type extendedStatisticResponse struct {
+	Name    string   `json:"name"`
+	Kinds   []string `json:"kinds"`
+	Columns []string `json:"columns"`
+}
+
+type tableColumnStatsResponse struct {
+	Table           string                      `json:"table"`
+	Reltuples       float64                     `json:"reltuples"`
+	Relpages        int64                       `json:"relpages"`
+	LastAnalyze     *string                     `json:"last_analyze"`
+	LastAutoanalyze *string                     `json:"last_autoanalyze"`
+	ModSinceAnalyze int64                       `json:"mod_since_analyze"`
+	Columns         []columnStatsResponse       `json:"columns"`
+	Extended        []extendedStatisticResponse `json:"extended_statistics"`
+}
+
+func handleCheckColumnStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	table, err := req.RequireString("table")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	stats, err := util.FetchColumnStats(ctx, targetDB(ctx), table)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := tableColumnStatsResponse{
+		Table: stats.Table, Reltuples: stats.Reltuples, Relpages: stats.Relpages,
+		LastAnalyze: optionalTime(stats.LastAnalyze), LastAutoanalyze: optionalTime(stats.LastAutoanalyze),
+		ModSinceAnalyze: stats.ModSinceAnalyze,
+		Columns:         make([]columnStatsResponse, 0, len(stats.Columns)),
+		Extended:        make([]extendedStatisticResponse, 0, len(stats.Extended)),
+	}
+	var warnings []string
+	if stats.LastAnalyze == nil && stats.LastAutoanalyze == nil {
+		warnings = append(warnings, stats.Table+" has never been analyzed since the stats reset: the planner uses default estimates")
+	}
+	for _, column := range stats.Columns {
+		resp.Columns = append(resp.Columns, columnStatsResponse{
+			Name: column.Name, DataType: column.DataType, HasStats: column.HasStats, NullFrac: column.NullFrac,
+			NDistinct: column.NDistinct, EstimatedDistinct: column.EstimatedDistinct, Correlation: column.Correlation,
+			AvgWidth: column.AvgWidth, MostCommonValues: column.MostCommonValues, MostCommonFreqs: column.MostCommonFreqs,
+			LeadsIndex: column.LeadsIndex, InIndex: column.InIndex, Hints: util.ColumnStatsHints(stats, column),
+		})
+	}
+	for _, statistic := range stats.Extended {
+		resp.Extended = append(resp.Extended, extendedStatisticResponse(statistic))
+	}
+	return respond(ctx, resp, warnings...)
+}
+
+// --- bloat estimate ---
+
+type bloatEstimateResponse struct {
+	Kind                 string   `json:"kind"`
+	Status               string   `json:"status"`
+	SchemaName           string   `json:"schema_name"`
+	TableName            string   `json:"table_name"`
+	IndexName            string   `json:"index_name,omitempty"`
+	Method               string   `json:"method"` // pgstattuple_approx, pgstatindex or statistics
+	RealBytes            int64    `json:"real_bytes"`
+	BloatBytes           int64    `json:"bloat_bytes"`
+	BloatPct             float64  `json:"bloat_pct"`
+	Fillfactor           int      `json:"fillfactor"`
+	NotApplicable        bool     `json:"not_applicable"`
+	DeadTupleBytes       *int64   `json:"dead_tuple_bytes,omitempty"`
+	FreeBytes            *int64   `json:"free_bytes,omitempty"`
+	LeafDensityPct       *float64 `json:"avg_leaf_density_pct,omitempty"`
+	LeafFragmentationPct *float64 `json:"leaf_fragmentation_pct,omitempty"`
+}
+
+type bloatResult struct {
+	PgstattupleInstalled bool                    `json:"pgstattuple_installed"`
+	Relations            []bloatEstimateResponse `json:"relations"`
+}
+
+func handleCheckBloatEstimate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	minBytes := int64(req.GetFloat("min_bytes", float64(util.DefaultBloatMinBytes)))
+	maxMeasureBytes := int64(req.GetFloat("max_measure_bytes", float64(util.DefaultBloatMaxTableBytes)))
+	report, err := util.FetchBloatEstimates(ctx, targetDB(ctx), minBytes, maxMeasureBytes, intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := bloatResult{PgstattupleInstalled: report.PgstattupleInstalled, Relations: make([]bloatEstimateResponse, 0, len(report.Relations))}
+	for _, b := range report.Relations {
+		resp.Relations = append(resp.Relations, bloatEstimateResponse{
+			Kind: b.Kind, Status: util.BloatEstimateStatus(b).String(), SchemaName: b.SchemaName, TableName: b.TableName,
+			IndexName: b.IndexName, Method: b.Method, RealBytes: b.RealBytes, BloatBytes: b.BloatBytes, BloatPct: b.BloatPct,
+			Fillfactor: b.Fillfactor, NotApplicable: b.NotApplicable, DeadTupleBytes: b.DeadTupleBytes, FreeBytes: b.FreeBytes,
+			LeafDensityPct: b.LeafDensityPct, LeafFragmentationPct: b.LeafFragmentationPct,
+		})
+	}
+	return respond(ctx, resp, report.Warnings...)
+}
+
+// --- schema hygiene ---
+
+type disabledTriggerResponse struct {
+	Table    string `json:"table"`
+	Trigger  string `json:"trigger"`
+	Internal bool   `json:"internal"` // a foreign key's enforcement trigger
+	Status   string `json:"status"`
+}
+
+type unvalidatedConstraintResponse struct {
+	Table      string `json:"table"`
+	Constraint string `json:"constraint"`
+	Type       string `json:"type"`
+	Definition string `json:"definition"`
+	Status     string `json:"status"`
+}
+
+type unloggedTableResponse struct {
+	Table     string `json:"table"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type partitionedTableResponse struct {
+	Table                 string `json:"table"`
+	Status                string `json:"status"`
+	PartitionKey          string `json:"partition_key"`
+	Partitions            int    `json:"partitions"`
+	SizeBytes             int64  `json:"size_bytes"`
+	DefaultPartition      string `json:"default_partition"`
+	DefaultPartitionBytes *int64 `json:"default_partition_bytes"`
+}
+
+type storageParametersResponse struct {
+	Relation string   `json:"relation"`
+	Kind     string   `json:"kind"`
+	Options  []string `json:"options"`
+}
+
+type schemaHygieneResponse struct {
+	Status                 string                          `json:"status"`
+	DisabledTriggers       []disabledTriggerResponse       `json:"disabled_triggers"`
+	UnvalidatedConstraints []unvalidatedConstraintResponse `json:"not_valid_constraints"`
+	UnloggedTables         []unloggedTableResponse         `json:"unlogged_tables"`
+	PartitionedTables      []partitionedTableResponse      `json:"partitioned_tables"`
+	StorageParameters      []storageParametersResponse     `json:"storage_parameters"`
+}
+
+func handleCheckSchemaHygiene(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	hygiene, err := util.FetchSchemaHygiene(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	status := util.StatusOK
+	resp := schemaHygieneResponse{
+		DisabledTriggers:       make([]disabledTriggerResponse, 0, len(hygiene.DisabledTriggers)),
+		UnvalidatedConstraints: make([]unvalidatedConstraintResponse, 0, len(hygiene.UnvalidatedConstraints)),
+		UnloggedTables:         make([]unloggedTableResponse, 0, len(hygiene.UnloggedTables)),
+		PartitionedTables:      make([]partitionedTableResponse, 0, len(hygiene.PartitionedTables)),
+		StorageParameters:      make([]storageParametersResponse, 0, len(hygiene.StorageParameters)),
+	}
+	for _, trigger := range hygiene.DisabledTriggers {
+		triggerStatus := util.DisabledTriggerStatus(trigger)
+		status = max(status, triggerStatus)
+		resp.DisabledTriggers = append(resp.DisabledTriggers, disabledTriggerResponse{
+			Table: trigger.Table, Trigger: trigger.Trigger, Internal: trigger.Internal, Status: triggerStatus.String(),
+		})
+	}
+	for _, constraint := range hygiene.UnvalidatedConstraints {
+		status = max(status, util.StatusWarning)
+		resp.UnvalidatedConstraints = append(resp.UnvalidatedConstraints, unvalidatedConstraintResponse{
+			Table: constraint.Table, Constraint: constraint.Constraint, Type: constraint.Type,
+			Definition: constraint.Definition, Status: util.StatusWarning.String(),
+		})
+	}
+	for _, table := range hygiene.UnloggedTables {
+		resp.UnloggedTables = append(resp.UnloggedTables, unloggedTableResponse(table))
+	}
+	for _, table := range hygiene.PartitionedTables {
+		partitionStatus := util.PartitionedTableStatus(table)
+		status = max(status, partitionStatus)
+		resp.PartitionedTables = append(resp.PartitionedTables, partitionedTableResponse{
+			Table: table.Table, Status: partitionStatus.String(), PartitionKey: table.Strategy,
+			Partitions: table.Partitions, SizeBytes: table.SizeBytes, DefaultPartition: table.DefaultPartition,
+			DefaultPartitionBytes: table.DefaultPartitionBytes,
+		})
+	}
+	for _, parameters := range hygiene.StorageParameters {
+		resp.StorageParameters = append(resp.StorageParameters, storageParametersResponse(parameters))
+	}
+	resp.Status = status.String()
+	return respond(ctx, resp)
+}
+
+// --- function statistics ---
+
+type functionStatsResponse struct {
+	Function    string  `json:"function"`
+	Calls       int64   `json:"calls"`
+	TotalTimeMS float64 `json:"total_time_ms"`
+	SelfTimeMS  float64 `json:"self_time_ms"`
+	MeanTimeMS  float64 `json:"mean_time_ms"`
+}
+
+type functionStatsResult struct {
+	TrackFunctions string                  `json:"track_functions"`
+	Functions      []functionStatsResponse `json:"functions"`
+}
+
+func handleCheckFunctions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	report, err := util.FetchFunctionStats(ctx, targetDB(ctx), intParam(req, "limit", 20))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := functionStatsResult{TrackFunctions: report.TrackFunctions, Functions: make([]functionStatsResponse, 0, len(report.Functions))}
+	for _, function := range report.Functions {
+		resp.Functions = append(resp.Functions, functionStatsResponse(function))
+	}
+	var warnings []string
+	if report.TrackFunctions == "none" {
+		warnings = append(warnings, "track_functions is none: function calls are not counted (set it to pl, or all to include SQL and C functions)")
+	}
+	return respond(ctx, resp, warnings...)
+}
+
+// --- security ---
+
+type connectionEncryptionResponse struct {
+	Username   string `json:"username"`
+	ClientAddr string `json:"client_addr"`
+	SSL        bool   `json:"ssl"`
+	Version    string `json:"tls_version"`
+	Count      int    `json:"connections"`
+	Status     string `json:"status"`
+}
+
+type hbaRuleResponse struct {
+	LineNumber int      `json:"line_number"`
+	Status     string   `json:"status"`
+	Type       string   `json:"type"`
+	Databases  []string `json:"databases"`
+	Users      []string `json:"users"`
+	Address    string   `json:"address"`
+	AuthMethod string   `json:"auth_method"`
+	Error      string   `json:"error,omitempty"`
+}
+
+type securityResponse struct {
+	Status             string                         `json:"status"`
+	SSL                string                         `json:"ssl"`
+	PasswordEncryption string                         `json:"password_encryption"`
+	Connections        []connectionEncryptionResponse `json:"connections"`
+	HBARules           []hbaRuleResponse              `json:"hba_rules"` // null when not readable
+}
+
+func handleCheckSecurity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	report, err := util.FetchSecurity(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	status := util.StatusOK
+	if report.PasswordEncryption != "scram-sha-256" {
+		status = util.StatusWarning
+	}
+	resp := securityResponse{
+		SSL: report.SSL, PasswordEncryption: report.PasswordEncryption,
+		Connections: make([]connectionEncryptionResponse, 0, len(report.Connections)),
+	}
+	for _, connection := range report.Connections {
+		connectionStatus := util.ConnectionEncryptionStatus(connection)
+		status = max(status, connectionStatus)
+		resp.Connections = append(resp.Connections, connectionEncryptionResponse{
+			Username: connection.Username, ClientAddr: connection.ClientAddr, SSL: connection.SSL,
+			Version: connection.Version, Count: connection.Count, Status: connectionStatus.String(),
+		})
+	}
+	if report.HBARules != nil {
+		resp.HBARules = make([]hbaRuleResponse, 0, len(report.HBARules))
+		for _, rule := range report.HBARules {
+			ruleStatus := util.HBARuleStatus(rule)
+			status = max(status, ruleStatus)
+			resp.HBARules = append(resp.HBARules, hbaRuleResponse{
+				LineNumber: rule.LineNumber, Status: ruleStatus.String(), Type: rule.Type, Databases: rule.Databases,
+				Users: rule.Users, Address: rule.Address, AuthMethod: rule.AuthMethod, Error: rule.Error,
+			})
+		}
+	}
+	resp.Status = status.String()
+	return respond(ctx, resp, report.Warnings...)
+}
