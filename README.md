@@ -168,6 +168,8 @@ parameters:
 | `check_index_usage` | `include_constraints` | `false` | also list indexes backing PK / UNIQUE / EXCLUDE constraints |
 | `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
 | `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
+| `check_query_load` | `order_by` / `delta_seconds` | `total_time` / `0` | rank by I/O, writes, WAL, temp, plan or JIT time; measure over a window instead of since the reset |
+| `check_autovacuum` | `order_by` | `dead_tuples` | `analyze` ranks tables by stale statistics |
 | `check_upsert_analysis` | `table` | — | also analyze this table, even without `pg_stat_statements` |
 | `check_recovery_conflicts` | `target` | `primary` | point it at a replica: recovery conflicts only happen on standbys |
 

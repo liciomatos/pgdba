@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -525,4 +526,49 @@ func UpsertStatementHint(s UpsertStatement) string {
 		return "DO UPDATE has no WHERE: unchanged rows are rewritten anyway — add WHERE (t.col1, t.col2) IS DISTINCT FROM (EXCLUDED.col1, EXCLUDED.col2)"
 	}
 	return ""
+}
+
+// LockTableStatus rates how full the shared lock table is (non-fast-path locks over
+// max_locks_per_transaction × (max_connections + max_prepared_transactions)): warning
+// from 50%, critical from 80% — when it fills up, lock requests fail with "out of
+// shared memory".
+func LockTableStatus(summary LockSummary) Status {
+	switch {
+	case summary.UsagePct >= 80:
+		return StatusCritical
+	case summary.UsagePct >= 50:
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// OperationProgressStatus warns while an operation sits in a "waiting for …" phase:
+// CREATE INDEX / REINDEX CONCURRENTLY waiting for older transactions (or lockers) to
+// finish makes no progress until they do.
+func OperationProgressStatus(p OperationProgress) Status {
+	if strings.HasPrefix(p.Phase, "waiting") {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// SLRUStatus warns when an SLRU cache read ≥ 1,000 pages from disk with a hit ratio
+// below 90%: its buffers are too small for the workload (PG17+: the *_buffers
+// settings), typically Subtrans with many subtransactions or MultiXact with many
+// row locks / foreign keys.
+func SLRUStatus(c SLRUStats) Status {
+	if c.BlksRead >= 1000 && c.HitPct != nil && *c.HitPct < 90 {
+		return StatusWarning
+	}
+	return StatusOK
+}
+
+// SubtransactionStatus warns for a session whose subtransaction cache overflowed
+// (more than 64 open subtransactions, e.g. SAVEPOINTs or PL/pgSQL EXCEPTION blocks in a
+// loop): every snapshot then has to consult pg_subtrans.
+func SubtransactionStatus(b SubtransactionBackend) Status {
+	if b.Overflowed {
+		return StatusWarning
+	}
+	return StatusOK
 }
