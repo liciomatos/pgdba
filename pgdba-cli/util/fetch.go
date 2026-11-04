@@ -4867,14 +4867,22 @@ type UpsertIndex struct {
 	SizeBytes  int64
 }
 
-// OwnedSequence is a sequence owned by a table column (serial or identity).
+// OwnedSequence is a sequence with the column that uses it: the column that owns it
+// (serial or identity) or, failing that, one whose DEFAULT calls nextval() on it.
 type OwnedSequence struct {
-	Name       string
+	Name     string
+	DataType string // the sequence's own type (smallint, integer, bigint)
+	// RelID / Table / Column / ColumnType describe the column; zero values for a
+	// sequence no column uses.
+	RelID      int64
+	Table      string
 	Column     string
 	ColumnType string
+	Usage      string // "owned", "default", or "" when no column uses it
 	LastValue  *int64 // nil when never called or not readable by this role
 	StartValue int64
 	Increment  int64
+	Cycle      bool
 	// MaxValue is the smaller of the sequence's max_value and the column type's limit:
 	// a bigint sequence feeding an integer column fails at 2^31.
 	MaxValue int64
@@ -5140,40 +5148,104 @@ func fetchUpsertIndexes(ctx context.Context, db *sql.DB, oids []int64) (map[int6
 	return arbiters, counts, rows.Err()
 }
 
-// fetchOwnedSequences returns the sequences owned by columns of the given tables
-// (serial and identity columns), keyed by table oid.
+// fetchOwnedSequences returns the sequences used by columns of the given tables,
+// keyed by table oid.
 func fetchOwnedSequences(ctx context.Context, db *sql.DB, oids []int64) (map[int64][]OwnedSequence, error) {
+	sequences, err := querySequences(ctx, db, `WHERE col.relid = ANY($1::oid[])`, pq.Array(oids))
+	if err != nil {
+		return nil, err
+	}
+	results := map[int64][]OwnedSequence{}
+	for _, sequence := range sequences {
+		results[sequence.RelID] = append(results[sequence.RelID], sequence)
+	}
+	return results, nil
+}
+
+// FetchSequences returns every sequence readable from this database, most used first.
+func FetchSequences(ctx context.Context, db *sql.DB, limit int) ([]OwnedSequence, error) {
+	sequences, err := querySequences(ctx, db, "")
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(sequences, func(i, j int) bool {
+		left, right := sequences[i].PctUsed, sequences[j].PctUsed
+		if left == nil || right == nil {
+			return right == nil && left != nil
+		}
+		return *left > *right
+	})
+	if limit > 0 && len(sequences) > limit {
+		sequences = sequences[:limit]
+	}
+	return sequences, nil
+}
+
+// querySequences reads pg_sequences with the column that uses each sequence; filter is
+// a WHERE clause on the col alias (relid) with its args.
+func querySequences(ctx context.Context, db *sql.DB, filter string, args ...any) ([]OwnedSequence, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT d.refobjid::bigint, sn.nspname || '.' || seq.relname, a.attname, format_type(a.atttypid, a.atttypmod),
-		       s.last_value, s.start_value, s.increment_by, s.max_value
-		FROM pg_depend d
-		JOIN pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
-		JOIN pg_namespace sn ON sn.oid = seq.relnamespace
-		JOIN pg_sequences s ON s.schemaname = sn.nspname AND s.sequencename = seq.relname
-		JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
-		WHERE d.classid = 'pg_class'::regclass
-		  AND d.refclassid = 'pg_class'::regclass
-		  AND d.deptype IN ('a', 'i')
-		  AND d.refobjid = ANY($1::oid[])
-		ORDER BY 2`, pq.Array(oids))
+		SELECT s.schemaname || '.' || s.sequencename, s.data_type::text,
+		       COALESCE(col.relid, 0), COALESCE(col.table_name, ''), COALESCE(col.attname, ''),
+		       COALESCE(col.column_type, ''), COALESCE(col.usage, ''),
+		       s.last_value, s.start_value, s.increment_by, s.min_value, s.max_value, s.cycle
+		FROM pg_sequences s
+		JOIN pg_namespace sn ON sn.nspname = s.schemaname
+		JOIN pg_class seq ON seq.relnamespace = sn.oid AND seq.relname = s.sequencename
+		LEFT JOIN LATERAL (
+			-- The owning column (serial / identity) wins over a column that merely has
+			-- DEFAULT nextval() on the sequence.
+			SELECT users.relid::bigint AS relid, tn.nspname || '.' || t.relname AS table_name, a.attname,
+			       format_type(a.atttypid, a.atttypmod) AS column_type, users.usage
+			FROM (
+				SELECT d.refobjid AS relid, d.refobjsubid AS attnum, 'owned' AS usage, 1 AS rank
+				FROM pg_depend d
+				WHERE d.classid = 'pg_class'::regclass AND d.objid = seq.oid
+				  AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') AND d.refobjsubid > 0
+				UNION ALL
+				SELECT ad.adrelid, ad.adnum, 'default', 2
+				FROM pg_depend d
+				JOIN pg_attrdef ad ON ad.oid = d.objid
+				WHERE d.classid = 'pg_attrdef'::regclass AND d.refclassid = 'pg_class'::regclass AND d.refobjid = seq.oid
+			) users
+			JOIN pg_class t ON t.oid = users.relid
+			JOIN pg_namespace tn ON tn.oid = t.relnamespace
+			JOIN pg_attribute a ON a.attrelid = users.relid AND a.attnum = users.attnum
+			ORDER BY users.rank
+			LIMIT 1
+		) col ON true
+		`+filter+`
+		ORDER BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	results := map[int64][]OwnedSequence{}
+	results := []OwnedSequence{}
 	for rows.Next() {
-		var relID int64
 		var sequence OwnedSequence
-		if err := rows.Scan(&relID, &sequence.Name, &sequence.Column, &sequence.ColumnType,
-			&sequence.LastValue, &sequence.StartValue, &sequence.Increment, &sequence.MaxValue); err != nil {
+		var minValue int64
+		if err := rows.Scan(&sequence.Name, &sequence.DataType, &sequence.RelID, &sequence.Table, &sequence.Column,
+			&sequence.ColumnType, &sequence.Usage, &sequence.LastValue, &sequence.StartValue, &sequence.Increment,
+			&minValue, &sequence.MaxValue, &sequence.Cycle); err != nil {
 			return nil, err
 		}
-		sequence.MaxValue = min(sequence.MaxValue, columnTypeMax(sequence.ColumnType))
-		if sequence.LastValue != nil && sequence.Increment > 0 && sequence.MaxValue > sequence.StartValue {
-			pct := float64(*sequence.LastValue-sequence.StartValue) / float64(sequence.MaxValue-sequence.StartValue) * 100
-			sequence.PctUsed = &pct
+		if sequence.ColumnType != "" {
+			sequence.MaxValue = min(sequence.MaxValue, columnTypeMax(sequence.ColumnType))
+			minValue = max(minValue, -columnTypeMax(sequence.ColumnType)-1)
 		}
-		results[relID] = append(results[relID], sequence)
+		if sequence.LastValue != nil {
+			var used, available float64
+			if sequence.Increment > 0 {
+				used, available = float64(*sequence.LastValue-sequence.StartValue), float64(sequence.MaxValue-sequence.StartValue)
+			} else {
+				used, available = float64(sequence.StartValue-*sequence.LastValue), float64(sequence.StartValue-minValue)
+			}
+			if available > 0 {
+				pct := used / available * 100
+				sequence.PctUsed = &pct
+			}
+		}
+		results = append(results, sequence)
 	}
 	return results, rows.Err()
 }
@@ -5671,4 +5743,735 @@ func FetchSLRU(ctx context.Context, db *sql.DB) (SLRUReport, error) {
 		report.SubtransactionBackends = append(report.SubtransactionBackends, b)
 	}
 	return report, subRows.Err()
+}
+
+// MissingFKIndex is a foreign key whose referencing columns are not the leading
+// columns of any valid, non-partial index: every DELETE or key UPDATE on the referenced
+// table scans the referencing table, holding locks while it does.
+type MissingFKIndex struct {
+	Constraint      string
+	Table           string // referencing table, schema-qualified
+	ReferencedTable string
+	Columns         []string
+	Partitioned     bool  // the referencing table is partitioned (CREATE INDEX CONCURRENTLY is not possible on it)
+	TableSizeBytes  int64 // referencing table, every partition included
+	TableSeqScans   int64
+	// ReferencedWrites is n_tup_upd + n_tup_del on the referenced table: how often the
+	// missing index has to be made up for by a scan.
+	ReferencedWrites int64
+}
+
+// Suggestion is the CREATE INDEX statement that covers the foreign key.
+func (m MissingFKIndex) Suggestion() string {
+	concurrently := " CONCURRENTLY"
+	if m.Partitioned {
+		concurrently = ""
+	}
+	return fmt.Sprintf("CREATE INDEX%s ON %s (%s);", concurrently, m.Table, strings.Join(m.Columns, ", "))
+}
+
+// FetchMissingFKIndexes lists foreign keys without a supporting index, largest
+// referencing table first. Constraints cloned onto partitions are skipped: the parent's
+// constraint stands for them.
+func FetchMissingFKIndexes(ctx context.Context, db *sql.DB, limit int) ([]MissingFKIndex, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.conname,
+		       quote_ident(tn.nspname) || '.' || quote_ident(t.relname),
+		       quote_ident(pn.nspname) || '.' || quote_ident(p.relname),
+		       ARRAY(SELECT quote_ident(a.attname)
+		             FROM unnest(c.conkey) WITH ORDINALITY AS key(attnum, position)
+		             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+		             ORDER BY key.position),
+		       t.relkind = 'p',
+		       CASE WHEN t.relkind = 'p'
+		            THEN (SELECT COALESCE(sum(pg_total_relation_size(tree.relid)), 0)::bigint FROM pg_partition_tree(t.oid) tree)
+		            ELSE pg_total_relation_size(t.oid) END,
+		       COALESCE(ts.seq_scan, 0),
+		       COALESCE(ps.n_tup_upd + ps.n_tup_del, 0)
+		FROM pg_constraint c
+		JOIN pg_class t ON t.oid = c.conrelid
+		JOIN pg_namespace tn ON tn.oid = t.relnamespace
+		JOIN pg_class p ON p.oid = c.confrelid
+		JOIN pg_namespace pn ON pn.oid = p.relnamespace
+		LEFT JOIN pg_stat_all_tables ts ON ts.relid = c.conrelid
+		LEFT JOIN pg_stat_all_tables ps ON ps.relid = c.confrelid
+		WHERE c.contype = 'f'
+		  AND c.conparentid = 0
+		  AND tn.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND NOT EXISTS (
+			-- an index whose first n columns are exactly the n FK columns, in any order
+			SELECT 1 FROM pg_index i
+			WHERE i.indrelid = c.conrelid
+			  AND i.indisvalid
+			  AND i.indpred IS NULL
+			  AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] @> c.conkey
+			  AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] <@ c.conkey
+		  )
+		ORDER BY 6 DESC, 2, 1
+		LIMIT NULLIF($1::int, 0)`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []MissingFKIndex{}
+	for rows.Next() {
+		var m MissingFKIndex
+		var columns pq.StringArray
+		if err := rows.Scan(&m.Constraint, &m.Table, &m.ReferencedTable, &columns, &m.Partitioned,
+			&m.TableSizeBytes, &m.TableSeqScans, &m.ReferencedWrites); err != nil {
+			return nil, err
+		}
+		m.Columns = columns
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
+// SeqScanTable is a table's sequential-scan profile since the stats reset.
+type SeqScanTable struct {
+	SchemaName      string
+	TableName       string
+	SeqScan         int64
+	SeqTupRead      int64
+	AvgRowsPerScan  float64
+	IdxScan         int64
+	SeqScanPct      *float64 // seq_scan ÷ (seq_scan + idx_scan); nil without scans
+	LiveTuples      int64
+	HeapBytes       int64
+	LastSeqScan     *time.Time // PG16+; nil before
+	SecondsSinceSeq *float64   // PG16+
+}
+
+// FetchSeqScanTables ranks user tables by rows read through sequential scans.
+func FetchSeqScanTables(ctx context.Context, db *sql.DB, limit int) ([]SeqScanTable, error) {
+	// last_seq_scan was added to pg_stat_user_tables in PG16.
+	lastSeqScanColumns := "NULL::timestamptz, NULL::float8"
+	if pgMajorVersion() >= 16 {
+		lastSeqScanColumns = "s.last_seq_scan, EXTRACT(EPOCH FROM now() - s.last_seq_scan)::float8"
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT s.schemaname, s.relname, s.seq_scan, s.seq_tup_read, COALESCE(s.idx_scan, 0), s.n_live_tup,
+		       pg_relation_size(s.relid), `+lastSeqScanColumns+`
+		FROM pg_stat_user_tables s
+		WHERE s.seq_scan > 0
+		ORDER BY s.seq_tup_read DESC, s.schemaname, s.relname
+		LIMIT NULLIF($1::int, 0)`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []SeqScanTable{}
+	for rows.Next() {
+		var t SeqScanTable
+		if err := rows.Scan(&t.SchemaName, &t.TableName, &t.SeqScan, &t.SeqTupRead, &t.IdxScan, &t.LiveTuples,
+			&t.HeapBytes, &t.LastSeqScan, &t.SecondsSinceSeq); err != nil {
+			return nil, err
+		}
+		t.AvgRowsPerScan = float64(t.SeqTupRead) / float64(t.SeqScan)
+		pct := float64(t.SeqScan) / float64(t.SeqScan+t.IdxScan) * 100
+		t.SeqScanPct = &pct
+		results = append(results, t)
+	}
+	return results, rows.Err()
+}
+
+// ColumnStats is one column's planner statistics from pg_stats.
+type ColumnStats struct {
+	Name     string
+	DataType string
+	// HasStats is false when ANALYZE has not run on the column (or this role may not
+	// read it: Readable).
+	HasStats bool
+	Readable bool
+	NullFrac *float64
+	// NDistinct as pg_stats stores it: > 0 is a count, < 0 a fraction of the rows
+	// (-1 = unique). EstimatedDistinct turns it into a count with reltuples.
+	NDistinct         *float64
+	EstimatedDistinct *float64
+	Correlation       *float64 // physical vs logical order, −1…1; nil for unsortable types
+	AvgWidth          *int
+	MostCommonValues  []string  // top values, each cut to 60 characters
+	MostCommonFreqs   []float64 // their frequencies
+	LeadsIndex        bool      // first column of at least one index
+	InIndex           bool
+}
+
+// ExtendedStatistic is a CREATE STATISTICS object on the table.
+type ExtendedStatistic struct {
+	Name    string
+	Kinds   []string // ndistinct, dependencies, mcv, expressions
+	Columns []string
+}
+
+// TableColumnStats is the planner's view of one table.
+type TableColumnStats struct {
+	Table           string
+	Reltuples       float64 // -1 (PG14+) when never analyzed or vacuumed
+	Relpages        int64
+	LastAnalyze     *time.Time
+	LastAutoanalyze *time.Time
+	ModSinceAnalyze int64
+	Columns         []ColumnStats
+	Extended        []ExtendedStatistic
+}
+
+// mostCommonLimit and mostCommonValueChars cap the MCV lists so one wide column can't
+// flood the response.
+const (
+	mostCommonLimit      = 5
+	mostCommonValueChars = 60
+)
+
+// FetchColumnStats reads pg_stats and pg_statistic_ext for one table ("schema.table" or
+// a search_path name).
+func FetchColumnStats(ctx context.Context, db *sql.DB, table string) (TableColumnStats, error) {
+	var result TableColumnStats
+	var relID sql.NullInt64
+	err := db.QueryRowContext(ctx, `
+		SELECT c.oid::bigint, quote_ident(n.nspname) || '.' || quote_ident(c.relname), c.reltuples::float8, c.relpages::bigint,
+		       s.last_analyze, s.last_autoanalyze, COALESCE(s.n_mod_since_analyze, 0)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+		WHERE c.oid = to_regclass($1) AND c.relkind IN ('r', 'p', 'm')`, table,
+	).Scan(&relID, &result.Table, &result.Reltuples, &result.Relpages, &result.LastAnalyze,
+		&result.LastAutoanalyze, &result.ModSinceAnalyze)
+	if err == sql.ErrNoRows || (err == nil && !relID.Valid) {
+		return result, fmt.Errorf("table %q not found", table)
+	}
+	if err != nil {
+		return result, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT a.attname, format_type(a.atttypid, a.atttypmod),
+		       s.attname IS NOT NULL, has_column_privilege(c.oid, a.attnum, 'SELECT'),
+		       s.null_frac::float8, s.n_distinct::float8, s.correlation::float8, s.avg_width,
+		       s.most_common_vals::text, s.most_common_freqs::float8[],
+		       EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indkey[0] = a.attnum),
+		       EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND a.attnum = ANY(i.indkey::int2[]))
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		LEFT JOIN pg_stats s ON s.schemaname = n.nspname AND s.tablename = c.relname AND s.attname = a.attname
+		                     AND s.inherited = (c.relkind = 'p')
+		WHERE c.oid = $1
+		ORDER BY a.attnum`, relID.Int64)
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	result.Columns = []ColumnStats{}
+	for rows.Next() {
+		var column ColumnStats
+		var mostCommon sql.NullString
+		var frequencies pq.Float64Array
+		if err := rows.Scan(&column.Name, &column.DataType, &column.HasStats, &column.Readable,
+			&column.NullFrac, &column.NDistinct, &column.Correlation, &column.AvgWidth,
+			&mostCommon, &frequencies, &column.LeadsIndex, &column.InIndex); err != nil {
+			return result, err
+		}
+		if column.NDistinct != nil {
+			estimated := *column.NDistinct
+			if estimated < 0 {
+				estimated = -estimated * max(result.Reltuples, 0)
+			}
+			column.EstimatedDistinct = &estimated
+		}
+		if mostCommon.Valid {
+			var values pq.StringArray
+			if err := values.Scan(mostCommon.String); err == nil {
+				for i := 0; i < len(values) && i < mostCommonLimit; i++ {
+					value := []rune(values[i])
+					if len(value) > mostCommonValueChars {
+						value = append(value[:mostCommonValueChars], '…')
+					}
+					column.MostCommonValues = append(column.MostCommonValues, string(value))
+				}
+			}
+			column.MostCommonFreqs = frequencies[:min(len(frequencies), mostCommonLimit)]
+		}
+		result.Columns = append(result.Columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return result, err
+	}
+
+	extendedRows, err := db.QueryContext(ctx, `
+		SELECT x.stxname,
+		       ARRAY(SELECT CASE kind WHEN 'd' THEN 'ndistinct' WHEN 'f' THEN 'dependencies'
+		                              WHEN 'm' THEN 'mcv' WHEN 'e' THEN 'expressions' ELSE kind::text END
+		             FROM unnest(x.stxkind) kind),
+		       ARRAY(SELECT a.attname FROM unnest(x.stxkeys::int2[]) key(attnum)
+		             JOIN pg_attribute a ON a.attrelid = x.stxrelid AND a.attnum = key.attnum)
+		FROM pg_statistic_ext x
+		WHERE x.stxrelid = $1
+		ORDER BY 1`, relID.Int64)
+	if err != nil {
+		return result, err
+	}
+	defer extendedRows.Close()
+	result.Extended = []ExtendedStatistic{}
+	for extendedRows.Next() {
+		var statistic ExtendedStatistic
+		var kinds, columns pq.StringArray
+		if err := extendedRows.Scan(&statistic.Name, &kinds, &columns); err != nil {
+			return result, err
+		}
+		statistic.Kinds, statistic.Columns = kinds, columns
+		result.Extended = append(result.Extended, statistic)
+	}
+	return result, extendedRows.Err()
+}
+
+// BloatEstimate is a statistics-based estimate of wasted space in a table or a btree
+// index (the ioguix queries): it compares the actual pages with the pages the rows
+// should need given their average width from pg_stats. It needs fresh statistics and
+// no extension; check_table_churn's include_bloat measures tables exactly with pgstattuple.
+type BloatEstimate struct {
+	Kind       string // "table" or "index"
+	SchemaName string
+	TableName  string
+	IndexName  string
+	RealBytes  int64
+	// BloatBytes / BloatPct are the space beyond what the rows need at the relation's
+	// fillfactor.
+	BloatBytes int64
+	BloatPct   float64
+	Fillfactor int
+	// NotApplicable marks estimates the method can't make (columns without statistics,
+	// or of type name): the numbers are unreliable.
+	NotApplicable bool
+}
+
+// bloatSchemaFilter keeps system and TOAST schemas out of bloat estimates; %s is the
+// schema column.
+const bloatSchemaFilter = `NOT IN ('pg_catalog', 'information_schema') AND %s !~ '^pg_toast'`
+
+// DefaultBloatMinBytes skips relations smaller than 1 MiB in bloat estimates: small
+// relations are cheap whatever their bloat, and the estimate is noisy for them.
+const DefaultBloatMinBytes = 1 << 20
+
+// FetchBloatEstimates estimates table and btree index bloat for relations of at least
+// minBytes, largest bloat first.
+func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit int) ([]BloatEstimate, error) {
+	tableQuery := `
+		SELECT 'table', schemaname, tblname, '', (bs * tblpages)::bigint,
+		       CASE WHEN tblpages - est_tblpages_ff > 0 THEN ((tblpages - est_tblpages_ff) * bs)::bigint ELSE 0 END,
+		       CASE WHEN tblpages > 0 AND tblpages - est_tblpages_ff > 0
+		            THEN (100 * (tblpages - est_tblpages_ff) / tblpages)::float8 ELSE 0 END,
+		       fillfactor::int, is_na
+		FROM (
+			SELECT ceil(reltuples / ((bs - page_hdr) * fillfactor / (tpl_size * 100))) + ceil(toasttuples / 4) AS est_tblpages_ff,
+			       tblpages, fillfactor, bs, schemaname, tblname, is_na
+			FROM (
+				SELECT (4 + tpl_hdr_size + tpl_data_size + (2 * ma)
+				        - CASE WHEN tpl_hdr_size % ma = 0 THEN ma ELSE tpl_hdr_size % ma END
+				        - CASE WHEN ceil(tpl_data_size)::int % ma = 0 THEN ma ELSE ceil(tpl_data_size)::int % ma END
+				       ) AS tpl_size,
+				       heappages + toastpages AS tblpages, reltuples, toasttuples, bs, page_hdr, schemaname, tblname,
+				       fillfactor, is_na
+				FROM (
+					SELECT ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,
+					       tbl.relpages AS heappages, COALESCE(toast.relpages, 0) AS toastpages,
+					       COALESCE(toast.reltuples, 0) AS toasttuples,
+					       COALESCE(substring(array_to_string(tbl.reloptions, ' ') FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,
+					       current_setting('block_size')::numeric AS bs,
+					       CASE WHEN version() ~ 'mingw32|64-bit|x86_64|ppc64|ia64|amd64|aarch64|arm64' THEN 8 ELSE 4 END AS ma,
+					       24 AS page_hdr,
+					       23 + CASE WHEN max(COALESCE(s.null_frac, 0)) > 0 THEN (7 + count(s.attname)) / 8 ELSE 0::int END AS tpl_hdr_size,
+					       sum((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 0)) AS tpl_data_size,
+					       bool_or(att.atttypid = 'pg_catalog.name'::regtype)
+					         OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na
+					FROM pg_attribute att
+					JOIN pg_class tbl ON att.attrelid = tbl.oid
+					JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+					LEFT JOIN pg_stats s ON s.schemaname = ns.nspname AND s.tablename = tbl.relname
+					                     AND s.inherited = false AND s.attname = att.attname
+					LEFT JOIN pg_class toast ON tbl.reltoastrelid = toast.oid
+					WHERE NOT att.attisdropped AND att.attnum > 0
+					  AND tbl.relkind IN ('r', 'm')
+					  AND tbl.reltuples >= 0
+					  AND ns.nspname ` + fmt.Sprintf(bloatSchemaFilter, "ns.nspname") + `
+					GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+				) table_stats
+			) table_sizes
+		) table_estimates`
+	indexQuery := `
+		SELECT 'index', nspname, tblname, idxname, (bs * relpages)::bigint,
+		       CASE WHEN relpages > est_pages_ff THEN (bs * (relpages - est_pages_ff))::bigint ELSE 0 END,
+		       CASE WHEN relpages > est_pages_ff THEN (100 * (relpages - est_pages_ff) / relpages)::float8 ELSE 0 END,
+		       fillfactor::int, is_na OR est_pages_ff IS NULL
+		FROM (
+			-- NULLIF: entries wider than a page would divide by zero; the estimate is then
+			-- NULL and the row marked not applicable.
+			SELECT 1 + ceil(reltuples / NULLIF(floor((bs - pageopqdata - pagehdr) * fillfactor / (100 * (4 + nulldatahdrwidth)::float)), 0)) AS est_pages_ff,
+			       bs, nspname, tblname, idxname, relpages, fillfactor, is_na
+			FROM (
+				SELECT maxalign, bs, nspname, tblname, idxname, reltuples, relpages, fillfactor,
+				       (index_tuple_hdr_bm + maxalign
+				        - CASE WHEN index_tuple_hdr_bm % maxalign = 0 THEN maxalign ELSE index_tuple_hdr_bm % maxalign END
+				        + nulldatawidth + maxalign
+				        - CASE WHEN nulldatawidth = 0 THEN 0
+				               WHEN nulldatawidth::int % maxalign = 0 THEN maxalign
+				               ELSE nulldatawidth::int % maxalign END
+				       )::numeric AS nulldatahdrwidth,
+				       pagehdr, pageopqdata, is_na
+				FROM (
+					SELECT n.nspname, i.tblname, i.idxname, i.reltuples, i.relpages, i.fillfactor,
+					       current_setting('block_size')::numeric AS bs,
+					       CASE WHEN version() ~ 'mingw32|64-bit|x86_64|ppc64|ia64|amd64|aarch64|arm64' THEN 8 ELSE 4 END AS maxalign,
+					       24 AS pagehdr, 16 AS pageopqdata,
+					       CASE WHEN max(COALESCE(s.null_frac, 0)) = 0 THEN 8 ELSE 8 + ((32 + 8 - 1) / 8) END AS index_tuple_hdr_bm,
+					       sum((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 1024)) AS nulldatawidth,
+					       max(CASE WHEN i.atttypid = 'pg_catalog.name'::regtype THEN 1 ELSE 0 END) > 0 AS is_na
+					FROM (
+						SELECT ct.relname AS tblname, ct.relnamespace, ic.idxname, ic.reltuples, ic.relpages, ic.fillfactor,
+						       COALESCE(a1.attname, a2.attname) AS attname, COALESCE(a1.atttypid, a2.atttypid) AS atttypid,
+						       CASE WHEN a1.attnum IS NULL THEN ic.idxname ELSE ct.relname END AS attrelname
+						FROM (
+							SELECT idxname, reltuples, relpages, tbloid, idxoid, fillfactor, indkey,
+							       generate_series(1, indnatts) AS attpos
+							FROM (
+								SELECT ci.relname AS idxname, ci.reltuples, ci.relpages, i.indrelid AS tbloid,
+								       i.indexrelid AS idxoid,
+								       COALESCE(substring(array_to_string(ci.reloptions, ' ') FROM 'fillfactor=([0-9]+)')::smallint, 90) AS fillfactor,
+								       i.indnatts,
+								       string_to_array(textin(int2vectorout(i.indkey)), ' ')::int[] AS indkey
+								FROM pg_index i
+								JOIN pg_class ci ON ci.oid = i.indexrelid
+								WHERE ci.relam = (SELECT oid FROM pg_am WHERE amname = 'btree')
+								  AND ci.relpages > 0 AND ci.reltuples >= 0
+							) idx_data
+						) ic
+						JOIN pg_class ct ON ct.oid = ic.tbloid
+						LEFT JOIN pg_attribute a1 ON ic.indkey[ic.attpos] <> 0 AND a1.attrelid = ic.tbloid AND a1.attnum = ic.indkey[ic.attpos]
+						LEFT JOIN pg_attribute a2 ON ic.indkey[ic.attpos] = 0 AND a2.attrelid = ic.idxoid AND a2.attnum = ic.attpos
+					) i
+					JOIN pg_namespace n ON n.oid = i.relnamespace
+					JOIN pg_stats s ON s.schemaname = n.nspname AND s.tablename = i.attrelname AND s.attname = i.attname
+					WHERE n.nspname ` + fmt.Sprintf(bloatSchemaFilter, "n.nspname") + `
+					GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+				) index_stats
+			) index_sizes
+		) index_estimates`
+	rows, err := db.QueryContext(ctx, `
+		SELECT * FROM (`+tableQuery+`
+			UNION ALL`+indexQuery+`
+		) estimates (kind, schemaname, tblname, idxname, real_bytes, bloat_bytes, bloat_pct, fillfactor, is_na)
+		WHERE real_bytes >= $1
+		ORDER BY is_na, bloat_bytes DESC, schemaname, tblname, idxname
+		LIMIT NULLIF($2::int, 0)`, minBytes, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []BloatEstimate{}
+	for rows.Next() {
+		var b BloatEstimate
+		if err := rows.Scan(&b.Kind, &b.SchemaName, &b.TableName, &b.IndexName, &b.RealBytes, &b.BloatBytes,
+			&b.BloatPct, &b.Fillfactor, &b.NotApplicable); err != nil {
+			return nil, err
+		}
+		results = append(results, b)
+	}
+	return results, rows.Err()
+}
+
+// DisabledTrigger is a trigger switched off with ALTER TABLE … DISABLE TRIGGER.
+// Internal triggers are the ones enforcing foreign keys (DISABLE TRIGGER ALL turns
+// them off too): while disabled, the constraint is not checked.
+type DisabledTrigger struct {
+	Table    string
+	Trigger  string
+	Internal bool
+}
+
+// UnvalidatedConstraint is a CHECK or FOREIGN KEY constraint added NOT VALID and never
+// validated: existing rows were not checked, and the planner can't rely on it.
+type UnvalidatedConstraint struct {
+	Table      string
+	Constraint string
+	Type       string // "foreign key" or "check"
+	Definition string
+}
+
+// UnloggedTable is skipped by WAL: fast to write, but emptied after a crash and absent
+// on physical replicas.
+type UnloggedTable struct {
+	Table     string
+	SizeBytes int64
+}
+
+// PartitionedTable summarizes a partitioned table.
+type PartitionedTable struct {
+	Table      string
+	Strategy   string // the partition key, e.g. RANGE (created_at)
+	Partitions int
+	SizeBytes  int64
+	// DefaultPartition / DefaultPartitionBytes: rows matching no partition land here;
+	// a large default partition means partitions are missing, and it must be scanned
+	// whenever a new partition is attached.
+	DefaultPartition      string
+	DefaultPartitionBytes *int64
+}
+
+// StorageParameters are a relation's reloptions other than autovacuum_* (those are in
+// FetchAutovacuum).
+type StorageParameters struct {
+	Relation string
+	Kind     string // table, index, materialized view, partitioned table
+	Options  []string
+}
+
+// SchemaHygiene collects schema settings that silently change behavior.
+type SchemaHygiene struct {
+	DisabledTriggers       []DisabledTrigger
+	UnvalidatedConstraints []UnvalidatedConstraint
+	UnloggedTables         []UnloggedTable
+	PartitionedTables      []PartitionedTable
+	StorageParameters      []StorageParameters
+}
+
+// hygieneSchemaFilter keeps system schemas out; %s is the namespace alias.
+const hygieneSchemaFilter = `%[1]s.nspname NOT IN ('pg_catalog', 'information_schema') AND %[1]s.nspname !~ '^pg_toast'`
+
+// FetchSchemaHygiene reads disabled triggers, NOT VALID constraints, unlogged and
+// partitioned tables and custom storage parameters of the current database.
+func FetchSchemaHygiene(ctx context.Context, db *sql.DB) (SchemaHygiene, error) {
+	result := SchemaHygiene{
+		DisabledTriggers: []DisabledTrigger{}, UnvalidatedConstraints: []UnvalidatedConstraint{},
+		UnloggedTables: []UnloggedTable{}, PartitionedTables: []PartitionedTable{}, StorageParameters: []StorageParameters{},
+	}
+	query := func(sqlText string, scan func(*sql.Rows) error) error {
+		rows, err := db.QueryContext(ctx, sqlText)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			if err := scan(rows); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	}
+	err := query(`
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), t.tgname, t.tgisinternal
+		FROM pg_trigger t
+		JOIN pg_class c ON c.oid = t.tgrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE t.tgenabled = 'D' AND `+fmt.Sprintf(hygieneSchemaFilter, "n")+`
+		ORDER BY 1, 2`, func(rows *sql.Rows) error {
+		var trigger DisabledTrigger
+		if err := rows.Scan(&trigger.Table, &trigger.Trigger, &trigger.Internal); err != nil {
+			return err
+		}
+		result.DisabledTriggers = append(result.DisabledTriggers, trigger)
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	err = query(`
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), co.conname,
+		       CASE co.contype WHEN 'f' THEN 'foreign key' ELSE 'check' END, pg_get_constraintdef(co.oid)
+		FROM pg_constraint co
+		JOIN pg_class c ON c.oid = co.conrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE NOT co.convalidated AND co.contype IN ('f', 'c') AND `+fmt.Sprintf(hygieneSchemaFilter, "n")+`
+		ORDER BY 1, 2`, func(rows *sql.Rows) error {
+		var constraint UnvalidatedConstraint
+		if err := rows.Scan(&constraint.Table, &constraint.Constraint, &constraint.Type, &constraint.Definition); err != nil {
+			return err
+		}
+		result.UnvalidatedConstraints = append(result.UnvalidatedConstraints, constraint)
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	err = query(`
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), pg_total_relation_size(c.oid)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relpersistence = 'u' AND c.relkind IN ('r', 'p') AND `+fmt.Sprintf(hygieneSchemaFilter, "n")+`
+		ORDER BY 2 DESC, 1`, func(rows *sql.Rows) error {
+		var table UnloggedTable
+		if err := rows.Scan(&table.Table, &table.SizeBytes); err != nil {
+			return err
+		}
+		result.UnloggedTables = append(result.UnloggedTables, table)
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	err = query(`
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), pg_get_partkeydef(c.oid),
+		       (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid)::int,
+		       (SELECT COALESCE(sum(pg_total_relation_size(tree.relid)), 0)::bigint FROM pg_partition_tree(c.oid) tree),
+		       COALESCE(pt.partdefid::regclass::text, ''),
+		       CASE WHEN pt.partdefid <> 0 THEN pg_total_relation_size(pt.partdefid) END
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_partitioned_table pt ON pt.partrelid = c.oid
+		WHERE c.relkind = 'p' AND NOT c.relispartition AND `+fmt.Sprintf(hygieneSchemaFilter, "n")+`
+		ORDER BY 4 DESC, 1`, func(rows *sql.Rows) error {
+		var table PartitionedTable
+		if err := rows.Scan(&table.Table, &table.Strategy, &table.Partitions, &table.SizeBytes,
+			&table.DefaultPartition, &table.DefaultPartitionBytes); err != nil {
+			return err
+		}
+		result.PartitionedTables = append(result.PartitionedTables, table)
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	err = query(`
+		SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname),
+		       CASE c.relkind WHEN 'r' THEN 'table' WHEN 'i' THEN 'index' WHEN 'm' THEN 'materialized view'
+		                      WHEN 'p' THEN 'partitioned table' ELSE c.relkind::text END,
+		       ARRAY(SELECT option FROM unnest(c.reloptions) option WHERE option NOT LIKE 'autovacuum\_%' AND option NOT LIKE 'toast.autovacuum\_%')
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.reloptions IS NOT NULL AND `+fmt.Sprintf(hygieneSchemaFilter, "n")+`
+		ORDER BY 1`, func(rows *sql.Rows) error {
+		var parameters StorageParameters
+		var options pq.StringArray
+		if err := rows.Scan(&parameters.Relation, &parameters.Kind, &options); err != nil {
+			return err
+		}
+		if len(options) > 0 {
+			parameters.Options = options
+			result.StorageParameters = append(result.StorageParameters, parameters)
+		}
+		return nil
+	})
+	return result, err
+}
+
+// FunctionStats is one pg_stat_user_functions row.
+type FunctionStats struct {
+	Function    string // schema-qualified signature
+	Calls       int64
+	TotalTimeMS float64 // including functions it calls
+	SelfTimeMS  float64 // excluding them
+	MeanTimeMS  float64
+}
+
+// FunctionStatsReport is pg_stat_user_functions with the setting that fills it.
+type FunctionStatsReport struct {
+	TrackFunctions string // none, pl or all
+	Functions      []FunctionStats
+}
+
+// FetchFunctionStats ranks user functions by total time. Nothing is counted while
+// track_functions is none (the default).
+func FetchFunctionStats(ctx context.Context, db *sql.DB, limit int) (FunctionStatsReport, error) {
+	report := FunctionStatsReport{Functions: []FunctionStats{}}
+	if err := db.QueryRowContext(ctx, `SELECT current_setting('track_functions')`).Scan(&report.TrackFunctions); err != nil {
+		return report, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT funcid::regprocedure::text, calls, total_time, self_time
+		FROM pg_stat_user_functions
+		ORDER BY total_time DESC, 1
+		LIMIT NULLIF($1::int, 0)`, limit)
+	if err != nil {
+		return report, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var function FunctionStats
+		if err := rows.Scan(&function.Function, &function.Calls, &function.TotalTimeMS, &function.SelfTimeMS); err != nil {
+			return report, err
+		}
+		if function.Calls > 0 {
+			function.MeanTimeMS = function.TotalTimeMS / float64(function.Calls)
+		}
+		report.Functions = append(report.Functions, function)
+	}
+	return report, rows.Err()
+}
+
+// ConnectionEncryption groups client connections by user, address and whether they use SSL.
+type ConnectionEncryption struct {
+	Username   string
+	ClientAddr string // "local" for unix-socket connections
+	SSL        bool
+	Version    string // TLS version, "" without SSL
+	Count      int
+}
+
+// HBARule is one pg_hba.conf line from pg_hba_file_rules.
+type HBARule struct {
+	LineNumber int
+	Type       string // local, host, hostssl, hostnossl, …
+	Databases  []string
+	Users      []string
+	Address    string
+	AuthMethod string
+	Error      string
+}
+
+// SecurityReport is the server's transport and authentication setup.
+type SecurityReport struct {
+	SSL                string
+	PasswordEncryption string
+	Connections        []ConnectionEncryption
+	HBARules           []HBARule // nil when pg_hba_file_rules is not readable by this role
+	Warnings           []string
+}
+
+// FetchSecurity reads SSL usage per client connection, pg_hba.conf rules and the
+// password settings.
+func FetchSecurity(ctx context.Context, db *sql.DB) (SecurityReport, error) {
+	report := SecurityReport{Connections: []ConnectionEncryption{}}
+	if err := db.QueryRowContext(ctx, `SELECT current_setting('ssl'), current_setting('password_encryption')`).Scan(&report.SSL, &report.PasswordEncryption); err != nil {
+		return report, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT COALESCE(a.usename, ''), COALESCE(host(a.client_addr), 'local'), s.ssl, COALESCE(s.version, ''), count(*)::int
+		FROM pg_stat_ssl s
+		JOIN pg_stat_activity a ON a.pid = s.pid
+		WHERE a.backend_type = 'client backend'
+		GROUP BY 1, 2, 3, 4
+		ORDER BY 3, 5 DESC, 1, 2`)
+	if err != nil {
+		return report, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var connection ConnectionEncryption
+		if err := rows.Scan(&connection.Username, &connection.ClientAddr, &connection.SSL, &connection.Version, &connection.Count); err != nil {
+			return report, err
+		}
+		report.Connections = append(report.Connections, connection)
+	}
+	if err := rows.Err(); err != nil {
+		return report, err
+	}
+
+	hbaRows, err := db.QueryContext(ctx, `
+		SELECT line_number, COALESCE(type, ''), COALESCE(database, '{}'), COALESCE(user_name, '{}'),
+		       COALESCE(address, '') || COALESCE('/' || netmask, ''), COALESCE(auth_method, ''), COALESCE(error, '')
+		FROM pg_hba_file_rules
+		ORDER BY line_number`)
+	if err != nil {
+		report.Warnings = append(report.Warnings, "pg_hba.conf rules not readable (needs superuser or a GRANT on pg_hba_file_rules): "+err.Error())
+		return report, nil
+	}
+	defer hbaRows.Close()
+	report.HBARules = []HBARule{}
+	for hbaRows.Next() {
+		var rule HBARule
+		var databases, users pq.StringArray
+		if err := hbaRows.Scan(&rule.LineNumber, &rule.Type, &databases, &users, &rule.Address, &rule.AuthMethod, &rule.Error); err != nil {
+			return report, err
+		}
+		rule.Databases, rule.Users = databases, users
+		report.HBARules = append(report.HBARules, rule)
+	}
+	return report, hbaRows.Err()
 }
