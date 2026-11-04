@@ -5,6 +5,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
 ### Added
 - **Sequences screen (`Q`) and `check_sequences` MCP tool**: every sequence with the
   column that owns or defaults to it and the % of its range used, capped by the column
@@ -365,7 +367,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/liciomatos/pgdba/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/liciomatos/pgdba/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/liciomatos/pgdba/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/liciomatos/pgdba/compare/v0.4.0...v0.5.0
