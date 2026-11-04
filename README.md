@@ -169,6 +169,8 @@ parameters:
 | `check_index_usage` | `include_constraints` | `false` | also list indexes backing PK / UNIQUE / EXCLUDE constraints |
 | `check_cache_hit`, `check_memory_stats` | `delta_seconds` | `0` | measure cache hit ratios over an interval (≤ 60 s) instead of since the stats reset |
 | `check_table_churn` | `include_bloat` / `bloat_max_table_bytes` | `false` / 10 GiB | `pgstattuple_approx` estimate, skipping tables whose heap is larger |
+| `check_upsert_analysis` | `table` | — | also analyze this table, even without `pg_stat_statements` |
+| `check_recovery_conflicts` | `target` | `primary` | point it at a replica: recovery conflicts only happen on standbys |
 
 ### Querying replicas
 
@@ -330,6 +332,8 @@ From the main dashboard, open each screen with its shortcut key:
 | `X` | **Xmin Horizon** | Everything holding back the xmin horizon — sessions, standbys (`hot_standby_feedback`), replication slots, prepared transactions — oldest first, flagging the one that defines it | `enter` full query, `/` filter |
 | `V` | **Vacuum Progress** | Every VACUUM/autovacuum running now: phase, % scanned/vacuumed, index passes, dead-tuple memory, anti-wraparound flag | — |
 | `H` | **Table Churn** | Inserts/updates/deletes per table with HOT update %, new-page updates (PG16+) and fillfactor, with a fix hint for update-heavy tables with few HOT updates | `/` filter |
+| `C` | **Recovery Conflicts** | Per-database queries canceled on a standby by WAL replay (`pg_stat_database_conflicts`: snapshot, lock, bufferpin, deadlock, tablespace, logical slot on PG16+), replay backlog/lag and the WAL receiver | `/` filter |
+| `U` | **Upsert Analysis** | Tables written by `INSERT … ON CONFLICT` (from `pg_stat_statements`) with update share, HOT %, fillfactor, index and arbiter-index counts and owned-sequence usage; Enter shows hints, arbiter indexes, burned sequences and the statements | `enter` detail, `/` filter |
 | `O` | **I/O & WAL** | WAL volume, full-page-image share and buffers-full (`pg_stat_wal`, PG14+) and buffer I/O by backend type and context (`pg_stat_io`, PG16+), with who writes relation blocks | — |
 | `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 

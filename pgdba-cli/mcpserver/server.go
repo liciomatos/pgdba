@@ -372,6 +372,31 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckToastTables)
 
+	addTool(s, mcp.NewTool("check_recovery_conflicts",
+		mcp.WithDescription("Standby-side replication health — call it with target set to a replica (on a primary every counter is 0 and a warning says so). Per database, pg_stat_database_conflicts: queries canceled because WAL replay needed something they held — confl_snapshot (vacuum on the primary removed rows the query could still see: hot_standby_feedback or max_standby_streaming_delay), confl_lock (ACCESS EXCLUSIVE from DDL, TRUNCATE or vacuum truncation), confl_bufferpin, confl_deadlock, confl_tablespace, confl_active_logicalslot (PG16+). Also the replay state: replay_paused, receive/replay LSN, replay_backlog_bytes (received but not replayed), last_replay_time and replay_lag_seconds (also grows while the primary is idle, so it only means lag when the backlog is > 0) and the pg_stat_wal_receiver row. Related settings are in check_replication_config; the primary's view of its standbys is check_streaming_standbys. status: warning for any conflict; replay_status uses check_streaming_standbys' thresholds (64 MB / 10 s warning, 1 GB / 60 s critical) and warns when replay is paused or no receiver is streaming."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckRecoveryConflicts)
+
+	addTool(s, mcp.NewTool("check_database_health",
+		mcp.WithDescription("Error and waste counters from pg_stat_database for every database since its stats_reset: commits, rollbacks and rollback_pct, deadlocks, recovery_conflicts, checksum_failures (null = data checksums disabled) with the last failure time, blk_read/write_time_ms (0 unless track_io_timing is on), tup_returned/fetched/inserted/updated/deleted, and on PG14+ session_time/active_time/idle_in_transaction_time (ms), idle_in_transaction_pct, sessions, sessions_abandoned (client vanished), sessions_fatal, sessions_killed; parallel_workers_to_launch/launched on PG18+. Temp files are in check_temp_files. status: critical for any checksum failure; warning for any deadlock, ≥ 5% rollbacks over ≥ 1,000 transactions, or ≥ 10% of session time idle in transaction."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckDatabaseHealth)
+
+	addTool(s, mcp.NewTool("check_upsert_analysis",
+		mcp.WithDescription("INSERT … ON CONFLICT workload. statements: pg_stat_statements entries with ON CONFLICT (calls, rows, time, shared blocks, wal_bytes on extension ≥ 1.8), the conflict_action (update/nothing), and a hint when DO UPDATE has no WHERE (unchanged rows are rewritten anyway). tables: each resolved target table with n_tup_ins/upd/hot_upd, hot_pct, update_share_pct (≈ conflict rate when the upsert is the main writer), fillfactor, dead tuples, index_count (every index a non-HOT update writes), arbiter_indexes (unique/exclusion indexes ON CONFLICT can use, with idx_scan and size) and owned sequences with pct_used of the column type's range and values_per_live_row (every attempted row calls nextval(), so conflicts burn values). Also live speculative_token_waits and active upserts waiting on locks. Target names are resolved with this session's search_path; pass table to analyze one table even without pg_stat_statements. status: worst of the tables (check_table_churn's HOT rule, sequences ≥ 75% warning / ≥ 90% critical) and warning while sessions wait on speculative insertion or locks."),
+		mcp.WithString("table",
+			mcp.Description("Also analyze this table (schema.table or a search_path name), even when no ON CONFLICT statement targets it"),
+		),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of ON CONFLICT statements, by total time (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckUpsertAnalysis)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))

@@ -482,6 +482,45 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Source: "pg_stat_user_tables (n_tup_ins/upd/del/hot_upd, n_tup_newpage_upd PG16+), pg_class (reloptions)",
 	},
+	"recovery_conflicts": {
+		Title:   "Recovery Conflicts (key C) — queries canceled on a standby",
+		Purpose: "On a hot standby, replaying WAL from the primary sometimes needs something a running query holds: a lock, a buffer pin, or row versions its snapshot can still see. After max_standby_streaming_delay the standby cancels the query (\"canceling statement due to conflict with recovery\"). This screen counts those cancellations per database and shows how far replay is behind. On a primary every counter is 0.",
+		Columns: []HelpItem{
+			{"Snapshot", "vacuum on the primary removed row versions the query could still see — the most common kind."},
+			{"Lock", "replay needed an ACCESS EXCLUSIVE lock the query conflicted with (DDL, TRUNCATE, DROP, or vacuum truncating empty pages at the end of a table)."},
+			{"Bufferpin", "replay needed to clean a page the query had pinned."},
+			{"Deadlock / Tablespace", "replay deadlocked with the query; a dropped tablespace held the query's temp files."},
+			{"Logical Slot", "PG16+: logical replication slots on the standby invalidated because the rows they needed were removed."},
+			{"Replay backlog / last replayed commit", "WAL received but not replayed yet; age of the last replayed commit (also grows while the primary is idle, so it only means lag when the backlog is above 0)."},
+		},
+		Keys: []HelpItem{{"/", "filter rows by text"}},
+		Reading: []string{
+			"Status is warning for any conflict. The replay line is yellow from 64 MB or 10 s of backlog, red from 1 GB or 60 s (the Streaming Standbys thresholds), and yellow when replay is paused or no WAL receiver is streaming.",
+			"Snapshot conflicts: turn on hot_standby_feedback (the primary then keeps the rows, at the cost of bloat there), raise max_standby_streaming_delay (replay waits longer, so lag grows), or move long reports to a replica with a high delay.",
+			"Lock conflicts from vacuum truncation: vacuum_truncate = off on the busy tables (PG12+) or ALTER TABLE … SET (vacuum_truncate = false).",
+			"The settings live in Replication Slots → p (replication config); the primary's view of its standbys is Replication Slots → S.",
+		},
+		Source: "pg_stat_database_conflicts, pg_stat_wal_receiver, pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(), pg_last_xact_replay_timestamp(), pg_is_wal_replay_paused()",
+	},
+	"upsert_analysis": {
+		Title:   "Upsert Analysis (key U) — INSERT … ON CONFLICT workload",
+		Purpose: "Finds INSERT … ON CONFLICT statements in pg_stat_statements and shows, for each table they write, what makes upserts expensive: updates that are not HOT (every index rewritten), many indexes, sequences consumed by rows that ended as updates, and sessions waiting on each other's speculative insertions.",
+		Columns: []HelpItem{
+			{"Stmts", "ON CONFLICT statements whose target resolved to this table (names are resolved with this session's search_path)."},
+			{"Upd Share", "updates ÷ (inserts + updates): roughly how often the upsert hits a conflict, when it is the table's main writer."},
+			{"HOT % / Fillfactor", "share of updates that were HOT and the table's fillfactor — same rule as Table Churn (key H)."},
+			{"Indexes / Unique", "all indexes (each non-HOT update writes every one) and the unique/exclusion indexes ON CONFLICT can use as its arbiter."},
+			{"Seq Used", "highest share of its range used by a sequence owned by the table, capped by the column type (an integer column stops at 2^31)."},
+		},
+		Keys: []HelpItem{{"enter", "hints, arbiter indexes, sequences and the statements for the table"}, {"/", "filter rows by text"}},
+		Reading: []string{
+			"Status is the worst of the HOT rule (≥ 10,000 updates with < 50% HOT) and the sequences (yellow ≥ 75%, red ≥ 90% of the range). The line above the footer shows the selected table's first hint.",
+			"DO UPDATE always writes a new row version, even when nothing changes. Add WHERE (t.a, t.b) IS DISTINCT FROM (EXCLUDED.a, EXCLUDED.b) so unchanged rows are skipped — the detail page flags statements without a WHERE.",
+			"Every row an upsert attempts calls nextval() for serial/identity columns, even when it ends as an update. Many values per live row means the sequence is being burned — use bigint, or look the key up first when most rows already exist.",
+			"Speculative-insert waits mean sessions insert the same keys at the same time; batching by key or ordering the rows reduces them.",
+		},
+		Source: "pg_stat_statements, pg_stat_user_tables, pg_index, pg_constraint, pg_sequences, pg_depend, pg_locks (spectoken), pg_stat_activity",
+	},
 	"io_wal": {
 		Title:   "I/O & WAL (key O) — who reads and writes, and how much WAL",
 		Purpose: "WAL volume and its full-page-image share (pg_stat_wal, PG14+), and buffer I/O split by backend type, object and context (pg_stat_io, PG16+), to tell vacuum, checkpointer, background writer and query I/O apart.",
@@ -776,5 +815,7 @@ func (m ReplicaIdentityModel) HelpTopic() string     { return "replica_identity"
 func (m XminHorizonModel) HelpTopic() string         { return "xmin_horizon" }
 func (m VacuumProgressModel) HelpTopic() string      { return "vacuum_progress" }
 func (m TableChurnModel) HelpTopic() string          { return "table_churn" }
+func (m RecoveryConflictsModel) HelpTopic() string   { return "recovery_conflicts" }
+func (m UpsertAnalysisModel) HelpTopic() string      { return "upsert_analysis" }
 func (m IOWALModel) HelpTopic() string               { return "io_wal" }
 func (m VersionModel) HelpTopic() string             { return "version" }

@@ -14,6 +14,23 @@ All notable changes to pgdba-cli are documented here. Format follows
   pg_stat_activity's text (truncated). In the TUI, `enter` on a wait event opens its
   statements. Walsenders idling for new WAL (`Client:WalSenderWaitForWal`) are now
   excluded with the other idle sessions.
+- **Recovery Conflicts screen (`C`) and `check_recovery_conflicts` MCP tool**: on a
+  standby, `pg_stat_database_conflicts` per database (snapshot, lock, bufferpin,
+  deadlock, tablespace, `confl_active_logicalslot` on PG16+), replay backlog in bytes,
+  replay lag, paused replay and the `pg_stat_wal_receiver` row. On a primary the tool
+  warns that the counters only exist on replicas (use `target`).
+- **`check_database_health` MCP tool**: `pg_stat_database` error and waste counters for
+  every database — rollback %, deadlocks, checksum failures, block read/write time, and
+  on PG14+ session time, idle-in-transaction time and abandoned/fatal/killed sessions
+  (parallel workers on PG18+). Checksum failures are critical; deadlocks, ≥ 5% rollbacks
+  and ≥ 10% of session time idle in transaction are warnings.
+- **Upsert Analysis screen (`U`) and `check_upsert_analysis` MCP tool**: `INSERT … ON
+  CONFLICT` statements from `pg_stat_statements` with their conflict action and target
+  table, and per table the update share (≈ conflict rate), HOT %, fillfactor, index
+  count, arbiter-candidate unique/exclusion indexes and owned sequences with % of the
+  column type's range used and values consumed per live row (every attempted row calls
+  `nextval()`). Flags `DO UPDATE` without `WHERE` (unchanged rows rewritten) and sessions
+  waiting on speculative insertion.
 - **Query replicas from the MCP server**: `--replica name=URL` / `--replica-vault
   name=entry` (repeatable) add servers, and every tool accepts `target` (`primary` by
   default); `meta.target`/`meta.role` tell which server answered. `check_index_usage`
