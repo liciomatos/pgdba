@@ -18,12 +18,17 @@ func TestFetchWaitEvents_SamplesLockWaitsAndSkipsIdle(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = testDB.Exec(`DROP TABLE IF EXISTS wait_lock_t`) })
 
+	// Run the waiter's statement once to completion first: pg_stat_statements records a
+	// statement when it finishes, and its normalized text is what the breakdown shows.
+	if _, err := testDB.Exec(`UPDATE wait_lock_t SET id = 1 WHERE id = 1 /* blocked-waiter */`); err != nil {
+		t.Fatal(err)
+	}
 	holder, err := testDB.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer holder.Close()
-	if _, err := holder.ExecContext(ctx, `BEGIN; UPDATE wait_lock_t SET id = 1 WHERE id = 1`); err != nil {
+	if _, err := holder.ExecContext(ctx, `BEGIN; SELECT id FROM wait_lock_t WHERE id = 1 FOR UPDATE`); err != nil {
 		t.Fatal(err)
 	}
 	waiter, err := testDB.Conn(ctx)
@@ -33,7 +38,7 @@ func TestFetchWaitEvents_SamplesLockWaitsAndSkipsIdle(t *testing.T) {
 	defer waiter.Close()
 	waiting := make(chan error, 1)
 	go func() {
-		_, err := waiter.ExecContext(ctx, `UPDATE wait_lock_t SET id = 1 WHERE id = 1`)
+		_, err := waiter.ExecContext(ctx, `UPDATE wait_lock_t SET id = 1 WHERE id = 1 /* blocked-waiter */`)
 		waiting <- err
 	}()
 	defer func() {
@@ -42,7 +47,7 @@ func TestFetchWaitEvents_SamplesLockWaitsAndSkipsIdle(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond)
 
-	sampling, err := FetchWaitEvents(ctx, testDB, 3, 100*time.Millisecond, false)
+	sampling, err := FetchWaitEvents(ctx, testDB, WaitEventOptions{Samples: 3, Interval: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,9 +76,42 @@ func TestFetchWaitEvents_SamplesLockWaitsAndSkipsIdle(t *testing.T) {
 		t.Error("a permanently blocked session should be critical")
 	}
 
+	// The blocked statement must be the query behind the Lock event, and a top query
+	// with all of its time on Lock. (The holder ran a different statement, SELECT … FOR
+	// UPDATE, so it is a separate query, idle in transaction on Client:ClientRead.)
+	var lockQueries []WaitEventQuery
+	for _, event := range sampling.Events {
+		if event.EventType == "Lock" {
+			lockQueries = event.Queries
+		}
+	}
+	if len(lockQueries) != 1 || !strings.Contains(lockQueries[0].Query, "UPDATE wait_lock_t") ||
+		math.Abs(lockQueries[0].AAS-1) > 1e-9 || math.Abs(lockQueries[0].Pct-100) > 1e-9 {
+		t.Fatalf("expected the blocked UPDATE behind the Lock event with 1 AAS / 100%%, got %+v", lockQueries)
+	}
+	blocked := lockQueries[0]
+	// PG14+ identifies statements by query_id (computed because pg_stat_statements is
+	// loaded) and shows pg_stat_statements' normalized text, without literals.
+	if pgMajorVersion() >= 14 {
+		if blocked.QueryID == nil || !blocked.Normalized || !strings.Contains(blocked.Query, "$1") {
+			t.Errorf("expected a query_id and normalized text on PG %d, got %+v", pgMajorVersion(), blocked)
+		}
+	} else if blocked.QueryID != nil || !strings.Contains(blocked.Query, "blocked-waiter") {
+		t.Errorf("PG13 has no query_id: expected the raw pg_stat_activity text, got %+v", blocked)
+	}
+	var topBlocked *WaitEventQuery
+	for i := range sampling.TopQueries {
+		if strings.Contains(sampling.TopQueries[i].Query, "UPDATE wait_lock_t") {
+			topBlocked = &sampling.TopQueries[i]
+		}
+	}
+	if topBlocked == nil || len(topBlocked.Events) != 1 || topBlocked.Events[0].EventType != "Lock" || math.Abs(topBlocked.AAS-1) > 1e-9 {
+		t.Errorf("the blocked UPDATE should be a top query with all its time on Lock: %+v", topBlocked)
+	}
+
 	// The lock holder sits idle in its transaction; with include_idle the pool's idle
 	// connections (Client:ClientRead) show up too.
-	withIdle, err := FetchWaitEvents(ctx, testDB, 1, 0, true)
+	withIdle, err := FetchWaitEvents(ctx, testDB, WaitEventOptions{Samples: 1, IncludeIdle: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +138,8 @@ func TestFetchConnections_SourcesAndIdleTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.ExecContext(ctx, `ROLLBACK; RESET application_name`)
-	time.Sleep(1100 * time.Millisecond)
+	// Well over the 1 s asserted below: VM clock adjustments can shift ages by ~1 s.
+	time.Sleep(2200 * time.Millisecond)
 
 	result, err := FetchConnections(ctx, testDB)
 	if err != nil {
