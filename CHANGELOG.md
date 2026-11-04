@@ -19,7 +19,10 @@ All notable changes to pgdba-cli are documented here. Format follows
   - `check_column_stats`: one table's `pg_stats` (null fraction, distinct values,
     correlation, most common values) and extended statistics, with partial-index, BRIN
     and ANALYZE hints;
-  - `check_bloat_estimate`: statistics-based table and btree index bloat, no extension;
+  - `check_bloat_estimate`: table and btree index bloat — measured with pgstattuple
+    (`pgstattuple_approx` for tables, `pgstatindex` for indexes) when the extension is
+    installed, for relations up to `max_measure_bytes`; otherwise a statistics-based
+    estimate that needs no extension (`method` says which);
   - `check_schema_hygiene`: disabled triggers (foreign-key triggers are critical), NOT
     VALID constraints, unlogged tables, partitioned tables with their default
     partition, and custom storage parameters;

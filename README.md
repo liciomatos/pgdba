@@ -172,7 +172,7 @@ parameters:
 | `check_autovacuum` | `order_by` | `dead_tuples` | `analyze` ranks tables by stale statistics |
 | `check_upsert_analysis` | `table` | — | also analyze this table, even without `pg_stat_statements` |
 | `check_column_stats` | `table` (required) | — | the planner statistics of one table, with index hints |
-| `check_bloat_estimate` | `min_bytes` | 1 MiB | skip smaller relations |
+| `check_bloat_estimate` | `min_bytes` / `max_measure_bytes` | 1 MiB / 10 GiB | skip smaller relations; with pgstattuple, measure relations up to this size (larger ones keep the statistics estimate) |
 | `check_recovery_conflicts` | `target` | `primary` | point it at a replica: recovery conflicts only happen on standbys |
 
 ### Querying replicas

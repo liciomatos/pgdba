@@ -2948,33 +2948,45 @@ func handleCheckColumnStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 // --- bloat estimate ---
 
 type bloatEstimateResponse struct {
-	Kind          string  `json:"kind"`
-	Status        string  `json:"status"`
-	SchemaName    string  `json:"schema_name"`
-	TableName     string  `json:"table_name"`
-	IndexName     string  `json:"index_name,omitempty"`
-	RealBytes     int64   `json:"real_bytes"`
-	BloatBytes    int64   `json:"bloat_bytes"`
-	BloatPct      float64 `json:"bloat_pct"`
-	Fillfactor    int     `json:"fillfactor"`
-	NotApplicable bool    `json:"not_applicable"`
+	Kind                 string   `json:"kind"`
+	Status               string   `json:"status"`
+	SchemaName           string   `json:"schema_name"`
+	TableName            string   `json:"table_name"`
+	IndexName            string   `json:"index_name,omitempty"`
+	Method               string   `json:"method"` // pgstattuple_approx, pgstatindex or statistics
+	RealBytes            int64    `json:"real_bytes"`
+	BloatBytes           int64    `json:"bloat_bytes"`
+	BloatPct             float64  `json:"bloat_pct"`
+	Fillfactor           int      `json:"fillfactor"`
+	NotApplicable        bool     `json:"not_applicable"`
+	DeadTupleBytes       *int64   `json:"dead_tuple_bytes,omitempty"`
+	FreeBytes            *int64   `json:"free_bytes,omitempty"`
+	LeafDensityPct       *float64 `json:"avg_leaf_density_pct,omitempty"`
+	LeafFragmentationPct *float64 `json:"leaf_fragmentation_pct,omitempty"`
+}
+
+type bloatResult struct {
+	PgstattupleInstalled bool                    `json:"pgstattuple_installed"`
+	Relations            []bloatEstimateResponse `json:"relations"`
 }
 
 func handleCheckBloatEstimate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	minBytes := int64(req.GetFloat("min_bytes", float64(util.DefaultBloatMinBytes)))
-	estimates, err := util.FetchBloatEstimates(ctx, targetDB(ctx), minBytes, intParam(req, "limit", 20))
+	maxMeasureBytes := int64(req.GetFloat("max_measure_bytes", float64(util.DefaultBloatMaxTableBytes)))
+	report, err := util.FetchBloatEstimates(ctx, targetDB(ctx), minBytes, maxMeasureBytes, intParam(req, "limit", 20))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]bloatEstimateResponse, 0, len(estimates))
-	for _, b := range estimates {
-		resp = append(resp, bloatEstimateResponse{
+	resp := bloatResult{PgstattupleInstalled: report.PgstattupleInstalled, Relations: make([]bloatEstimateResponse, 0, len(report.Relations))}
+	for _, b := range report.Relations {
+		resp.Relations = append(resp.Relations, bloatEstimateResponse{
 			Kind: b.Kind, Status: util.BloatEstimateStatus(b).String(), SchemaName: b.SchemaName, TableName: b.TableName,
-			IndexName: b.IndexName, RealBytes: b.RealBytes, BloatBytes: b.BloatBytes, BloatPct: b.BloatPct,
-			Fillfactor: b.Fillfactor, NotApplicable: b.NotApplicable,
+			IndexName: b.IndexName, Method: b.Method, RealBytes: b.RealBytes, BloatBytes: b.BloatBytes, BloatPct: b.BloatPct,
+			Fillfactor: b.Fillfactor, NotApplicable: b.NotApplicable, DeadTupleBytes: b.DeadTupleBytes, FreeBytes: b.FreeBytes,
+			LeafDensityPct: b.LeafDensityPct, LeafFragmentationPct: b.LeafFragmentationPct,
 		})
 	}
-	return respond(ctx, resp)
+	return respond(ctx, resp, report.Warnings...)
 }
 
 // --- schema hygiene ---
