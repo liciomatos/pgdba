@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -208,15 +209,56 @@ func handleCheckLongRunningQueries(ctx context.Context, req mcp.CallToolRequest)
 // --- blocked queries ---
 
 type blockedQueryResponse struct {
-	Status              string `json:"status"` // always critical: a session is waiting on another one's lock
-	BlockedPID          int    `json:"blocked_pid"`
-	BlockedUser         string `json:"blocked_user"`
-	BlockingPID         int    `json:"blocking_pid"`
-	BlockingUser        string `json:"blocking_user"`
-	BlockedStatement    string `json:"blocked_statement"`
-	BlockingStatement   string `json:"blocking_statement"`
-	BlockedApplication  string `json:"blocked_application"`
-	BlockingApplication string `json:"blocking_application"`
+	Status              string   `json:"status"` // always critical: a session is waiting on another one's lock
+	BlockedPID          int      `json:"blocked_pid"`
+	BlockedUser         string   `json:"blocked_user"`
+	BlockingPID         int      `json:"blocking_pid"` // 0 = a prepared transaction
+	BlockingUser        string   `json:"blocking_user"`
+	RootBlockerPID      int      `json:"root_blocker_pid"`
+	Depth               int      `json:"depth"`
+	LockType            string   `json:"lock_type"`
+	LockMode            string   `json:"lock_mode"`
+	Relation            string   `json:"relation"`
+	WaitSeconds         *float64 `json:"wait_seconds"`
+	BlockedXactSeconds  *float64 `json:"blocked_xact_seconds"`
+	BlockingState       string   `json:"blocking_state"`
+	BlockingXactSeconds *float64 `json:"blocking_xact_seconds"`
+	BlockedStatement    string   `json:"blocked_statement"`
+	BlockingStatement   string   `json:"blocking_statement"`
+	BlockedApplication  string   `json:"blocked_application"`
+	BlockingApplication string   `json:"blocking_application"`
+}
+
+type rootBlockerResponse struct {
+	PID             int      `json:"pid"`
+	WaitingSessions int      `json:"waiting_sessions"`
+	State           string   `json:"state"`
+	XactSeconds     *float64 `json:"xact_seconds"`
+	Statement       string   `json:"statement"`
+}
+
+type lockCountResponse struct {
+	LockType string `json:"lock_type"`
+	Mode     string `json:"mode"`
+	Granted  int64  `json:"granted"`
+	Waiting  int64  `json:"waiting"`
+}
+
+type lockTableResponse struct {
+	Status       string              `json:"status"`
+	Total        int64               `json:"total_locks"`
+	SharedLocks  int64               `json:"shared_table_locks"`
+	Capacity     int64               `json:"capacity"`
+	UsagePct     float64             `json:"usage_pct"`
+	AdvisoryHeld int64               `json:"advisory_locks_held"`
+	Counts       []lockCountResponse `json:"by_type_and_mode"`
+}
+
+type blockedQueriesResponse struct {
+	Status       string                 `json:"status"`
+	LockTable    *lockTableResponse     `json:"lock_table"`
+	RootBlockers []rootBlockerResponse  `json:"root_blockers"`
+	Blocked      []blockedQueryResponse `json:"blocked"`
 }
 
 func handleCheckBlockedQueries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -224,23 +266,63 @@ func handleCheckBlockedQueries(ctx context.Context, req mcp.CallToolRequest) (*m
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]blockedQueryResponse, 0, len(blocked))
+	status := util.StatusOK
+	if len(blocked) > 0 {
+		status = util.StatusCritical
+	}
+	resp := blockedQueriesResponse{
+		Blocked:      make([]blockedQueryResponse, 0, len(blocked)),
+		RootBlockers: []rootBlockerResponse{},
+	}
 	for _, b := range blocked {
 		blockedStatement, _ := truncateQuery(b.BlockedStatement)
 		blockingStatement, _ := truncateQuery(b.BlockingStatement)
-		resp = append(resp, blockedQueryResponse{
+		resp.Blocked = append(resp.Blocked, blockedQueryResponse{
 			Status:              util.StatusCritical.String(),
 			BlockedPID:          b.BlockedPID,
 			BlockedUser:         b.BlockedUser,
 			BlockingPID:         b.BlockingPID,
 			BlockingUser:        b.BlockingUser,
+			RootBlockerPID:      b.RootBlockerPID,
+			Depth:               b.Depth,
+			LockType:            b.LockType,
+			LockMode:            b.LockMode,
+			Relation:            b.Relation,
+			WaitSeconds:         b.WaitSeconds,
+			BlockedXactSeconds:  b.BlockedXactSeconds,
+			BlockingState:       b.BlockingState,
+			BlockingXactSeconds: b.BlockingXactSeconds,
 			BlockedStatement:    blockedStatement,
 			BlockingStatement:   blockingStatement,
 			BlockedApplication:  b.BlockedApplication,
 			BlockingApplication: b.BlockingApplication,
 		})
 	}
-	return respond(ctx, resp)
+	for _, root := range util.RootBlockers(blocked) {
+		statement, _ := truncateQuery(root.Statement)
+		resp.RootBlockers = append(resp.RootBlockers, rootBlockerResponse{
+			PID: root.PID, WaitingSessions: root.WaitingSessions, State: root.State,
+			XactSeconds: root.XactSeconds, Statement: statement,
+		})
+	}
+	var warnings []string
+	summary, err := util.FetchLockSummary(ctx, targetDB(ctx))
+	if err != nil {
+		warnings = append(warnings, "lock table: "+err.Error())
+	} else {
+		lockStatus := util.LockTableStatus(summary)
+		status = max(status, lockStatus)
+		resp.LockTable = &lockTableResponse{
+			Status: lockStatus.String(), Total: summary.Total, SharedLocks: summary.SharedLocks,
+			Capacity: summary.Capacity, UsagePct: summary.UsagePct, AdvisoryHeld: summary.AdvisoryHeld,
+			Counts: make([]lockCountResponse, 0, len(summary.Counts)),
+		}
+		for _, count := range summary.Counts {
+			resp.LockTable.Counts = append(resp.LockTable.Counts, lockCountResponse(count))
+		}
+	}
+	resp.Status = status.String()
+	return respond(ctx, resp, warnings...)
 }
 
 // --- connections ---
@@ -359,6 +441,9 @@ type autovacuumTableResponse struct {
 	TriggerThreshold  float64                `json:"trigger_threshold_tuples"`
 	TriggerRatio      *float64               `json:"trigger_ratio"` // dead ÷ threshold; ≥ 1 = vacuum due
 	ModSinceAnalyze   int64                  `json:"mod_since_analyze"`
+	AnalyzeThreshold  float64                `json:"analyze_threshold_rows"`
+	AnalyzeRatio      *float64               `json:"analyze_ratio"` // mod_since_analyze ÷ threshold; ≥ 1 = analyze due
+	NeverAnalyzed     bool                   `json:"never_analyzed"`
 	TotalSizeBytes    int64                  `json:"total_size_bytes"`
 	TotalSize         string                 `json:"total_size_pretty"`
 	AutovacuumEnabled bool                   `json:"autovacuum_enabled"`
@@ -374,7 +459,7 @@ type autovacuumTableResponse struct {
 
 func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	limit := intParam(req, "limit", 20)
-	tables, err := util.FetchAutovacuum(ctx, targetDB(ctx), limit)
+	tables, err := util.FetchAutovacuum(ctx, targetDB(ctx), limit, strParam(req, "order_by", "dead_tuples"))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -390,6 +475,9 @@ func handleCheckAutovacuum(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			TriggerThreshold:  t.TriggerThreshold,
 			TriggerRatio:      t.TriggerRatio,
 			ModSinceAnalyze:   t.ModSinceAnalyze,
+			AnalyzeThreshold:  t.AnalyzeThreshold,
+			AnalyzeRatio:      t.AnalyzeRatio,
+			NeverAnalyzed:     t.NeverAnalyzed,
 			TotalSizeBytes:    t.TotalSizeBytes,
 			TotalSize:         t.TotalSize,
 			AutovacuumEnabled: t.AutovacuumEnabled,
@@ -942,42 +1030,97 @@ func handleCheckWaitEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 // --- query load ---
 
 type queryLoadResponse struct {
-	Status         string  `json:"status"`
-	QueryTruncated bool    `json:"query_truncated,omitempty"`
-	QueryID        string  `json:"query_id"`
-	Query          string  `json:"query"`
-	Calls          int     `json:"calls"`
-	TotalMS        float64 `json:"total_ms"`
-	MeanMS         float64 `json:"mean_ms"`
-	BufferMB       float64 `json:"buffer_mb"`
-	TempMB         float64 `json:"temp_mb"`
-	LoadPct        float64 `json:"load_pct"`
+	Status            string   `json:"status"`
+	QueryTruncated    bool     `json:"query_truncated,omitempty"`
+	QueryID           string   `json:"query_id"`
+	Query             string   `json:"query"`
+	Calls             int64    `json:"calls"`
+	Rows              int64    `json:"rows"`
+	TotalMS           float64  `json:"total_ms"`
+	MeanMS            float64  `json:"mean_ms"`
+	LoadPct           float64  `json:"load_pct"`
+	Plans             *int64   `json:"plans"`
+	TotalPlanMS       *float64 `json:"total_plan_ms"`
+	BufferMB          float64  `json:"buffer_mb"`
+	HitPct            *float64 `json:"hit_pct"`
+	SharedBlksHit     int64    `json:"shared_blks_hit"`
+	SharedBlksRead    int64    `json:"shared_blks_read"`
+	SharedBlksDirtied int64    `json:"shared_blks_dirtied"`
+	SharedBlksWritten int64    `json:"shared_blks_written"`
+	BlkReadTimeMS     float64  `json:"blk_read_time_ms"`
+	BlkWriteTimeMS    float64  `json:"blk_write_time_ms"`
+	TempMB            float64  `json:"temp_mb"`
+	TempBlksRead      int64    `json:"temp_blks_read"`
+	TempBlksWritten   int64    `json:"temp_blks_written"`
+	TempBlkTimeMS     *float64 `json:"temp_blk_time_ms"`
+	WALRecords        *int64   `json:"wal_records"`
+	WALFPI            *int64   `json:"wal_fpi"`
+	WALBytes          *float64 `json:"wal_bytes"`
+	JITFunctions      *int64   `json:"jit_functions"`
+	JITTimeMS         *float64 `json:"jit_time_ms"`
+}
+
+type queryLoadResult struct {
+	PgStatStatementsVersion string              `json:"pg_stat_statements_version"`
+	OrderBy                 string              `json:"order_by"`
+	IntervalSeconds         float64             `json:"interval_seconds"` // 0 = cumulative since pg_stat_statements_reset()
+	Queries                 []queryLoadResponse `json:"queries"`
 }
 
 func handleCheckQueryLoad(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	limit := intParam(req, "limit", 20)
-	queries, err := util.FetchQueryLoad(ctx, targetDB(ctx), limit)
+	interval, err := deltaInterval(req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	resp := make([]queryLoadResponse, 0, len(queries))
-	for _, q := range queries {
+	stats, err := util.FetchStatementStats(ctx, targetDB(ctx), util.StatementStatsOptions{
+		OrderBy: strParam(req, "order_by", "total_time"),
+		Limit:   intParam(req, "limit", 20),
+		Delta:   interval,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	megabytes := func(blocks int64) float64 { return math.Round(float64(blocks*stats.BlockSize)/(1<<20)*10) / 10 }
+	resp := make([]queryLoadResponse, 0, len(stats.Statements))
+	for _, q := range stats.Statements {
 		query, truncated := truncateQuery(q.Query)
 		resp = append(resp, queryLoadResponse{
-			Status:         util.QueryLoadStatus(q.LoadPct).String(),
-			QueryTruncated: truncated,
-			QueryID:        q.QueryID,
-			Query:          query,
-			Calls:          q.Calls,
-			TotalMS:        q.TotalMS,
-			MeanMS:         q.MeanMS,
-			BufferMB:       q.BufferMB,
-			TempMB:         q.TempMB,
-			LoadPct:        q.LoadPct,
+			Status:            util.QueryLoadStatus(q.LoadPct).String(),
+			QueryTruncated:    truncated,
+			QueryID:           q.QueryID,
+			Query:             query,
+			Calls:             q.Calls,
+			Rows:              q.Rows,
+			TotalMS:           q.TotalExecMS,
+			MeanMS:            q.MeanExecMS,
+			LoadPct:           q.LoadPct,
+			Plans:             q.Plans,
+			TotalPlanMS:       q.TotalPlanMS,
+			BufferMB:          megabytes(q.SharedBlksHit + q.SharedBlksRead),
+			HitPct:            q.HitPct(),
+			SharedBlksHit:     q.SharedBlksHit,
+			SharedBlksRead:    q.SharedBlksRead,
+			SharedBlksDirtied: q.SharedBlksDirtied,
+			SharedBlksWritten: q.SharedBlksWritten,
+			BlkReadTimeMS:     q.BlkReadTimeMS,
+			BlkWriteTimeMS:    q.BlkWriteTimeMS,
+			TempMB:            megabytes(q.TempBlksWritten),
+			TempBlksRead:      q.TempBlksRead,
+			TempBlksWritten:   q.TempBlksWritten,
+			TempBlkTimeMS:     q.TempBlkTimeMS,
+			WALRecords:        q.WALRecords,
+			WALFPI:            q.WALFPI,
+			WALBytes:          q.WALBytes,
+			JITFunctions:      q.JITFunctions,
+			JITTimeMS:         q.JITTimeMS,
 		})
 	}
-	version, warning := pgStatStatementsVersion(ctx)
-	return respond(ctx, pgStatStatementsResult{PgStatStatementsVersion: version, Queries: resp}, warning)
+	return respond(ctx, queryLoadResult{
+		PgStatStatementsVersion: stats.Info.Version,
+		OrderBy:                 stats.OrderBy,
+		IntervalSeconds:         stats.IntervalSeconds,
+		Queries:                 resp,
+	}, stats.Warnings...)
 }
 
 // --- replication slots ---
@@ -2580,4 +2723,110 @@ func handleCheckUpsertAnalysis(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 	resp.Status = status.String()
 	return respond(ctx, resp, analysis.Warnings...)
+}
+
+// --- operation progress ---
+
+type operationProgressResponse struct {
+	Command         string   `json:"command"`
+	Status          string   `json:"status"`
+	PID             int      `json:"pid"`
+	Database        string   `json:"database"`
+	Relation        string   `json:"relation"`
+	Index           string   `json:"index"`
+	Phase           string   `json:"phase"`
+	Done            *int64   `json:"done"`
+	Total           *int64   `json:"total"`
+	Unit            string   `json:"unit"`
+	PctDone         *float64 `json:"pct_done"`
+	LockersWaiting  *int64   `json:"lockers_waiting"`
+	DurationSeconds *float64 `json:"duration_seconds"`
+	Query           string   `json:"query"`
+	QueryTruncated  bool     `json:"query_truncated,omitempty"`
+}
+
+func handleCheckOperationProgress(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	operations, err := util.FetchOperationProgress(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	resp := make([]operationProgressResponse, 0, len(operations))
+	for _, p := range operations {
+		query, truncated := truncateQuery(p.Query)
+		resp = append(resp, operationProgressResponse{
+			Command: p.Command, Status: util.OperationProgressStatus(p).String(), PID: p.PID,
+			Database: p.Database, Relation: p.Relation, Index: p.Index, Phase: p.Phase,
+			Done: p.Done, Total: p.Total, Unit: p.Unit, PctDone: p.PctDone, LockersWaiting: p.LockersWaiting,
+			DurationSeconds: p.DurationSeconds, Query: query, QueryTruncated: truncated,
+		})
+	}
+	return respond(ctx, resp)
+}
+
+// --- SLRU caches and subtransactions ---
+
+type slruCacheResponse struct {
+	Name        string             `json:"name"`
+	Status      string             `json:"status"`
+	BlksZeroed  int64              `json:"blks_zeroed"`
+	BlksHit     int64              `json:"blks_hit"`
+	BlksRead    int64              `json:"blks_read"`
+	BlksWritten int64              `json:"blks_written"`
+	Flushes     int64              `json:"flushes"`
+	Truncates   int64              `json:"truncates"`
+	HitPct      *float64           `json:"hit_pct"`
+	StatsReset  statsResetResponse `json:"stats_reset"`
+}
+
+type subtransactionBackendResponse struct {
+	PID             int      `json:"pid"`
+	Status          string   `json:"status"`
+	Username        string   `json:"username"`
+	ApplicationName string   `json:"application_name"`
+	State           string   `json:"state"`
+	SubxactCount    int      `json:"subxact_count"`
+	Overflowed      bool     `json:"subxact_overflowed"`
+	XactSeconds     *float64 `json:"xact_seconds"`
+	Query           string   `json:"query"`
+	QueryTruncated  bool     `json:"query_truncated,omitempty"`
+}
+
+type slruResponse struct {
+	Status                 string                          `json:"status"`
+	Caches                 []slruCacheResponse             `json:"caches"`
+	SubtransactionBackends []subtransactionBackendResponse `json:"subtransaction_backends"` // null before PG16
+}
+
+func handleCheckSLRU(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	report, err := util.FetchSLRU(ctx, targetDB(ctx))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	now := time.Now()
+	status := util.StatusOK
+	resp := slruResponse{Caches: make([]slruCacheResponse, 0, len(report.Caches))}
+	for _, c := range report.Caches {
+		cacheStatus := util.SLRUStatus(c)
+		status = max(status, cacheStatus)
+		resp.Caches = append(resp.Caches, slruCacheResponse{
+			Name: c.Name, Status: cacheStatus.String(), BlksZeroed: c.BlksZeroed, BlksHit: c.BlksHit,
+			BlksRead: c.BlksRead, BlksWritten: c.BlksWritten, Flushes: c.Flushes, Truncates: c.Truncates,
+			HitPct: c.HitPct, StatsReset: toStatsReset(c.StatsReset, now),
+		})
+	}
+	if report.SubtransactionBackends != nil {
+		resp.SubtransactionBackends = make([]subtransactionBackendResponse, 0, len(report.SubtransactionBackends))
+		for _, b := range report.SubtransactionBackends {
+			backendStatus := util.SubtransactionStatus(b)
+			status = max(status, backendStatus)
+			query, truncated := truncateQuery(b.Query)
+			resp.SubtransactionBackends = append(resp.SubtransactionBackends, subtransactionBackendResponse{
+				PID: b.PID, Status: backendStatus.String(), Username: b.Username, ApplicationName: b.ApplicationName,
+				State: b.State, SubxactCount: b.SubxactCount, Overflowed: b.Overflowed, XactSeconds: b.XactSeconds,
+				Query: query, QueryTruncated: truncated,
+			})
+		}
+	}
+	resp.Status = status.String()
+	return respond(ctx, resp, report.Warnings...)
 }

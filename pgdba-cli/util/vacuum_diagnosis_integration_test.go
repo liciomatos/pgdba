@@ -181,7 +181,7 @@ func TestFetchAutovacuum_FlagsSlowCostOverride(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = testDB.Exec(`DROP TABLE IF EXISTS autovacuum_throttled_t`) })
 
-	tables, err := FetchAutovacuum(context.Background(), testDB, NoRowLimit)
+	tables, err := FetchAutovacuum(context.Background(), testDB, NoRowLimit, "dead_tuples")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,36 @@ import (
 type lockDetail struct {
 	blocked  string
 	blocking string
+	summary  string
+}
+
+// lockDescription is the requested lock mode and what it is on, e.g.
+// "AccessExclusiveLock on orders" or "ShareLock (transactionid)".
+func lockDescription(bq BlockedQuery) string {
+	if bq.Relation != "" {
+		return bq.LockMode + " on " + bq.Relation
+	}
+	if bq.LockType == "" {
+		return bq.LockMode
+	}
+	return bq.LockMode + " (" + bq.LockType + ")"
+}
+
+// lockWaitSummary is the first line of the detail page: the lock, the chain and how
+// long the transactions have been open.
+func lockWaitSummary(bq BlockedQuery) string {
+	age := func(seconds *float64) string {
+		if seconds == nil {
+			return "-"
+		}
+		return formatAge(int64(*seconds))
+	}
+	summary := fmt.Sprintf("PID %d waits for %s held by PID %d (%s, transaction open %s)",
+		bq.BlockedPID, lockDescription(bq), bq.BlockingPID, bq.BlockingState, age(bq.BlockingXactSeconds))
+	if bq.Depth > 1 {
+		summary += fmt.Sprintf("; chain depth %d, root blocker PID %d", bq.Depth, bq.RootBlockerPID)
+	}
+	return summary
 }
 
 type RecordLocksModel struct {
@@ -55,6 +85,9 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 		{Title: "Blocking Statement", Width: 50},
 		{Title: "Blocked App", Width: 20},
 		{Title: "Blocking App", Width: 20},
+		{Title: "Lock", Width: 28},
+		{Title: "Wait", Width: 8},
+		{Title: "Root", Width: 8},
 	}
 
 	var rowsData []table.Row
@@ -62,7 +95,7 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 
 	for _, bq := range blocked {
 		key := fmt.Sprintf("%d:%d", bq.BlockedPID, bq.BlockingPID)
-		details[key] = lockDetail{blocked: bq.BlockedStatement, blocking: bq.BlockingStatement}
+		details[key] = lockDetail{blocked: bq.BlockedStatement, blocking: bq.BlockingStatement, summary: lockWaitSummary(bq)}
 
 		blockedStmt := strings.ReplaceAll(bq.BlockedStatement, "\n", " ")
 		blockingStmt := strings.ReplaceAll(bq.BlockingStatement, "\n", " ")
@@ -73,6 +106,10 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			blockingStmt = blockingStmt[:50] + "..."
 		}
 
+		wait := "-"
+		if bq.WaitSeconds != nil {
+			wait = formatAge(int64(*bq.WaitSeconds))
+		}
 		rowsData = append(rowsData, table.Row{
 			fmt.Sprintf("%d", bq.BlockedPID),
 			bq.BlockedUser,
@@ -82,6 +119,9 @@ func CheckRecordLocks(initialModel func() tea.Model) tea.Model {
 			blockingStmt,
 			bq.BlockedApplication,
 			bq.BlockingApplication,
+			lockDescription(bq),
+			wait,
+			fmt.Sprintf("%d", bq.RootBlockerPID),
 		})
 	}
 
@@ -110,7 +150,7 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		fixedCols := []int{0, 1, 2, 3, 6, 7}
+		fixedCols := []int{0, 1, 2, 3, 6, 7, 8, 9, 10}
 		fixed := 0
 		cols := m.table.Columns()
 		for _, i := range fixedCols {
@@ -159,7 +199,7 @@ func (m RecordLocksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(row) >= 3 {
 					key := row[0] + ":" + row[2] // blockedPID:blockingPID (plain, no ANSI)
 					if d, ok := m.lockDetails[key]; ok {
-						m.detailText = "── Blocked Statement ──\n" + d.blocked +
+						m.detailText = d.summary + "\n\n── Blocked Statement ──\n" + d.blocked +
 							"\n\n── Blocking Statement ──\n" + d.blocking
 						m.detailMode = true
 					}

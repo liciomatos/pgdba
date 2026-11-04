@@ -36,7 +36,7 @@ func Serve(port int) error {
 	), handleCheckDashboard)
 
 	addTool(s, mcp.NewTool("check_blocked_queries",
-		mcp.WithDescription("Sessions blocked by row-level or relation locks, including the blocking session's statement (both truncated to 500 characters). status is always critical: a session is waiting on another one."),
+		mcp.WithDescription("Lock waits as a tree, from pg_blocking_pids() (also catches sessions queued behind another waiter, e.g. behind a pending ACCESS EXCLUSIVE). blocked: one row per (waiting session, session it waits for) with lock_type, lock_mode, relation, wait_seconds (PG14+), both transactions' ages, blocking_state (idle in transaction = the blocker is not even running), root_blocker_pid and depth (1 = direct); both statements truncated to 500 characters. root_blockers: heads of the chains with how many sessions wait on each — terminating a root releases its whole chain. lock_table: pg_locks counts by type and mode, advisory locks held, and shared lock table usage vs max_locks_per_transaction × (max_connections + max_prepared_transactions). status: critical while any session waits; lock_table status warning ≥ 50%, critical ≥ 80% (full = out of shared memory)."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckBlockedQueries)
@@ -131,7 +131,12 @@ func Serve(port int) error {
 	), handleCheckLongRunningQueries)
 
 	addTool(s, mcp.NewTool("check_autovacuum",
-		mcp.WithDescription("Tables with the most dead tuples, with each table's autovacuum overrides and effective throttling: cost_delay/cost_limit actually used (table reloption or global, with the -1 fallback to vacuum_cost_* resolved), the resulting throughput in cost units/s and max uncached read MB/s, and how many times slower than the global settings an override makes it (slowdown_factor). trigger_ratio = dead tuples ÷ autovacuum trigger threshold (≥ 1 = vacuum due). status: critical when trigger_ratio ≥ 2 or an override is ≥ 10× slower than global; warning when trigger_ratio ≥ 1, any override is slower than global, or autovacuum is disabled for the table."),
+		mcp.WithDescription("Tables with the most dead tuples, with each table's autovacuum overrides and effective throttling: cost_delay/cost_limit actually used (table reloption or global, with the -1 fallback to vacuum_cost_* resolved), the resulting throughput in cost units/s and max uncached read MB/s, and how many times slower than the global settings an override makes it (slowdown_factor). trigger_ratio = dead tuples ÷ autovacuum trigger threshold (≥ 1 = vacuum due); analyze_ratio = mod_since_analyze ÷ autoanalyze threshold (≥ 1 = analyze due) and never_analyzed for tables the planner only knows from default estimates — order_by=analyze ranks tables by stale statistics instead of dead tuples. status: critical when trigger_ratio ≥ 2 or an override is ≥ 10× slower than global; warning when trigger_ratio ≥ 1, any override is slower than global, or autovacuum is disabled for the table."),
+		mcp.WithString("order_by",
+			mcp.Description("dead_tuples (default) or analyze: stale statistics first (never analyzed with modifications, then highest analyze_ratio)"),
+			mcp.Enum(util.AutovacuumOrderings...),
+			mcp.DefaultString("dead_tuples"),
+		),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
@@ -173,7 +178,16 @@ func Serve(port int) error {
 	), handleCheckCacheHit)
 
 	addTool(s, mcp.NewTool("check_query_load",
-		mcp.WithDescription("Top queries by total execution time from pg_stat_statements, with load percentage and buffer/temp usage (query truncated to 500 characters). Works with any extension version and reports pg_stat_statements_version. status: warning when one statement takes ≥ 20% of the instance's execution time, critical from 40%."),
+		mcp.WithDescription("Top statements from pg_stat_statements with every counter the installed extension version has (query truncated to 500 characters): calls, rows, total/mean execution ms and load_pct (share of all execution time); plans and total_plan_ms (extension ≥ 1.8, needs pg_stat_statements.track_planning); shared_blks_hit/read/dirtied/written with hit_pct and buffer_mb; blk_read/write_time_ms (needs track_io_timing); temp_blks_read/written, temp_mb and temp_blk_time_ms (≥ 1.10); wal_records/wal_fpi/wal_bytes (≥ 1.8); jit_functions and jit_time_ms (≥ 1.10). Fields the extension version lacks are null. order_by picks the ranking (e.g. shared_blks_read for I/O-heavy statements, shared_blks_dirtied/wal_bytes for write amplification, temp_blks_written for work_mem spills, plan_time, jit_time). delta_seconds samples twice and reports only what ran in that window (load_pct then covers the window) instead of everything since the last reset. Warnings say when track_io_timing or track_planning is off. status: warning when one statement takes ≥ 20% of the execution time, critical from 40%."),
+		mcp.WithString("order_by",
+			mcp.Description("Ranking column"),
+			mcp.Enum(util.StatementOrderings...),
+			mcp.DefaultString("total_time"),
+		),
+		mcp.WithNumber("delta_seconds",
+			mcp.Description("Measure over this many seconds instead of since pg_stat_statements_reset() (0–60)"),
+			mcp.DefaultNumber(0),
+		),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of rows to return"),
 			mcp.DefaultNumber(20),
@@ -396,6 +410,18 @@ func Serve(port int) error {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckUpsertAnalysis)
+
+	addTool(s, mcp.NewTool("check_operation_progress",
+		mcp.WithDescription("Long-running maintenance and bulk operations in progress, from the pg_stat_progress_* views: CREATE INDEX / REINDEX (also CONCURRENTLY, with lockers_waiting while it waits for older transactions), ANALYZE, CLUSTER / VACUUM FULL, COPY (PG14+) and base backups — command, relation and index, phase, done/total in unit (blocks, tuples, sample blocks, bytes), pct_done when the total is known, duration_seconds and the statement. Plain VACUUM is in check_vacuum_progress. status: warning while a phase is \"waiting for …\" (no progress until other transactions finish)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckOperationProgress)
+
+	addTool(s, mcp.NewTool("check_slru",
+		mcp.WithDescription("Transaction-metadata caches from pg_stat_slru (Xact/commit_timestamp, MultiXactOffset/Member, Subtrans, Notify, Serial, …): blocks hit, read from disk, written, zeroed, flushes, truncates and hit_pct since stats_reset. Disk reads on Subtrans point at sessions with many subtransactions, on MultiXact at heavy row locking / foreign keys. On PG16+ also subtransaction_backends: sessions with open subtransactions (subxact_count) and whether their cache overflowed (> 64, e.g. SAVEPOINT or PL/pgSQL EXCEPTION blocks in a loop), which slows every snapshot on the server. status: warning for a cache with ≥ 1,000 reads and < 90% hits, or an overflowed session."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSLRU)
 
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
