@@ -415,6 +415,82 @@ func Serve(port int) error {
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckSLRU)
 
+	addTool(s, mcp.NewTool("check_sequences",
+		mcp.WithDescription("Every sequence with the column that uses it (owned by a serial/identity column, or referenced by a DEFAULT nextval()), most used first: data_type, column_type, last_value, max_value capped by the column type (a bigint sequence feeding an integer column stops at 2,147,483,647), increment, cycle and pct_used of the range. last_value is null when the sequence was never called or this role can't read it. status: warning from 75%, critical from 90% — plan the move to bigint before inserts fail."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of sequences (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSequences)
+
+	addTool(s, mcp.NewTool("check_missing_fk_indexes",
+		mcp.WithDescription("Foreign keys whose columns are not the leading columns of any valid, non-partial index on the referencing table. Without one, every DELETE or key UPDATE on the referenced table scans the referencing table while holding locks, and joins on the key can't use an index. Each row has the referencing and referenced tables, the columns, the referencing table's size (all partitions) and seq_scan count, referenced_updates_deletes (how often the scan happens) and a CREATE INDEX [CONCURRENTLY] suggestion. Constraints cloned onto partitions are reported once, on the parent. status: warning for each; critical when the referencing table is ≥ 1 GB and the referenced table gets updates or deletes."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of foreign keys (0 = all)"),
+			mcp.DefaultNumber(50),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckMissingFKIndexes)
+
+	addTool(s, mcp.NewTool("check_seq_scan_tables",
+		mcp.WithDescription("Tables ranked by rows read through sequential scans since the stats reset: seq_scan, seq_tup_read, avg_rows_per_seq_scan, idx_scan, seq_scan_pct, n_live_tup, heap_bytes and last_seq_scan (PG16+). Large tables scanned often with many rows per scan usually serve queries that lack an index — look up the statements with check_query_load (order_by shared_blks_read) and the column statistics with check_column_stats. status: warning for a heap ≥ 100 MB with ≥ 100 seq scans averaging ≥ 100,000 rows."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of tables (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSeqScanTables)
+
+	addTool(s, mcp.NewTool("check_column_stats",
+		mcp.WithDescription("The planner's statistics for one table (pg_stats): per column null_frac, n_distinct (> 0 count, < 0 fraction of rows) with estimated_distinct, correlation (physical vs logical order), avg_width_bytes, the 5 most common values (cut to 60 characters) with their frequencies, and whether the column leads or is in an index; plus extended statistics (CREATE STATISTICS) on the table and when it was last analyzed. hints suggest partial indexes for low-cardinality or mostly-NULL indexed columns, BRIN for strongly correlated columns on big tables, and ANALYZE for columns without statistics. Use it to choose index columns and order, and to spot correlated columns that need CREATE STATISTICS."),
+		mcp.WithString("table",
+			mcp.Required(),
+			mcp.Description("Table name: schema.table, or a name on the search_path"),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckColumnStats)
+
+	addTool(s, mcp.NewTool("check_bloat_estimate",
+		mcp.WithDescription("Statistics-based bloat estimate for tables and btree indexes (no extension needed): actual size vs the pages the rows should need at the relation's fillfactor, from pg_stats average widths. Needs recent ANALYZE; not_applicable marks rows the method can't estimate (columns without statistics, very wide index entries). For exact table numbers use check_table_churn with include_bloat (pgstattuple). Relations smaller than min_bytes are skipped. status: critical from 50% and 100 MB of bloat, warning from 30% and 10 MB — VACUUM FULL / pg_repack for tables, REINDEX CONCURRENTLY for indexes."),
+		mcp.WithNumber("min_bytes",
+			mcp.Description("Skip relations smaller than this many bytes"),
+			mcp.DefaultNumber(float64(util.DefaultBloatMinBytes)),
+		),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of relations (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckBloatEstimate)
+
+	addTool(s, mcp.NewTool("check_schema_hygiene",
+		mcp.WithDescription("Schema settings that silently change behavior: disabled_triggers (internal = a foreign key's enforcement trigger, off after DISABLE TRIGGER ALL — the constraint is not enforced), not_valid_constraints (CHECK / FOREIGN KEY added NOT VALID and never validated: old rows unchecked, the planner can't use them — run ALTER TABLE … VALIDATE CONSTRAINT), unlogged_tables (emptied after a crash, absent on replicas), partitioned_tables (partition key, partition count, size, default partition size) and storage_parameters (non-autovacuum reloptions such as fillfactor, toast_tuple_target, parallel_workers). Tables without a primary key are in check_replica_identity. status: critical for a disabled foreign-key trigger; warning for other disabled triggers, NOT VALID constraints, and a default partition holding ≥ 10% of a partitioned table ≥ 100 MB."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSchemaHygiene)
+
+	addTool(s, mcp.NewTool("check_functions",
+		mcp.WithDescription("User function statistics from pg_stat_user_functions, by total time: calls, total_time_ms (including functions it calls), self_time_ms and mean_time_ms. Empty with a warning while track_functions is none (the default): set it to pl (PL functions) or all. Functions inlined by the planner (simple SQL functions) are never counted."),
+		mcp.WithInteger("limit",
+			mcp.Description("Maximum number of functions (0 = all)"),
+			mcp.DefaultNumber(20),
+		),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckFunctions)
+
+	addTool(s, mcp.NewTool("check_security",
+		mcp.WithDescription("Transport and authentication setup: ssl and password_encryption settings, client connections grouped by user, address and SSL use (pg_stat_ssl, with TLS version), and the pg_hba.conf rules (pg_hba_file_rules; needs superuser or a GRANT — otherwise a warning). Role attributes and password expiry are in check_users. status: critical for an hba line with an error, trust over the network, or cleartext password without hostssl; warning for trust on the local socket, md5 rules, network connections without SSL, and password_encryption other than scram-sha-256."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), handleCheckSecurity)
+
 	addr := fmt.Sprintf(":%d", port)
 	sseURL := fmt.Sprintf("http://localhost:%d/sse", port)
 	sseServer := server.NewSSEServer(s, server.WithBaseURL(fmt.Sprintf("http://localhost:%d", port)))

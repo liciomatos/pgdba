@@ -171,6 +171,8 @@ parameters:
 | `check_query_load` | `order_by` / `delta_seconds` | `total_time` / `0` | rank by I/O, writes, WAL, temp, plan or JIT time; measure over a window instead of since the reset |
 | `check_autovacuum` | `order_by` | `dead_tuples` | `analyze` ranks tables by stale statistics |
 | `check_upsert_analysis` | `table` | — | also analyze this table, even without `pg_stat_statements` |
+| `check_column_stats` | `table` (required) | — | the planner statistics of one table, with index hints |
+| `check_bloat_estimate` | `min_bytes` | 1 MiB | skip smaller relations |
 | `check_recovery_conflicts` | `target` | `primary` | point it at a replica: recovery conflicts only happen on standbys |
 
 ### Querying replicas
@@ -335,6 +337,7 @@ From the main dashboard, open each screen with its shortcut key:
 | `H` | **Table Churn** | Inserts/updates/deletes per table with HOT update %, new-page updates (PG16+) and fillfactor, with a fix hint for update-heavy tables with few HOT updates | `/` filter |
 | `C` | **Recovery Conflicts** | Per-database queries canceled on a standby by WAL replay (`pg_stat_database_conflicts`: snapshot, lock, bufferpin, deadlock, tablespace, logical slot on PG16+), replay backlog/lag and the WAL receiver | `/` filter |
 | `U` | **Upsert Analysis** | Tables written by `INSERT … ON CONFLICT` (from `pg_stat_statements`) with update share, HOT %, fillfactor, index and arbiter-index counts and owned-sequence usage; Enter shows hints, arbiter indexes, burned sequences and the statements | `enter` detail, `/` filter |
+| `Q` | **Sequences** | Every sequence with the column it feeds (owned or via `DEFAULT nextval()`) and the % of its range used, capped by the column type (integer stops at 2^31) | `/` filter |
 | `O` | **I/O & WAL** | WAL volume, full-page-image share and buffers-full (`pg_stat_wal`, PG14+) and buffer I/O by backend type and context (`pg_stat_io`, PG16+), with who writes relation blocks | — |
 | `I` | **Replica Identity** | Tables without a usable replica identity for logical replication — native publications and pglogical replication sets — flagging the ones already replicating UPDATE/DELETE | `p` replicated only, `/` filter; suggested fix shown for the selected row |
 

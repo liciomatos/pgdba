@@ -520,6 +520,22 @@ var screenHelp = map[string]ScreenHelp{
 		},
 		Source: "pg_stat_statements, pg_stat_user_tables, pg_index, pg_constraint, pg_sequences, pg_depend, pg_locks (spectoken), pg_stat_activity",
 	},
+	"sequences": {
+		Title:   "Sequences (key Q) — how close each sequence is to its limit",
+		Purpose: "Lists every sequence with the column it feeds — the column that owns it (serial or identity) or one whose DEFAULT calls nextval() — and how much of its range is used. When a sequence reaches its maximum, every insert that needs a new value fails.",
+		Columns: []HelpItem{
+			{"Used By", "table.column using the sequence; (default) = through DEFAULT nextval() rather than ownership; - = no column uses it."},
+			{"Type", "the column's type when one uses the sequence (it decides the real limit), otherwise the sequence's own type."},
+			{"Last Value / Max Value", "last value handed out (- = never called, or not readable by this role) and the limit: the sequence's max_value capped by the column type — integer stops at 2,147,483,647 even when the sequence is bigint."},
+			{"Used", "share of the range from the start value to the limit already consumed."},
+		},
+		Keys: []HelpItem{{"/", "filter rows by text"}},
+		Reading: []string{
+			"Status is yellow from 75% and red from 90%. Moving an integer column to bigint rewrites the table (ALTER TABLE … ALTER COLUMN … TYPE bigint) — plan it well before the limit, e.g. with a new column backfilled in batches.",
+			"Sequences advance on every nextval(), including rolled-back inserts and INSERT … ON CONFLICT rows that end as updates — Upsert Analysis (key U) shows how many values each live row cost.",
+		},
+		Source: "pg_sequences, pg_depend (owned by / DEFAULT), pg_attrdef, pg_attribute",
+	},
 	"io_wal": {
 		Title:   "I/O & WAL (key O) — who reads and writes, and how much WAL",
 		Purpose: "WAL volume and its full-page-image share (pg_stat_wal, PG14+), and buffer I/O split by backend type, object and context (pg_stat_io, PG16+), to tell vacuum, checkpointer, background writer and query I/O apart.",
@@ -816,5 +832,6 @@ func (m VacuumProgressModel) HelpTopic() string      { return "vacuum_progress" 
 func (m TableChurnModel) HelpTopic() string          { return "table_churn" }
 func (m RecoveryConflictsModel) HelpTopic() string   { return "recovery_conflicts" }
 func (m UpsertAnalysisModel) HelpTopic() string      { return "upsert_analysis" }
+func (m SequencesModel) HelpTopic() string           { return "sequences" }
 func (m IOWALModel) HelpTopic() string               { return "io_wal" }
 func (m VersionModel) HelpTopic() string             { return "version" }

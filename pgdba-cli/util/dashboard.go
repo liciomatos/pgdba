@@ -414,7 +414,8 @@ func (m DashboardModel) View() string {
 		renderKey("5") + " " + renderLabel("conn") + "  " +
 		renderKey("6") + " " + renderLabel("autovac") + "  " +
 		renderKey("7") + " " + renderLabel("index") + "  " +
-		renderKey("8") + " " + renderLabel("cache")
+		renderKey("8") + " " + renderLabel("cache") + "  " +
+		renderKey("Q") + " " + renderLabel("seq")
 	// Four rows of at most 80 columns: a longer row wraps on an
 	// 80-column terminal and pushes the header off screen.
 	shortcutRow2 := renderKey("9") + " " + renderLabel("users") + "  " +
