@@ -464,10 +464,14 @@ func Serve(port int) error {
 	), handleCheckColumnStats)
 
 	addTool(s, mcp.NewTool("check_bloat_estimate",
-		mcp.WithDescription("Statistics-based bloat estimate for tables and btree indexes (no extension needed): actual size vs the pages the rows should need at the relation's fillfactor, from pg_stats average widths. Needs recent ANALYZE; not_applicable marks rows the method can't estimate (columns without statistics, very wide index entries). For exact table numbers use check_table_churn with include_bloat (pgstattuple). Relations smaller than min_bytes are skipped. status: critical from 50% and 100 MB of bloat, warning from 30% and 10 MB — VACUUM FULL / pg_repack for tables, REINDEX CONCURRENTLY for indexes."),
+		mcp.WithDescription("Wasted space in tables and btree indexes, measured when possible. A statistics estimate (ioguix-style: actual pages vs the pages the rows should need at the fillfactor, from pg_stats widths; no extension, needs a recent ANALYZE) ranks every relation of at least min_bytes. When the pgstattuple extension is installed (pgstattuple_installed), the top limit relations of at most max_measure_bytes are then measured instead and re-ranked: method pgstattuple_approx for tables (dead_tuple_bytes + free_bytes beyond the fillfactor reserve; reads only pages not all-visible) and pgstatindex for indexes (avg_leaf_density_pct below the fillfactor, leaf_fragmentation_pct; reads the whole index). Larger relations, or a failed measurement (pgstattuple needs pg_stat_scan_tables or superuser), keep method statistics with a warning. not_applicable marks statistics estimates that can't be made (never analyzed, columns without statistics, very wide index entries) — bloat is 0 there. status: critical from 50% and 100 MB of bloat, warning from 30% and 10 MB — VACUUM FULL / pg_repack for tables, REINDEX CONCURRENTLY for indexes."),
 		mcp.WithNumber("min_bytes",
 			mcp.Description("Skip relations smaller than this many bytes"),
 			mcp.DefaultNumber(float64(util.DefaultBloatMinBytes)),
+		),
+		mcp.WithNumber("max_measure_bytes",
+			mcp.Description("With pgstattuple, measure only relations up to this size (default 10 GiB); larger ones keep the statistics estimate"),
+			mcp.DefaultNumber(float64(util.DefaultBloatMaxTableBytes)),
 		),
 		mcp.WithInteger("limit",
 			mcp.Description("Maximum number of relations (0 = all)"),

@@ -161,35 +161,82 @@ func TestFetchColumnStats_Hints(t *testing.T) {
 	}
 }
 
-func TestFetchBloatEstimates_AfterMassDelete(t *testing.T) {
+func TestFetchBloatEstimates_StatisticsThenPgstattuple(t *testing.T) {
 	if testing.Short() || skipIntegration {
 		t.Skip("skipping integration test")
 	}
+	ctx := context.Background()
 	// Deleting 9 rows of every 10 spreads the free space over every page, so VACUUM
 	// can't truncate the table: it keeps its size with a tenth of the rows.
 	execOrFatal(t, `
-		DROP TABLE IF EXISTS bloat_t;
+		DROP EXTENSION IF EXISTS pgstattuple;
+		DROP TABLE IF EXISTS bloat_t, bloat_unanalyzed_t;
 		CREATE TABLE bloat_t AS SELECT g AS id, md5(g::text) AS payload FROM generate_series(1, 100000) g;
 		CREATE INDEX bloat_t_payload_idx ON bloat_t (payload);
-		DELETE FROM bloat_t WHERE id % 10 <> 0;`)
+		DELETE FROM bloat_t WHERE id % 10 <> 0;
+		CREATE TABLE bloat_unanalyzed_t AS SELECT g AS id FROM generate_series(1, 50000) g;`)
 	// VACUUM can't run in the implicit transaction of a multi-statement Exec.
 	execOrFatal(t, `VACUUM ANALYZE bloat_t`)
-	t.Cleanup(func() { _, _ = testDB.Exec(`DROP TABLE IF EXISTS bloat_t`) })
-	estimates, err := FetchBloatEstimates(context.Background(), testDB, 0, NoRowLimit)
+	t.Cleanup(func() { _, _ = testDB.Exec(`DROP TABLE IF EXISTS bloat_t, bloat_unanalyzed_t`) })
+	findRelations := func(report BloatReport) map[string]BloatEstimate {
+		found := map[string]BloatEstimate{}
+		for _, estimate := range report.Relations {
+			switch estimate.TableName {
+			case "bloat_t":
+				found[estimate.Kind] = estimate
+			case "bloat_unanalyzed_t":
+				found["unanalyzed"] = estimate
+			}
+		}
+		return found
+	}
+
+	report, err := FetchBloatEstimates(ctx, testDB, 0, DefaultBloatMaxTableBytes, NoRowLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := map[string]BloatEstimate{}
-	for _, estimate := range estimates {
-		if estimate.TableName == "bloat_t" {
-			found[estimate.Kind] = estimate
-		}
+	found := findRelations(report)
+	if report.PgstattupleInstalled {
+		t.Fatal("pgstattuple was dropped")
 	}
-	if table := found["table"]; table.NotApplicable || table.BloatPct < 70 {
-		t.Errorf("the table keeps its pages for a tenth of the rows: %+v", table)
+	if table := found["table"]; table.Method != "statistics" || table.NotApplicable || table.BloatPct < 70 {
+		t.Errorf("statistics estimate: the table keeps its pages for a tenth of the rows: %+v", table)
 	}
-	if index := found["index"]; index.IndexName != "bloat_t_payload_idx" || index.NotApplicable || index.BloatPct < 50 {
-		t.Errorf("the index keeps its pages too: %+v", index)
+	if index := found["index"]; index.Method != "statistics" || index.IndexName != "bloat_t_payload_idx" || index.BloatPct < 50 {
+		t.Errorf("statistics estimate: the index keeps its pages too: %+v", index)
+	}
+	// On PG14+ a table that was never vacuumed or analyzed has reltuples -1; on PG13 it is 0.
+	if unanalyzed, ok := found["unanalyzed"]; ok && pgMajorVersion() >= 14 && (!unanalyzed.NotApplicable || unanalyzed.BloatBytes != 0) {
+		t.Errorf("a never-analyzed table has no statistics estimate: %+v", unanalyzed)
+	}
+
+	if _, err := testDB.Exec(`CREATE EXTENSION pgstattuple`); err != nil {
+		t.Skipf("pgstattuple unavailable: %v", err)
+	}
+	t.Cleanup(func() { _, _ = testDB.Exec(`DROP EXTENSION IF EXISTS pgstattuple`) })
+	if report, err = FetchBloatEstimates(ctx, testDB, 0, DefaultBloatMaxTableBytes, NoRowLimit); err != nil {
+		t.Fatal(err)
+	}
+	found = findRelations(report)
+	if !report.PgstattupleInstalled || len(report.Warnings) != 0 {
+		t.Fatalf("pgstattuple installed, every relation measured: %+v", report.Warnings)
+	}
+	if table := found["table"]; table.Method != "pgstattuple_approx" || table.FreeBytes == nil || table.BloatPct < 70 {
+		t.Errorf("measured table bloat: %+v", table)
+	}
+	if index := found["index"]; index.Method != "pgstatindex" || index.LeafDensityPct == nil || index.BloatPct < 50 {
+		t.Errorf("measured index bloat: %+v", index)
+	}
+	if unanalyzed, ok := found["unanalyzed"]; ok && (unanalyzed.Method != "pgstattuple_approx" || unanalyzed.NotApplicable) {
+		t.Errorf("pgstattuple measures a table without statistics too: %+v", unanalyzed)
+	}
+
+	// Relations above the size cap keep the statistics estimate.
+	if report, err = FetchBloatEstimates(ctx, testDB, 0, 1, NoRowLimit); err != nil {
+		t.Fatal(err)
+	}
+	if table := findRelations(report)["table"]; table.Method != "statistics" || len(report.Warnings) != 1 {
+		t.Errorf("above max_measure_bytes the estimate is kept, with a warning: %+v %v", table, report.Warnings)
 	}
 }
 

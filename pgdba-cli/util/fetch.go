@@ -1,6 +1,7 @@
 package util
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"fmt"
@@ -6023,24 +6024,40 @@ func FetchColumnStats(ctx context.Context, db *sql.DB, table string) (TableColum
 	return result, extendedRows.Err()
 }
 
-// BloatEstimate is a statistics-based estimate of wasted space in a table or a btree
-// index (the ioguix queries): it compares the actual pages with the pages the rows
-// should need given their average width from pg_stats. It needs fresh statistics and
-// no extension; check_table_churn's include_bloat measures tables exactly with pgstattuple.
+// BloatEstimate is the wasted space in a table or a btree index. With the pgstattuple
+// extension installed it is measured (Method pgstattuple_approx for tables, pgstatindex
+// for indexes); otherwise — or for relations above the measuring size cap, or when the
+// measurement fails — it is estimated from statistics (Method statistics, the ioguix
+// queries: actual pages vs the pages the rows should need given their average width
+// from pg_stats, which needs a recent ANALYZE).
 type BloatEstimate struct {
 	Kind       string // "table" or "index"
 	SchemaName string
 	TableName  string
 	IndexName  string
+	Method     string // pgstattuple_approx, pgstatindex or statistics
 	RealBytes  int64
 	// BloatBytes / BloatPct are the space beyond what the rows need at the relation's
 	// fillfactor.
 	BloatBytes int64
 	BloatPct   float64
 	Fillfactor int
-	// NotApplicable marks estimates the method can't make (columns without statistics,
-	// or of type name): the numbers are unreliable.
+	// NotApplicable marks statistics estimates the method can't make (columns without
+	// statistics, very wide index entries): the numbers are unreliable.
 	NotApplicable bool
+	// Measured details: dead tuples and free space for tables, leaf density and
+	// fragmentation for indexes; nil for statistics estimates.
+	DeadTupleBytes       *int64
+	FreeBytes            *int64
+	LeafDensityPct       *float64
+	LeafFragmentationPct *float64
+}
+
+// BloatReport is the result of FetchBloatEstimates.
+type BloatReport struct {
+	PgstattupleInstalled bool
+	Relations            []BloatEstimate
+	Warnings             []string
 }
 
 // bloatSchemaFilter keeps system and TOAST schemas out of bloat estimates; %s is the
@@ -6051,9 +6068,105 @@ const bloatSchemaFilter = `NOT IN ('pg_catalog', 'information_schema') AND %s !~
 // relations are cheap whatever their bloat, and the estimate is noisy for them.
 const DefaultBloatMinBytes = 1 << 20
 
-// FetchBloatEstimates estimates table and btree index bloat for relations of at least
-// minBytes, largest bloat first.
-func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit int) ([]BloatEstimate, error) {
+// FetchBloatEstimates reports table and btree index bloat for relations of at least
+// minBytes, largest bloat first. The statistics estimate ranks every relation; when
+// pgstattuple is installed, the top limit relations of at most maxMeasureBytes are then
+// measured with it instead (measuring reads the whole index, and the visibility map's
+// not-all-visible pages of a table), and the list is re-ranked by the measured numbers.
+func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes, maxMeasureBytes int64, limit int) (BloatReport, error) {
+	report := BloatReport{Relations: []BloatEstimate{}}
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgstattuple')`).Scan(&report.PgstattupleInstalled); err != nil {
+		return report, err
+	}
+	estimates, err := fetchStatisticsBloat(ctx, db, minBytes, limit)
+	if err != nil {
+		return report, err
+	}
+	if !report.PgstattupleInstalled {
+		report.Relations = estimates
+		return report, nil
+	}
+	skippedLarge := 0
+	for i, estimate := range estimates {
+		if maxMeasureBytes > 0 && estimate.RealBytes > maxMeasureBytes {
+			skippedLarge++
+			continue
+		}
+		measured, err := measureBloat(ctx, db, estimate)
+		if err != nil {
+			report.Warnings = append(report.Warnings, fmt.Sprintf("measuring %s.%s with pgstattuple failed, statistics estimate kept: %v",
+				estimate.SchemaName, cmp.Or(estimate.IndexName, estimate.TableName), err))
+			continue
+		}
+		estimates[i] = measured
+	}
+	if skippedLarge > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("%d relations larger than max_measure_bytes (%d) keep the statistics estimate", skippedLarge, maxMeasureBytes))
+	}
+	sort.SliceStable(estimates, func(i, j int) bool {
+		if estimates[i].NotApplicable != estimates[j].NotApplicable {
+			return !estimates[i].NotApplicable
+		}
+		return estimates[i].BloatBytes > estimates[j].BloatBytes
+	})
+	report.Relations = estimates
+	return report, nil
+}
+
+// measureBloat replaces a statistics estimate by a pgstattuple measurement:
+// pgstattuple_approx for tables (dead tuples + free space beyond the fillfactor
+// reserve), pgstatindex for btree indexes (leaf density below the fillfactor).
+func measureBloat(ctx context.Context, db *sql.DB, estimate BloatEstimate) (BloatEstimate, error) {
+	measured := estimate
+	measured.NotApplicable = false
+	if estimate.Kind == "table" {
+		var tableBytes, deadBytes, freeBytes int64
+		// format('%I.%I') quotes the identifiers server-side.
+		err := db.QueryRowContext(ctx, `
+			SELECT table_len, dead_tuple_len, approx_free_space
+			FROM pgstattuple_approx(format('%I.%I', $1::text, $2::text)::regclass)`,
+			estimate.SchemaName, estimate.TableName).Scan(&tableBytes, &deadBytes, &freeBytes)
+		if err != nil {
+			return estimate, err
+		}
+		reserved := tableBytes * int64(100-estimate.Fillfactor) / 100
+		measured.Method = "pgstattuple_approx"
+		measured.RealBytes = tableBytes
+		measured.DeadTupleBytes, measured.FreeBytes = &deadBytes, &freeBytes
+		measured.BloatBytes = max(deadBytes+freeBytes-reserved, 0)
+		measured.BloatPct = 0
+		if tableBytes > 0 {
+			measured.BloatPct = float64(measured.BloatBytes) / float64(tableBytes) * 100
+		}
+		return measured, nil
+	}
+	var indexBytes int64
+	var density, fragmentation float64
+	err := db.QueryRowContext(ctx, `
+		SELECT index_size, avg_leaf_density, leaf_fragmentation
+		FROM pgstatindex(format('%I.%I', $1::text, $2::text)::regclass)`,
+		estimate.SchemaName, estimate.IndexName).Scan(&indexBytes, &density, &fragmentation)
+	if err != nil {
+		return estimate, err
+	}
+	measured.Method = "pgstatindex"
+	measured.RealBytes = indexBytes
+	measured.BloatBytes, measured.BloatPct = 0, 0
+	// An index without leaf pages reports NaN density: nothing to measure.
+	if !math.IsNaN(density) {
+		measured.LeafDensityPct, measured.LeafFragmentationPct = &density, &fragmentation
+		if fillfactor := float64(estimate.Fillfactor); density < fillfactor {
+			measured.BloatPct = (1 - density/fillfactor) * 100
+			measured.BloatBytes = int64(float64(indexBytes) * measured.BloatPct / 100)
+		}
+	}
+	return measured, nil
+}
+
+// fetchStatisticsBloat estimates table and btree index bloat from statistics for
+// relations of at least minBytes, largest bloat first.
+func fetchStatisticsBloat(ctx context.Context, db *sql.DB, minBytes int64, limit int) ([]BloatEstimate, error) {
 	tableQuery := `
 		SELECT 'table', schemaname, tblname, '', (bs * tblpages)::bigint,
 		       CASE WHEN tblpages - est_tblpages_ff > 0 THEN ((tblpages - est_tblpages_ff) * bs)::bigint ELSE 0 END,
@@ -6071,7 +6184,7 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 				       heappages + toastpages AS tblpages, reltuples, toasttuples, bs, page_hdr, schemaname, tblname,
 				       fillfactor, is_na
 				FROM (
-					SELECT ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,
+					SELECT ns.nspname AS schemaname, tbl.relname AS tblname, GREATEST(tbl.reltuples, 0) AS reltuples,
 					       tbl.relpages AS heappages, COALESCE(toast.relpages, 0) AS toastpages,
 					       COALESCE(toast.reltuples, 0) AS toasttuples,
 					       COALESCE(substring(array_to_string(tbl.reloptions, ' ') FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,
@@ -6081,7 +6194,8 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 					       23 + CASE WHEN max(COALESCE(s.null_frac, 0)) > 0 THEN (7 + count(s.attname)) / 8 ELSE 0::int END AS tpl_hdr_size,
 					       sum((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 0)) AS tpl_data_size,
 					       bool_or(att.atttypid = 'pg_catalog.name'::regtype)
-					         OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na
+					         OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname)
+					         OR tbl.reltuples < 0 AS is_na
 					FROM pg_attribute att
 					JOIN pg_class tbl ON att.attrelid = tbl.oid
 					JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
@@ -6090,9 +6204,8 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 					LEFT JOIN pg_class toast ON tbl.reltoastrelid = toast.oid
 					WHERE NOT att.attisdropped AND att.attnum > 0
 					  AND tbl.relkind IN ('r', 'm')
-					  AND tbl.reltuples >= 0
 					  AND ns.nspname ` + fmt.Sprintf(bloatSchemaFilter, "ns.nspname") + `
-					GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+					GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, tbl.reltuples
 				) table_stats
 			) table_sizes
 		) table_estimates`
@@ -6123,7 +6236,8 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 					       24 AS pagehdr, 16 AS pageopqdata,
 					       CASE WHEN max(COALESCE(s.null_frac, 0)) = 0 THEN 8 ELSE 8 + ((32 + 8 - 1) / 8) END AS index_tuple_hdr_bm,
 					       sum((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 1024)) AS nulldatawidth,
-					       max(CASE WHEN i.atttypid = 'pg_catalog.name'::regtype THEN 1 ELSE 0 END) > 0 AS is_na
+					       max(CASE WHEN i.atttypid = 'pg_catalog.name'::regtype THEN 1 ELSE 0 END) > 0
+					         OR i.reltuples < 0 AS is_na
 					FROM (
 						SELECT ct.relname AS tblname, ct.relnamespace, ic.idxname, ic.reltuples, ic.relpages, ic.fillfactor,
 						       COALESCE(a1.attname, a2.attname) AS attname, COALESCE(a1.atttypid, a2.atttypid) AS atttypid,
@@ -6140,7 +6254,7 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 								FROM pg_index i
 								JOIN pg_class ci ON ci.oid = i.indexrelid
 								WHERE ci.relam = (SELECT oid FROM pg_am WHERE amname = 'btree')
-								  AND ci.relpages > 0 AND ci.reltuples >= 0
+								  AND ci.relpages > 0
 							) idx_data
 						) ic
 						JOIN pg_class ct ON ct.oid = ic.tbloid
@@ -6171,6 +6285,12 @@ func FetchBloatEstimates(ctx context.Context, db *sql.DB, minBytes int64, limit 
 		if err := rows.Scan(&b.Kind, &b.SchemaName, &b.TableName, &b.IndexName, &b.RealBytes, &b.BloatBytes,
 			&b.BloatPct, &b.Fillfactor, &b.NotApplicable); err != nil {
 			return nil, err
+		}
+		b.Method = "statistics"
+		// Relations never analyzed (reltuples -1) or without column statistics get no
+		// meaningful estimate; they stay listed so pgstattuple can still measure them.
+		if b.NotApplicable {
+			b.BloatBytes, b.BloatPct = 0, 0
 		}
 		results = append(results, b)
 	}
