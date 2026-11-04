@@ -400,46 +400,75 @@ func FetchLongRunningQueries(ctx context.Context, db *sql.DB, minDurationSeconds
 	return results, rows.Err()
 }
 
-// BlockedQuery represents a session that is blocked by another session's lock.
+// BlockedQuery is one (waiting session, session it waits for) pair. A session queued
+// behind several others appears once per blocker.
 type BlockedQuery struct {
 	BlockedPID          int
 	BlockedUser         string
-	BlockingPID         int
+	BlockingPID         int // 0 for a prepared transaction, which has no backend
 	BlockingUser        string
 	BlockedStatement    string
 	BlockingStatement   string
 	BlockedApplication  string
 	BlockingApplication string
+	LockType            string // pg_locks.locktype of the lock being waited for (relation, tuple, transactionid, …)
+	LockMode            string // requested mode, e.g. ShareLock, AccessExclusiveLock
+	Relation            string // locked relation when the lock is on one; "" otherwise
+	// WaitSeconds is how long the lock has been waited for (pg_locks.waitstart, PG14+);
+	// nil before or when the wait just started.
+	WaitSeconds         *float64
+	BlockedXactSeconds  *float64
+	BlockingState       string // e.g. "idle in transaction": the blocker is not even running
+	BlockingXactSeconds *float64
+	// RootBlockerPID is the session at the head of the chain: it blocks others and waits
+	// for nobody. Depth is how many waits separate BlockedPID from it (1 = direct).
+	RootBlockerPID int
+	Depth          int
 }
 
+// FetchBlockedQueries lists every waiting session with the sessions it waits for, from
+// pg_blocking_pids(): unlike a pg_locks self-join it also sees sessions queued behind
+// another waiter (e.g. behind a pending ACCESS EXCLUSIVE request).
 func FetchBlockedQueries(ctx context.Context, db *sql.DB) ([]BlockedQuery, error) {
+	// pg_locks.waitstart was added in PG14.
+	waitStartColumn, waitColumn := "", "NULL::float8"
+	if pgMajorVersion() >= 14 {
+		waitStartColumn, waitColumn = ", waitstart", "EXTRACT(EPOCH FROM now() - l.waitstart)::float8"
+	}
 	rows, err := db.QueryContext(ctx, `
+		WITH waits AS (
+			SELECT a.pid, unnest(pg_blocking_pids(a.pid)) AS blocking_pid
+			FROM pg_stat_activity a
+			WHERE a.wait_event_type = 'Lock'
+		)
 		SELECT
-			blocked_locks.pid,
-			COALESCE(blocked_activity.usename, ''),
-			blocking_locks.pid,
-			-- the blocker can be a background process (e.g. autovacuum) with no user
-			COALESCE(blocking_activity.usename, ''),
-			COALESCE(blocked_activity.query, ''),
-			COALESCE(blocking_activity.query, ''),
-			COALESCE(blocked_activity.application_name, ''),
-			COALESCE(blocking_activity.application_name, '')
-		FROM pg_catalog.pg_locks blocked_locks
-		JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
-		JOIN pg_catalog.pg_locks blocking_locks
-			ON blocking_locks.locktype = blocked_locks.locktype
-			AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
-			AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
-			AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
-			AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
-			AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
-			AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
-			AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
-			AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
-			AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
-			AND blocking_locks.pid != blocked_locks.pid
-		JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
-		WHERE NOT blocked_locks.GRANTED`)
+			w.pid,
+			COALESCE(blocked.usename, ''),
+			w.blocking_pid,
+			-- the blocker can be a background process (e.g. autovacuum) with no user, or a
+			-- prepared transaction with no backend at all
+			COALESCE(blocking.usename, ''),
+			COALESCE(blocked.query, ''),
+			COALESCE(blocking.query, ''),
+			COALESCE(blocked.application_name, ''),
+			COALESCE(blocking.application_name, ''),
+			COALESCE(l.locktype, ''),
+			COALESCE(l.mode, ''),
+			COALESCE(l.relation::regclass::text, ''),
+			`+waitColumn+`,
+			EXTRACT(EPOCH FROM now() - blocked.xact_start)::float8,
+			COALESCE(blocking.state, ''),
+			EXTRACT(EPOCH FROM now() - blocking.xact_start)::float8
+		FROM waits w
+		JOIN pg_stat_activity blocked ON blocked.pid = w.pid
+		LEFT JOIN pg_stat_activity blocking ON blocking.pid = w.blocking_pid
+		LEFT JOIN LATERAL (
+			SELECT locktype, mode, relation`+waitStartColumn+`
+			FROM pg_locks
+			WHERE pid = w.pid AND NOT granted
+			LIMIT 1
+		) l ON true
+		ORDER BY w.pid, w.blocking_pid`)
 	if err != nil {
 		return nil, err
 	}
@@ -451,12 +480,140 @@ func FetchBlockedQueries(ctx context.Context, db *sql.DB) ([]BlockedQuery, error
 			&q.BlockedPID, &q.BlockedUser, &q.BlockingPID, &q.BlockingUser,
 			&q.BlockedStatement, &q.BlockingStatement,
 			&q.BlockedApplication, &q.BlockingApplication,
+			&q.LockType, &q.LockMode, &q.Relation, &q.WaitSeconds,
+			&q.BlockedXactSeconds, &q.BlockingState, &q.BlockingXactSeconds,
 		); err != nil {
 			return nil, err
 		}
 		results = append(results, q)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	resolveLockChains(results)
+	return results, nil
+}
+
+// resolveLockChains fills RootBlockerPID and Depth by following each session's first
+// blocker until a session that waits for nobody. A deadlock cycle (resolved by the
+// deadlock detector within deadlock_timeout) stops at the first repeated session.
+func resolveLockChains(waits []BlockedQuery) {
+	firstBlocker := map[int]int{}
+	for _, wait := range waits {
+		if _, seen := firstBlocker[wait.BlockedPID]; !seen {
+			firstBlocker[wait.BlockedPID] = wait.BlockingPID
+		}
+	}
+	for i := range waits {
+		root, depth := waits[i].BlockingPID, 1
+		visited := map[int]bool{waits[i].BlockedPID: true}
+		for {
+			next, waiting := firstBlocker[root]
+			if !waiting || visited[root] {
+				break
+			}
+			visited[root] = true
+			root, depth = next, depth+1
+		}
+		waits[i].RootBlockerPID, waits[i].Depth = root, depth
+	}
+}
+
+// RootBlocker is a session at the head of a lock chain with how many sessions wait on
+// it, directly or transitively.
+type RootBlocker struct {
+	PID             int
+	WaitingSessions int
+	State           string
+	XactSeconds     *float64
+	Statement       string
+}
+
+// RootBlockers groups waits by their RootBlockerPID, most waiters first.
+func RootBlockers(waits []BlockedQuery) []RootBlocker {
+	waiting := map[int]map[int]bool{}
+	details := map[int]RootBlocker{}
+	for _, wait := range waits {
+		if waiting[wait.RootBlockerPID] == nil {
+			waiting[wait.RootBlockerPID] = map[int]bool{}
+		}
+		waiting[wait.RootBlockerPID][wait.BlockedPID] = true
+		if wait.Depth == 1 {
+			details[wait.RootBlockerPID] = RootBlocker{PID: wait.RootBlockerPID, State: wait.BlockingState,
+				XactSeconds: wait.BlockingXactSeconds, Statement: wait.BlockingStatement}
+		}
+	}
+	roots := []RootBlocker{}
+	for pid, sessions := range waiting {
+		root := details[pid]
+		root.PID, root.WaitingSessions = pid, len(sessions)
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if roots[i].WaitingSessions != roots[j].WaitingSessions {
+			return roots[i].WaitingSessions > roots[j].WaitingSessions
+		}
+		return roots[i].PID < roots[j].PID
+	})
+	return roots
+}
+
+// LockCount is the number of pg_locks entries of one lock type and mode.
+type LockCount struct {
+	LockType string
+	Mode     string
+	Granted  int64
+	Waiting  int64
+}
+
+// LockSummary describes the shared lock table: what is locked and how full it is.
+type LockSummary struct {
+	Total int64
+	// Capacity is max_locks_per_transaction × (max_connections + max_prepared_transactions),
+	// the number of object locks the shared lock table is sized for; running out raises
+	// "out of shared memory". Fast-path locks (fastpath = true) don't use it.
+	Capacity     int64
+	SharedLocks  int64 // non-fast-path entries, the ones that use Capacity
+	UsagePct     float64
+	AdvisoryHeld int64
+	Counts       []LockCount
+}
+
+// FetchLockSummary counts pg_locks entries by lock type and mode.
+func FetchLockSummary(ctx context.Context, db *sql.DB) (LockSummary, error) {
+	var summary LockSummary
+	err := db.QueryRowContext(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE NOT fastpath),
+		       count(*) FILTER (WHERE locktype = 'advisory' AND granted),
+		       current_setting('max_locks_per_transaction')::bigint *
+		       (current_setting('max_connections')::bigint + current_setting('max_prepared_transactions')::bigint)
+		FROM pg_locks`,
+	).Scan(&summary.Total, &summary.SharedLocks, &summary.AdvisoryHeld, &summary.Capacity)
+	if err != nil {
+		return summary, err
+	}
+	if summary.Capacity > 0 {
+		summary.UsagePct = float64(summary.SharedLocks) / float64(summary.Capacity) * 100
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT locktype, mode, count(*) FILTER (WHERE granted), count(*) FILTER (WHERE NOT granted)
+		FROM pg_locks
+		GROUP BY 1, 2
+		ORDER BY count(*) FILTER (WHERE NOT granted) DESC, count(*) DESC, 1, 2`)
+	if err != nil {
+		return summary, err
+	}
+	defer rows.Close()
+	summary.Counts = []LockCount{}
+	for rows.Next() {
+		var count LockCount
+		if err := rows.Scan(&count.LockType, &count.Mode, &count.Granted, &count.Waiting); err != nil {
+			return summary, err
+		}
+		summary.Counts = append(summary.Counts, count)
+	}
+	return summary, rows.Err()
 }
 
 // ConnectionState is one (state, count) pair from pg_stat_activity.
@@ -735,12 +892,35 @@ type AutovacuumTable struct {
 	// threshold is 0.
 	TriggerThreshold float64
 	TriggerRatio     *float64
+	// AnalyzeThreshold is the modified-row count that triggers autoanalyze; AnalyzeRatio
+	// is ModSinceAnalyze ÷ AnalyzeThreshold (≥ 1 = analyze due), nil when the threshold is 0.
+	AnalyzeThreshold float64
+	AnalyzeRatio     *float64
+	// NeverAnalyzed: neither ANALYZE nor autoanalyze has run since the stats reset, so the
+	// planner works from default estimates.
+	NeverAnalyzed bool
 }
+
+// AutovacuumOrderings are the orders FetchAutovacuum accepts: dead tuples (default) or
+// analyze staleness (AnalyzeRatio, never-analyzed tables with modifications first).
+var AutovacuumOrderings = []string{"dead_tuples", "analyze"}
 
 // HasOverrides reports whether the table sets any autovacuum_* reloption.
 func (t AutovacuumTable) HasOverrides() bool { return len(t.Overrides) > 0 }
 
-func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTable, error) {
+func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int, orderBy string) ([]AutovacuumTable, error) {
+	switch orderBy {
+	case "", "dead_tuples":
+	case "analyze":
+	default:
+		return nil, fmt.Errorf("order_by must be one of %s", strings.Join(AutovacuumOrderings, ", "))
+	}
+	// Analyze staleness is computed from the thresholds below, so for that order every
+	// table is read and the limit applied after sorting.
+	sqlLimit := limit
+	if orderBy == "analyze" {
+		sqlLimit = NoRowLimit
+	}
 	globals, _, err := fetchGlobalSettings(ctx, db, append(slices.Clone(autovacuumThresholdGlobals), autovacuumCostGlobals...))
 	if err != nil {
 		return nil, err
@@ -778,7 +958,7 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 		FROM pg_stat_user_tables s
 		JOIN pg_class c ON c.oid = s.relid
 		ORDER BY s.n_dead_tup DESC
-		LIMIT NULLIF($1::int, 0)`, limit)
+		LIMIT NULLIF($1::int, 0)`, sqlLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -816,10 +996,47 @@ func FetchAutovacuum(ctx context.Context, db *sql.DB, limit int) ([]AutovacuumTa
 			ratio := float64(t.DeadTuples) / t.TriggerThreshold
 			t.TriggerRatio = &ratio
 		}
+		t.AnalyzeThreshold = thresholds.Analyze.Threshold
+		if t.AnalyzeThreshold > 0 {
+			ratio := float64(t.ModSinceAnalyze) / t.AnalyzeThreshold
+			t.AnalyzeRatio = &ratio
+		}
+		t.NeverAnalyzed = t.LastAnalyze == nil && t.LastAutoanalyze == nil
 		t.Cost = effectiveAutovacuumCost(in.TableOptions, globals)
 		results = append(results, t)
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if orderBy == "analyze" {
+		sortByAnalyzeStaleness(results)
+		if limit > 0 && len(results) > limit {
+			results = results[:limit]
+		}
+	}
+	return results, nil
+}
+
+// sortByAnalyzeStaleness puts never-analyzed tables with modifications first, then the
+// highest AnalyzeRatio, then the most modified rows.
+func sortByAnalyzeStaleness(tables []AutovacuumTable) {
+	ratio := func(t AutovacuumTable) float64 {
+		if t.AnalyzeRatio == nil {
+			return 0
+		}
+		return *t.AnalyzeRatio
+	}
+	sort.SliceStable(tables, func(i, j int) bool {
+		leftNever := tables[i].NeverAnalyzed && tables[i].ModSinceAnalyze > 0
+		rightNever := tables[j].NeverAnalyzed && tables[j].ModSinceAnalyze > 0
+		if leftNever != rightNever {
+			return leftNever
+		}
+		if ratio(tables[i]) != ratio(tables[j]) {
+			return ratio(tables[i]) > ratio(tables[j])
+		}
+		return tables[i].ModSinceAnalyze > tables[j].ModSinceAnalyze
+	})
 }
 
 // ToastTable holds TOAST-related stats for a user table that has actual TOAST data on disk.
@@ -1558,44 +1775,29 @@ type QueryLoad struct {
 }
 
 func FetchQueryLoad(ctx context.Context, db *sql.DB, limit int) ([]QueryLoad, error) {
-	pgss, err := requirePgStatStatements(ctx, db)
+	stats, err := FetchStatementStats(ctx, db, StatementStatsOptions{OrderBy: "total_time", Limit: limit})
 	if err != nil {
 		return nil, err
 	}
-	// Column names come from pgStatStatementsColumns (fixed identifiers), never user input.
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT
-			queryid::text,
-			query,
-			calls,
-			ROUND(%[1]s::numeric) AS total_ms,
-			ROUND(%[2]s::numeric, 2) AS mean_ms,
-			ROUND(((shared_blks_hit + shared_blks_read) * 8.0 / 1024)::numeric, 1) AS buffer_mb,
-			ROUND((temp_blks_written * 8.0 / 1024)::numeric, 1) AS temp_mb,
-			COALESCE(
-				ROUND((100.0 * %[1]s / NULLIF(SUM(%[1]s) OVER(), 0))::numeric, 1),
-				0
-			) AS load_pct
-		FROM %[3]s
-		ORDER BY %[1]s DESC
-		LIMIT NULLIF($1::int, 0)`,
-		pgss.TotalTimeColumn, pgss.MeanTimeColumn, pgss.Relation), limit)
-	if err != nil {
-		return nil, err
+	round := func(value float64, decimals int) float64 {
+		scale := math.Pow(10, float64(decimals))
+		return math.Round(value*scale) / scale
 	}
-	defer rows.Close()
+	megabytes := func(blocks int64) float64 { return round(float64(blocks*stats.BlockSize)/(1<<20), 1) }
 	var results []QueryLoad
-	for rows.Next() {
-		var q QueryLoad
-		if err := rows.Scan(
-			&q.QueryID, &q.Query, &q.Calls,
-			&q.TotalMS, &q.MeanMS, &q.BufferMB, &q.TempMB, &q.LoadPct,
-		); err != nil {
-			return nil, err
-		}
-		results = append(results, q)
+	for _, statement := range stats.Statements {
+		results = append(results, QueryLoad{
+			QueryID:  statement.QueryID,
+			Query:    statement.Query,
+			Calls:    int(statement.Calls),
+			TotalMS:  round(statement.TotalExecMS, 0),
+			MeanMS:   round(statement.MeanExecMS, 2),
+			BufferMB: megabytes(statement.SharedBlksHit + statement.SharedBlksRead),
+			TempMB:   megabytes(statement.TempBlksWritten),
+			LoadPct:  round(statement.LoadPct, 1),
+		})
 	}
-	return results, rows.Err()
+	return results, nil
 }
 
 // ReplicationSlot holds information from pg_replication_slots.
@@ -4974,4 +5176,499 @@ func fetchOwnedSequences(ctx context.Context, db *sql.DB, oids []int64) (map[int
 		results[relID] = append(results[relID], sequence)
 	}
 	return results, rows.Err()
+}
+
+// StatementStat is one pg_stat_statements entry with every counter the installed
+// extension version has. Fields that need a newer extension are nil on older ones.
+type StatementStat struct {
+	QueryID           string
+	UserID            int64
+	DBID              int64
+	Query             string
+	Calls             int64
+	Rows              int64
+	TotalExecMS       float64
+	MeanExecMS        float64
+	Plans             *int64   // 1.8+
+	TotalPlanMS       *float64 // 1.8+; 0 unless pg_stat_statements.track_planning is on
+	SharedBlksHit     int64
+	SharedBlksRead    int64
+	SharedBlksDirtied int64
+	SharedBlksWritten int64
+	TempBlksRead      int64
+	TempBlksWritten   int64
+	// BlkReadTimeMS / BlkWriteTimeMS are shared + local block I/O time (blk_*_time
+	// before 1.11); 0 unless track_io_timing is on.
+	BlkReadTimeMS  float64
+	BlkWriteTimeMS float64
+	TempBlkTimeMS  *float64 // temp file read + write time, 1.10+
+	WALRecords     *int64   // 1.8+
+	WALFPI         *int64   // 1.8+
+	WALBytes       *float64 // 1.8+
+	JITFunctions   *int64   // 1.10+
+	JITTimeMS      *float64 // generation + inlining + optimization + emission (+ deform on 1.11+), 1.10+
+	// LoadPct is TotalExecMS as a share of every statement's execution time.
+	LoadPct float64
+}
+
+// HitPct is the statement's shared buffer hit ratio; nil when it read no blocks.
+func (s StatementStat) HitPct() *float64 {
+	total := s.SharedBlksHit + s.SharedBlksRead
+	if total == 0 {
+		return nil
+	}
+	pct := float64(s.SharedBlksHit) / float64(total) * 100
+	return &pct
+}
+
+// StatementStatsOptions selects and orders FetchStatementStats rows. Delta > 0 reads
+// pg_stat_statements twice that far apart and reports only what happened in between.
+type StatementStatsOptions struct {
+	OrderBy string // one of StatementOrderings; "" = total_time
+	Limit   int
+	Delta   time.Duration
+}
+
+// StatementStats is the result of FetchStatementStats.
+type StatementStats struct {
+	Info            PgStatStatementsInfo
+	Statements      []StatementStat
+	OrderBy         string
+	IntervalSeconds float64 // 0 = cumulative since pg_stat_statements_reset()
+	BlockSize       int64
+	Warnings        []string
+}
+
+// statementOrderColumns maps each order_by value to the column alias of statementStatsQuery.
+var statementOrderColumns = map[string]string{
+	"total_time":          "total_exec_ms",
+	"mean_time":           "mean_exec_ms",
+	"calls":               "calls",
+	"rows":                "rows",
+	"shared_blks_read":    "shared_blks_read",
+	"shared_blks_dirtied": "shared_blks_dirtied",
+	"shared_blks_written": "shared_blks_written",
+	"temp_blks_written":   "temp_blks_written",
+	"blk_read_time":       "blk_read_ms",
+	"wal_bytes":           "wal_bytes",
+	"plan_time":           "total_plan_ms",
+	"jit_time":            "jit_ms",
+}
+
+// StatementOrderings lists the order_by values FetchStatementStats accepts.
+var StatementOrderings = []string{"total_time", "mean_time", "calls", "rows", "shared_blks_read", "shared_blks_dirtied",
+	"shared_blks_written", "temp_blks_written", "blk_read_time", "wal_bytes", "plan_time", "jit_time"}
+
+// statementSortValue is the value a delta result is sorted by; nil sorts last.
+func statementSortValue(s StatementStat, orderBy string) *float64 {
+	value := func(v float64) *float64 { return &v }
+	switch orderBy {
+	case "mean_time":
+		return value(s.MeanExecMS)
+	case "calls":
+		return value(float64(s.Calls))
+	case "rows":
+		return value(float64(s.Rows))
+	case "shared_blks_read":
+		return value(float64(s.SharedBlksRead))
+	case "shared_blks_dirtied":
+		return value(float64(s.SharedBlksDirtied))
+	case "shared_blks_written":
+		return value(float64(s.SharedBlksWritten))
+	case "temp_blks_written":
+		return value(float64(s.TempBlksWritten))
+	case "blk_read_time":
+		return value(s.BlkReadTimeMS)
+	case "wal_bytes":
+		return s.WALBytes
+	case "plan_time":
+		return s.TotalPlanMS
+	case "jit_time":
+		return s.JITTimeMS
+	}
+	return value(s.TotalExecMS)
+}
+
+// statementStatsQuery builds the SELECT over pg_stat_statements for the installed
+// extension version. Every identifier comes from fixed strings, never user input.
+func statementStatsQuery(info PgStatStatementsInfo) string {
+	atLeast := func(version string) bool { return compareExtensionVersions(info.Version, version) >= 0 }
+	planColumns := "NULL::bigint AS plans, NULL::float8 AS total_plan_ms"
+	walColumns := "NULL::bigint AS wal_records, NULL::bigint AS wal_fpi, NULL::float8 AS wal_bytes"
+	if atLeast("1.8") {
+		planColumns = "plans, total_plan_time AS total_plan_ms"
+		walColumns = "wal_records, wal_fpi, wal_bytes::float8 AS wal_bytes"
+	}
+	// 1.11 split blk_*_time into shared_/local_blk_*_time and added jit_deform_time.
+	ioTimeColumns := "blk_read_time AS blk_read_ms, blk_write_time AS blk_write_ms"
+	if atLeast("1.11") {
+		ioTimeColumns = "shared_blk_read_time + local_blk_read_time AS blk_read_ms, shared_blk_write_time + local_blk_write_time AS blk_write_ms"
+	}
+	tempTimeColumn := "NULL::float8 AS temp_blk_ms"
+	jitColumns := "NULL::bigint AS jit_functions, NULL::float8 AS jit_ms"
+	if atLeast("1.10") {
+		tempTimeColumn = "temp_blk_read_time + temp_blk_write_time AS temp_blk_ms"
+		jitTime := "jit_generation_time + jit_inlining_time + jit_optimization_time + jit_emission_time"
+		if atLeast("1.11") {
+			jitTime += " + jit_deform_time"
+		}
+		jitColumns = "jit_functions, " + jitTime + " AS jit_ms"
+	}
+	return fmt.Sprintf(`
+		SELECT queryid::text, userid::bigint, dbid::bigint, query, calls, rows,
+		       %[1]s AS total_exec_ms, %[2]s AS mean_exec_ms, %[3]s,
+		       shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written,
+		       temp_blks_read, temp_blks_written, %[4]s, %[5]s, %[6]s, %[7]s,
+		       COALESCE(100.0 * %[1]s / NULLIF(SUM(%[1]s) OVER (), 0), 0)::float8 AS load_pct
+		FROM %[8]s`,
+		info.TotalTimeColumn, info.MeanTimeColumn, planColumns, ioTimeColumns, tempTimeColumn, walColumns, jitColumns, info.Relation)
+}
+
+func scanStatementStats(rows *sql.Rows) ([]StatementStat, error) {
+	defer rows.Close()
+	results := []StatementStat{}
+	for rows.Next() {
+		var s StatementStat
+		if err := rows.Scan(&s.QueryID, &s.UserID, &s.DBID, &s.Query, &s.Calls, &s.Rows,
+			&s.TotalExecMS, &s.MeanExecMS, &s.Plans, &s.TotalPlanMS,
+			&s.SharedBlksHit, &s.SharedBlksRead, &s.SharedBlksDirtied, &s.SharedBlksWritten,
+			&s.TempBlksRead, &s.TempBlksWritten, &s.BlkReadTimeMS, &s.BlkWriteTimeMS, &s.TempBlkTimeMS,
+			&s.WALRecords, &s.WALFPI, &s.WALBytes, &s.JITFunctions, &s.JITTimeMS, &s.LoadPct); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, rows.Err()
+}
+
+// FetchStatementStats reads pg_stat_statements with every counter the extension version
+// has, ordered by opts.OrderBy. With opts.Delta it samples twice and returns the
+// difference, so the numbers describe the last few seconds instead of everything since
+// the last reset.
+func FetchStatementStats(ctx context.Context, db *sql.DB, opts StatementStatsOptions) (StatementStats, error) {
+	result := StatementStats{OrderBy: opts.OrderBy, IntervalSeconds: opts.Delta.Seconds()}
+	if result.OrderBy == "" {
+		result.OrderBy = "total_time"
+	}
+	orderColumn, ok := statementOrderColumns[result.OrderBy]
+	if !ok {
+		return result, fmt.Errorf("order_by must be one of %s", strings.Join(StatementOrderings, ", "))
+	}
+	info, err := requirePgStatStatements(ctx, db)
+	if err != nil {
+		return result, err
+	}
+	result.Info = info
+	var trackIOTiming string
+	var trackPlanning sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT current_setting('block_size')::bigint, current_setting('track_io_timing'),
+		       current_setting('pg_stat_statements.track_planning', true)`,
+	).Scan(&result.BlockSize, &trackIOTiming, &trackPlanning); err != nil {
+		return result, err
+	}
+	if trackIOTiming != "on" {
+		result.Warnings = append(result.Warnings, "track_io_timing is off: blk_read_time_ms / blk_write_time_ms stay 0")
+	}
+	if compareExtensionVersions(info.Version, "1.8") >= 0 && trackPlanning.String != "on" {
+		result.Warnings = append(result.Warnings, "pg_stat_statements.track_planning is off: plan time is not collected")
+	}
+	if hint := info.UpdateHint(); hint != "" {
+		result.Warnings = append(result.Warnings, hint)
+	}
+
+	query := statementStatsQuery(info)
+	if opts.Delta <= 0 {
+		rows, err := db.QueryContext(ctx, `SELECT * FROM (`+query+`) s
+			ORDER BY `+orderColumn+` DESC NULLS LAST
+			LIMIT NULLIF($1::int, 0)`, opts.Limit)
+		if err != nil {
+			return result, err
+		}
+		result.Statements, err = scanStatementStats(rows)
+		return result, err
+	}
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return result, err
+	}
+	before, err := scanStatementStats(rows)
+	if err != nil {
+		return result, err
+	}
+	select {
+	case <-time.After(opts.Delta):
+	case <-ctx.Done():
+		return result, ctx.Err()
+	}
+	if rows, err = db.QueryContext(ctx, query); err != nil {
+		return result, err
+	}
+	after, err := scanStatementStats(rows)
+	if err != nil {
+		return result, err
+	}
+	result.Statements = diffStatementStats(before, after)
+	sort.SliceStable(result.Statements, func(i, j int) bool {
+		left, right := statementSortValue(result.Statements[i], result.OrderBy), statementSortValue(result.Statements[j], result.OrderBy)
+		if left == nil || right == nil {
+			return right == nil && left != nil
+		}
+		return *left > *right
+	})
+	if opts.Limit > 0 && len(result.Statements) > opts.Limit {
+		result.Statements = result.Statements[:opts.Limit]
+	}
+	return result, nil
+}
+
+// diffStatementStats returns after − before for statements that ran in between. A
+// statement missing from before is new (or was evicted and came back) and counts from 0;
+// one whose calls went down was reset, so its after values are taken as they are.
+func diffStatementStats(before, after []StatementStat) []StatementStat {
+	type statementKey struct {
+		queryID      string
+		userID, dbID int64
+	}
+	previous := make(map[statementKey]StatementStat, len(before))
+	for _, s := range before {
+		previous[statementKey{s.QueryID, s.UserID, s.DBID}] = s
+	}
+	subtractInt := func(after, before *int64) *int64 {
+		if after == nil || before == nil {
+			return after
+		}
+		value := *after - *before
+		return &value
+	}
+	subtractFloat := func(after, before *float64) *float64 {
+		if after == nil || before == nil {
+			return after
+		}
+		value := *after - *before
+		return &value
+	}
+	results := []StatementStat{}
+	totalExec := 0.0
+	for _, s := range after {
+		old, found := previous[statementKey{s.QueryID, s.UserID, s.DBID}]
+		if found && s.Calls < old.Calls {
+			found = false
+		}
+		if found {
+			if s.Calls == old.Calls {
+				continue
+			}
+			s.Calls -= old.Calls
+			s.Rows -= old.Rows
+			s.TotalExecMS -= old.TotalExecMS
+			s.Plans = subtractInt(s.Plans, old.Plans)
+			s.TotalPlanMS = subtractFloat(s.TotalPlanMS, old.TotalPlanMS)
+			s.SharedBlksHit -= old.SharedBlksHit
+			s.SharedBlksRead -= old.SharedBlksRead
+			s.SharedBlksDirtied -= old.SharedBlksDirtied
+			s.SharedBlksWritten -= old.SharedBlksWritten
+			s.TempBlksRead -= old.TempBlksRead
+			s.TempBlksWritten -= old.TempBlksWritten
+			s.BlkReadTimeMS -= old.BlkReadTimeMS
+			s.BlkWriteTimeMS -= old.BlkWriteTimeMS
+			s.TempBlkTimeMS = subtractFloat(s.TempBlkTimeMS, old.TempBlkTimeMS)
+			s.WALRecords = subtractInt(s.WALRecords, old.WALRecords)
+			s.WALFPI = subtractInt(s.WALFPI, old.WALFPI)
+			s.WALBytes = subtractFloat(s.WALBytes, old.WALBytes)
+			s.JITFunctions = subtractInt(s.JITFunctions, old.JITFunctions)
+			s.JITTimeMS = subtractFloat(s.JITTimeMS, old.JITTimeMS)
+		}
+		if s.Calls > 0 {
+			s.MeanExecMS = s.TotalExecMS / float64(s.Calls)
+		}
+		totalExec += s.TotalExecMS
+		results = append(results, s)
+	}
+	for i := range results {
+		results[i].LoadPct = 0
+		if totalExec > 0 {
+			results[i].LoadPct = results[i].TotalExecMS / totalExec * 100
+		}
+	}
+	return results
+}
+
+// OperationProgress is one long-running maintenance or bulk operation from the
+// pg_stat_progress_* views (VACUUM has its own, richer FetchVacuumProgress).
+type OperationProgress struct {
+	Command  string // CREATE INDEX [CONCURRENTLY], REINDEX…, ANALYZE, CLUSTER, VACUUM FULL, COPY FROM/TO, BASE_BACKUP
+	PID      int
+	Database string
+	Relation string
+	Index    string // CREATE INDEX / CLUSTER target index, "" otherwise
+	Phase    string
+	// Done / Total are the progress counters in Unit (blocks, tuples, sample blocks,
+	// bytes); PctDone is nil when the total is unknown.
+	Done    *int64
+	Total   *int64
+	Unit    string
+	PctDone *float64
+	// LockersWaiting counts transactions a CREATE INDEX CONCURRENTLY / REINDEX
+	// CONCURRENTLY phase is waiting for; nil for other commands.
+	LockersWaiting  *int64
+	DurationSeconds *float64
+	Query           string
+}
+
+// FetchOperationProgress lists running CREATE INDEX, ANALYZE (PG13+), CLUSTER / VACUUM
+// FULL, COPY (PG14+) and base backups (PG13+) with their phase and % done.
+func FetchOperationProgress(ctx context.Context, db *sql.DB) ([]OperationProgress, error) {
+	majorVersion := pgMajorVersion()
+	parts := []string{`
+		SELECT p.pid, p.datname::text, p.relid::regclass::text, COALESCE(NULLIF(p.index_relid, 0)::regclass::text, ''),
+		       p.command, p.phase,
+		       CASE WHEN p.blocks_total > 0 THEN p.blocks_done ELSE p.tuples_done END,
+		       CASE WHEN p.blocks_total > 0 THEN p.blocks_total ELSE NULLIF(p.tuples_total, 0) END,
+		       CASE WHEN p.blocks_total > 0 THEN 'blocks' ELSE 'tuples' END,
+		       CASE WHEN p.lockers_total > 0 THEN p.lockers_total - p.lockers_done END
+		FROM pg_stat_progress_create_index p`, `
+		SELECT p.pid, p.datname::text, p.relid::regclass::text, COALESCE(NULLIF(p.cluster_index_relid, 0)::regclass::text, ''),
+		       p.command, p.phase, p.heap_blks_scanned, NULLIF(p.heap_blks_total, 0), 'blocks', NULL::bigint
+		FROM pg_stat_progress_cluster p`}
+	// pg_stat_progress_analyze and pg_stat_progress_basebackup were added in PG13 —
+	// every supported version has them.
+	parts = append(parts, `
+		SELECT p.pid, p.datname::text, p.relid::regclass::text, '', 'ANALYZE', p.phase,
+		       p.sample_blks_scanned, NULLIF(p.sample_blks_total, 0), 'sample blocks', NULL::bigint
+		FROM pg_stat_progress_analyze p`, `
+		SELECT p.pid, '', '', '', 'BASE_BACKUP', p.phase,
+		       p.backup_streamed, p.backup_total, 'bytes', NULL::bigint
+		FROM pg_stat_progress_basebackup p`)
+	// pg_stat_progress_copy was added in PG14.
+	if majorVersion >= 14 {
+		parts = append(parts, `
+		SELECT p.pid, p.datname::text, COALESCE(NULLIF(p.relid, 0)::regclass::text, ''), '', p.command, p.type,
+		       CASE WHEN p.bytes_total > 0 THEN p.bytes_processed ELSE p.tuples_processed END,
+		       NULLIF(p.bytes_total, 0),
+		       CASE WHEN p.bytes_total > 0 THEN 'bytes' ELSE 'tuples' END,
+		       NULL::bigint
+		FROM pg_stat_progress_copy p`)
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH progress (pid, database, relation, index_name, command, phase, done, total, unit, lockers_waiting) AS (`+
+		strings.Join(parts, "\n\t\tUNION ALL")+`
+		)
+		SELECT pr.pid, COALESCE(pr.database, ''), COALESCE(pr.relation, ''), pr.index_name, pr.command, pr.phase,
+		       pr.done, pr.total, pr.unit, pr.lockers_waiting,
+		       EXTRACT(EPOCH FROM now() - a.query_start)::float8, COALESCE(a.query, '')
+		FROM progress pr
+		LEFT JOIN pg_stat_activity a ON a.pid = pr.pid
+		ORDER BY a.query_start NULLS LAST, pr.pid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []OperationProgress{}
+	for rows.Next() {
+		var p OperationProgress
+		if err := rows.Scan(&p.PID, &p.Database, &p.Relation, &p.Index, &p.Command, &p.Phase,
+			&p.Done, &p.Total, &p.Unit, &p.LockersWaiting, &p.DurationSeconds, &p.Query); err != nil {
+			return nil, err
+		}
+		if p.Done != nil && p.Total != nil && *p.Total > 0 {
+			pct := float64(*p.Done) / float64(*p.Total) * 100
+			p.PctDone = &pct
+		}
+		results = append(results, p)
+	}
+	return results, rows.Err()
+}
+
+// SLRUStats is one pg_stat_slru row: a simple-LRU cache of transaction metadata. Reads
+// mean the cache missed and the page came from disk.
+type SLRUStats struct {
+	Name        string
+	BlksZeroed  int64
+	BlksHit     int64
+	BlksRead    int64
+	BlksWritten int64
+	Flushes     int64
+	Truncates   int64
+	HitPct      *float64
+	StatsReset  *time.Time
+}
+
+// SubtransactionBackend is a session with subtransactions open (PG16+): past 64 its
+// subxid cache overflows and every other session has to look subtransactions up in
+// pg_subtrans, which shows up as SubtransSLRU / SubtransBuffer waits.
+type SubtransactionBackend struct {
+	PID             int
+	Username        string
+	ApplicationName string
+	State           string
+	SubxactCount    int
+	Overflowed      bool
+	XactSeconds     *float64
+	Query           string
+}
+
+// SLRUReport combines pg_stat_slru with the sessions holding subtransactions.
+type SLRUReport struct {
+	Caches                 []SLRUStats
+	SubtransactionBackends []SubtransactionBackend // nil before PG16
+	Warnings               []string
+}
+
+// FetchSLRU reads pg_stat_slru and, on PG16+, the sessions with open subtransactions.
+func FetchSLRU(ctx context.Context, db *sql.DB) (SLRUReport, error) {
+	report := SLRUReport{Caches: []SLRUStats{}}
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, blks_zeroed, blks_hit, blks_read, blks_written, flushes, truncates, stats_reset
+		FROM pg_stat_slru
+		ORDER BY blks_read DESC, name`)
+	if err != nil {
+		return report, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c SLRUStats
+		if err := rows.Scan(&c.Name, &c.BlksZeroed, &c.BlksHit, &c.BlksRead, &c.BlksWritten, &c.Flushes,
+			&c.Truncates, &c.StatsReset); err != nil {
+			return report, err
+		}
+		if total := c.BlksHit + c.BlksRead; total > 0 {
+			pct := float64(c.BlksHit) / float64(total) * 100
+			c.HitPct = &pct
+		}
+		report.Caches = append(report.Caches, c)
+	}
+	if err := rows.Err(); err != nil {
+		return report, err
+	}
+	// pg_stat_get_backend_subxact() was added in PG16.
+	if pgMajorVersion() < 16 {
+		report.Warnings = append(report.Warnings, "per-session subtransaction counts need PostgreSQL 16 (pg_stat_get_backend_subxact)")
+		return report, nil
+	}
+	subRows, err := db.QueryContext(ctx, `
+		SELECT a.pid, COALESCE(a.usename, ''), COALESCE(a.application_name, ''), COALESCE(a.state, ''),
+		       s.subxact_count, s.subxact_overflowed,
+		       EXTRACT(EPOCH FROM now() - a.xact_start)::float8, COALESCE(a.query, '')
+		FROM pg_stat_get_backend_idset() AS backend(id)
+		JOIN pg_stat_activity a ON a.pid = pg_stat_get_backend_pid(backend.id)
+		CROSS JOIN LATERAL pg_stat_get_backend_subxact(backend.id) s
+		WHERE s.subxact_count > 0 OR s.subxact_overflowed
+		ORDER BY s.subxact_overflowed DESC, s.subxact_count DESC`)
+	if err != nil {
+		report.Warnings = append(report.Warnings, "subtransactions: "+err.Error())
+		return report, nil
+	}
+	defer subRows.Close()
+	report.SubtransactionBackends = []SubtransactionBackend{}
+	for subRows.Next() {
+		var b SubtransactionBackend
+		if err := subRows.Scan(&b.PID, &b.Username, &b.ApplicationName, &b.State, &b.SubxactCount, &b.Overflowed,
+			&b.XactSeconds, &b.Query); err != nil {
+			return report, err
+		}
+		report.SubtransactionBackends = append(report.SubtransactionBackends, b)
+	}
+	return report, subRows.Err()
 }

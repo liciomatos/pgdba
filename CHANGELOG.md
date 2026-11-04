@@ -6,6 +6,23 @@ All notable changes to pgdba-cli are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`check_operation_progress` MCP tool**: running CREATE INDEX / REINDEX (with the
+  transactions a CONCURRENTLY build waits for), ANALYZE, CLUSTER / VACUUM FULL, COPY
+  (PG14+) and base backups, with phase and % done; a `waiting for …` phase is a warning.
+- **`check_slru` MCP tool**: `pg_stat_slru` hits and disk reads per transaction-metadata
+  cache and, on PG16+, the sessions with open subtransactions and whether their cache
+  overflowed (> 64).
+- **`check_query_load` covers every `pg_stat_statements` counter**: rows, plan time,
+  shared block hit/read/dirtied/written with hit %, block I/O time, temp blocks and
+  time, WAL records/FPI/bytes and JIT, as far as the installed extension version has
+  them. `order_by` ranks by any of them and `delta_seconds` reports only what ran in
+  that window. Warns when `track_io_timing` or `track_planning` is off.
+- **Lock chains in `check_blocked_queries` and Record Locks (`4`)**: built on
+  `pg_blocking_pids()`, so sessions queued behind another waiter (e.g. behind a pending
+  ACCESS EXCLUSIVE) are listed too, with lock mode and relation, wait time (PG14+),
+  root blocker and depth. The tool adds `root_blockers` and a `lock_table` summary
+  (counts by type and mode, usage of the shared lock table).
+- **`check_autovacuum` `order_by=analyze`** with `analyze_ratio` and `never_analyzed`.
 - **Wait events broken down by query**: each sampled wait event lists the statements
   behind it (AAS and share of the event), and `check_wait_events` adds `top_queries` —
   the statements with the most active sessions, each split by wait event, like
@@ -68,6 +85,8 @@ All notable changes to pgdba-cli are documented here. Format follows
   `trigger_ratio`, `mod_since_analyze`, size in bytes and a `status`.
 
 ### Changed
+- `check_blocked_queries` returns `{status, lock_table, root_blockers, blocked}` instead
+  of a bare list; each `blocked` row keeps its previous fields.
 - **Every MCP tool returns a `status`** (`ok` / `warning` / `critical`) per row or for
   the result, with its thresholds in the tool description and on the screen's `?` page
   (`util/status.go` is the single source for the TUI colors and the MCP). Numbers come

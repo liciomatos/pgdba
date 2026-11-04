@@ -87,7 +87,7 @@ func vacuumStatusText(isAutovacuum bool, active bool) string {
 }
 
 func CheckAutovacuum(initialModel func() tea.Model) tea.Model {
-	tables, err := FetchAutovacuum(context.Background(), config.Config.DB, NoRowLimit)
+	tables, err := FetchAutovacuum(context.Background(), config.Config.DB, NoRowLimit, "dead_tuples")
 	if err != nil {
 		return NewErrorModel(err, "Loading autovacuum monitor", initialModel)
 	}
