@@ -2907,6 +2907,12 @@ func FetchXminHorizon(ctx context.Context, db *sql.DB) (XminHorizon, error) {
 	// horizon with its XID even when it has no snapshot. Walsenders are left out of the
 	// session list because their backend_xmin is the standby's feedback, reported once
 	// under "replica". client_addr is NULL on unix sockets, so it's COALESCEd on its own.
+	// Lazy VACUUM (manual or autovacuum) is left out too: it runs with PROC_IN_VACUUM,
+	// so the server ignores its backend_xmin when computing the horizon, yet a long
+	// vacuum usually shows the oldest one and would be blamed for blocking cleanup.
+	// A row in pg_stat_progress_vacuum means exactly that phase — VACUUM FULL reports
+	// in pg_stat_progress_cluster, and the ANALYZE part of VACUUM ANALYZE (which does
+	// hold the horizon) in pg_stat_progress_analyze.
 	rows, err := db.QueryContext(ctx, `
 		WITH holders AS (
 			SELECT 'session' AS source, a.pid::text AS id, COALESCE(a.datname, '') AS database,
@@ -2918,6 +2924,7 @@ func FetchXminHorizon(ctx context.Context, db *sql.DB) (XminHorizon, error) {
 			WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
 			  AND a.backend_type IS DISTINCT FROM 'walsender'
 			  AND a.pid <> pg_backend_pid()
+			  AND NOT EXISTS (SELECT 1 FROM pg_stat_progress_vacuum v WHERE v.pid = a.pid)
 			UNION ALL
 			SELECT 'replica', COALESCE(NULLIF(r.application_name, ''), r.pid::text), '',
 			       COALESCE(r.usename, ''), COALESCE(r.state, ''), COALESCE(r.application_name, ''),

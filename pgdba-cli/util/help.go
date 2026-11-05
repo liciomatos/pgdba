@@ -445,8 +445,9 @@ var screenHelp = map[string]ScreenHelp{
 			"Status is relative to autovacuum_freeze_max_age: warning from 5% of it (10M XIDs at the 200M default) or a transaction open for more than an hour, critical from 25% (50M).",
 			"Fix by source: end or terminate the session (Long Running Queries, key 2); for a replica, end its long queries or turn hot_standby_feedback off; drop or advance an unused slot (key 3); COMMIT PREPARED / ROLLBACK PREPARED a forgotten prepared transaction.",
 			"Walsenders are listed once, as replica, not again as sessions. The horizon is per cluster: holders in other databases affect this one too.",
+			"Running VACUUMs (manual or autovacuum, not VACUUM FULL) aren't listed: the server ignores their xmin when computing the horizon, so cancelling one frees nothing. See them in Vacuum Progress (key V).",
 		},
-		Source: "pg_stat_activity (backend_xmin, backend_xid), pg_stat_replication (backend_xmin), pg_replication_slots (xmin, catalog_xmin), pg_prepared_xacts",
+		Source: "pg_stat_activity (backend_xmin, backend_xid), pg_stat_progress_vacuum (to leave out running VACUUMs), pg_stat_replication (backend_xmin), pg_replication_slots (xmin, catalog_xmin), pg_prepared_xacts",
 	},
 	"vacuum_progress": {
 		Title:   "Vacuum Progress (key V) — VACUUMs running right now",

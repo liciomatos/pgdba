@@ -5,6 +5,12 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Xmin Horizon (`X`) and `check_xmin_horizon`** no longer list running VACUUMs
+  (manual or autovacuum, not VACUUM FULL) as horizon holders. The server ignores their
+  xmin, but a long autovacuum often had the oldest one and was reported as the session
+  blocking cleanup, hiding the real holder.
+
 ## [0.8.0] - 2026-11-04
 
 ### Added

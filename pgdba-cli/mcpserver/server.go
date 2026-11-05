@@ -263,7 +263,7 @@ func Serve(port int) error {
 	), handleCheckServerInfo)
 
 	addTool(s, mcp.NewTool("check_xmin_horizon",
-		mcp.WithDescription("Everything holding back the xmin horizon (what keeps vacuum from removing dead rows and freezing from advancing), oldest first: sessions with an open snapshot or XID, standbys via hot_standby_feedback, replication slots (xmin/catalog_xmin) and prepared transactions. defines_horizon marks the oldest. status per holder: critical when xmin_age ≥ 25% of autovacuum_freeze_max_age, warning from 5% or a transaction open > 1 h. Empty holders = nothing holds the horizon."),
+		mcp.WithDescription("Everything holding back the xmin horizon (what keeps vacuum from removing dead rows and freezing from advancing), oldest first: sessions with an open snapshot or XID, standbys via hot_standby_feedback, replication slots (xmin/catalog_xmin) and prepared transactions. Running VACUUMs are left out: the server ignores their xmin. defines_horizon marks the oldest. status per holder: critical when xmin_age ≥ 25% of autovacuum_freeze_max_age, warning from 5% or a transaction open > 1 h. Empty holders = nothing holds the horizon."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
 	), handleCheckXminHorizon)
