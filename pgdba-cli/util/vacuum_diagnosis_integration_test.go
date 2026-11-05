@@ -3,7 +3,6 @@ package util
 import (
 	"context"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -78,17 +77,11 @@ func TestFetchXminHorizon_FindsEveryKindOfHolder(t *testing.T) {
 		_, _ = testDB.Exec(`DROP TABLE IF EXISTS xmin_prepared_t`)
 	})
 
-	// An autovacuum worker that starts meanwhile (catalog churn from other tests) holds
-	// an older xmin and rightly defines the horizon; wait for it to finish.
-	var horizon XminHorizon
-	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
-		if horizon, err = FetchXminHorizon(ctx, testDB); err != nil {
-			t.Fatal(err)
-		}
-		holder := horizon.HorizonHolder()
-		if holder == nil || !strings.HasPrefix(holder.Query, "autovacuum:") || time.Now().After(deadline) {
-			break
-		}
+	// No retry for autovacuum workers started meanwhile: a lazy VACUUM's xmin doesn't
+	// count toward the horizon, so FetchXminHorizon leaves it out.
+	horizon, err := FetchXminHorizon(ctx, testDB)
+	if err != nil {
+		t.Fatal(err)
 	}
 	sessionHolder := findHolder(horizon, XminSourceSession, strconv.Itoa(sessionPID))
 	if sessionHolder == nil {
@@ -176,6 +169,16 @@ func TestFetchVacuumProgress_SeesRunningVacuum(t *testing.T) {
 	}
 	if pgMajorVersion() >= 17 && seen.MaxDeadTupleBytes == nil || pgMajorVersion() < 17 && seen.MaxDeadTuples == nil {
 		t.Errorf("version-specific dead-tuple capacity missing on PG %d: %+v", pgMajorVersion(), seen)
+	}
+
+	// The server ignores a lazy VACUUM's xmin for the horizon, so it must not be listed
+	// as a holder (or blamed for one).
+	horizon, err := FetchXminHorizon(ctx, testDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holder := findHolder(horizon, XminSourceSession, strconv.Itoa(vacuumPID)); holder != nil {
+		t.Errorf("running VACUUM listed as an xmin holder: %+v", holder)
 	}
 }
 
