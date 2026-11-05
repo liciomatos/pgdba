@@ -5,6 +5,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-04
+
 ### Fixed
 - **Xmin Horizon (`X`) and `check_xmin_horizon`** no longer list running VACUUMs
   (manual or autovacuum, not VACUUM FULL) as horizon holders. The server ignores their
@@ -373,7 +375,8 @@ All notable changes to pgdba-cli are documented here. Format follows
 - PostgreSQL connection via URI or individual flags, with `~/.pgpass` support.
 - Cross-platform release automation (GoReleaser) for linux/darwin/windows.
 
-[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/liciomatos/pgdba/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/liciomatos/pgdba/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/liciomatos/pgdba/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/liciomatos/pgdba/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/liciomatos/pgdba/compare/v0.5.0...v0.6.0
